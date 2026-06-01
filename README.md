@@ -1,0 +1,57 @@
+# tcptrace-ng
+
+Local web UI for [tcptrace](https://github.com/blitz/tcptrace) pcap analysis, with interactive in-browser graphs.
+
+## Quickstart
+
+```bash
+# 1. Install the system dependency
+brew install tcptrace                # macOS
+# or: apt install tcptrace            # Debian/Ubuntu
+
+# 2. Install tcptrace-ng
+pip install -e ".[dev]"
+# or: uv pip install -e ".[dev]"
+
+# 3. Run it in a directory of pcaps
+cd /path/with/pcaps
+tcptrace-ng
+```
+
+A browser opens to a local NiceGUI page laid out as a top bar + sidebar + main panel. Pick a pcap in the header; the sidebar fills with that pcap's connections (filterable). Click any connection to analyze it on the spot. The main panel shows:
+
+- One tab per generated `.xpl` graph (time-sequence, throughput, RTT, owin, ssize), rendered as interactive Plotly charts with pan/zoom.
+- A collapsible "tcptrace output" section with color-coded text per connection (green = good, yellow = interesting, red = bad).
+
+Click another connection to swap the view --- already-analyzed connections render instantly from cache. The sidebar footer has a "↓ xpl zip" button that bundles every connection you've analyzed in this session, in case you still want to view them in desktop `xplot`/`jplot`.
+
+## Caching
+
+Per-pcap caches live in `.tcptrace/<pcap-name>/` next to each pcap. The header shows total cache size. **Clear cache** wipes everything; **Reanalyze** wipes just the current pcap's cache.
+
+Add `.tcptrace/` to your `.gitignore`.
+
+## CLI options
+
+```
+tcptrace-ng [DIR]
+  --port PORT          bind port (default: pick free)
+  --no-browser         don't auto-open browser
+  --timeout SECONDS    per-subprocess timeout (default: 60)
+  --debug              verbose logs
+  -V, --version
+```
+
+## Development
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+pytest -q                # unit tests
+ruff check src tests     # lint
+ruff format src tests    # format
+```
+
+## Optional dependencies
+
+For non-pcap captures (e.g., `.cap` from older tools), install the Wireshark CLI tools (`capinfos`, `editcap`). tcptrace-ng will run them automatically as a fallback.

@@ -1,0 +1,134 @@
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from tcptrace_ng.runner import (
+    AnalyzeResult,
+    ConnRow,
+    RunnerError,
+    analyze_connection,
+    list_connections,
+    parse_listing,
+    try_convert_to_pcap,
+)
+
+
+def test_parse_listing_extracts_three_rows(sample_listing):
+    rows = parse_listing(sample_listing)
+    assert len(rows) == 3
+    assert rows[0] == ConnRow(
+        n=1,
+        host_a="10.0.0.1:443",
+        host_b="10.0.0.2:51234",
+        raw_line="  1: 10.0.0.1:443 - 10.0.0.2:51234 (a2b)              42 ackpkts sent",
+    )
+    assert rows[2].n == 3
+    assert rows[2].host_a == "192.168.1.5:22"
+    assert rows[2].host_b == "192.168.1.99:60001"
+
+
+def test_parse_listing_empty_returns_empty():
+    assert parse_listing("") == []
+
+
+def test_parse_listing_ignores_non_conn_lines():
+    text = "garbage\n  1: a:1 - b:2 (x)  stats\nmore garbage\n"
+    rows = parse_listing(text)
+    assert len(rows) == 1
+    assert rows[0].n == 1
+
+
+def test_list_connections_calls_tcptrace_subprocess(sample_listing, tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 100)
+
+    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+        mock_run.return_value.stdout = sample_listing
+        mock_run.return_value.returncode = 0
+        rows = list_connections(pcap)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "tcptrace"
+        assert str(pcap) in cmd
+    assert len(rows) == 3
+
+
+def test_list_connections_raises_on_nonzero_exit(tmp_path):
+    pcap = tmp_path / "bad.pcap"
+    pcap.write_bytes(b"")
+    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "not a pcap"
+        mock_run.return_value.returncode = 1
+        with pytest.raises(RunnerError):
+            list_connections(pcap)
+
+
+def test_try_convert_to_pcap_returns_existing_if_already_pcap(tmp_path):
+    pcap = tmp_path / "good.pcap"
+    pcap.write_bytes(b"")
+    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+        mock_run.return_value.stdout = "File type:  pcap\n"
+        mock_run.return_value.returncode = 0
+        with patch("tcptrace_ng.runner.shutil.which", return_value="/usr/bin/capinfos"):
+            result = try_convert_to_pcap(pcap)
+    assert result == pcap
+
+
+def test_try_convert_to_pcap_runs_editcap_when_not_pcap(tmp_path):
+    cap = tmp_path / "weird.cap"
+    cap.write_bytes(b"")
+    converted = Path(str(cap) + ".pcap")
+
+    def fake_run(cmd, **kw):
+        from types import SimpleNamespace
+        if cmd[0] == "capinfos":
+            return SimpleNamespace(stdout="File type:  Sniffer\n", returncode=0, stderr="")
+        if cmd[0] == "editcap":
+            converted.write_bytes(b"")  # editcap "creates" the file
+            return SimpleNamespace(stdout="", returncode=0, stderr="")
+        raise AssertionError(f"unexpected {cmd}")
+
+    with (
+        patch("tcptrace_ng.runner.subprocess.run", side_effect=fake_run),
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/x"),
+    ):
+        result = try_convert_to_pcap(cap)
+    assert result == converted
+
+
+def test_try_convert_raises_when_capinfos_missing(tmp_path):
+    cap = tmp_path / "x.cap"
+    cap.write_bytes(b"")
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value=None),
+        pytest.raises(RunnerError, match="capinfos"),
+    ):
+        try_convert_to_pcap(cap)
+
+
+def test_analyze_connection_invokes_correct_tcptrace_command(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "conn-4--a2b_tsg.xpl").write_text("go\n")
+
+    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+        mock_run.return_value.stdout = "long detail text"
+        mock_run.return_value.stderr = ""
+        mock_run.return_value.returncode = 0
+        result = analyze_connection(pcap, conn_n=4, output_dir=out_dir)
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "tcptrace"
+    assert "-l" in cmd
+    assert "-o4" in cmd
+    assert "-G" in cmd
+    assert "--output_prefix=conn-4--" in cmd
+    assert str(pcap) in cmd
+    assert mock_run.call_args.kwargs.get("cwd") == out_dir
+
+    assert isinstance(result, AnalyzeResult)
+    assert result.details_text == "long detail text"
+    assert result.xpl_files == [out_dir / "conn-4--a2b_tsg.xpl"]

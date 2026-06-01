@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor
+.vscode/
+.idea/
+
+# tcptrace-ng runtime cache (created next to pcaps)
+.tcptrace/
+
+# Captures — don't commit; this is a tool, not a dataset
+*.pcap
+*.pcapng
+*.cap
+
+# Other
+CLAUDE.md
+NEXT_SESSION.md
+.git.orig/
+docs/
