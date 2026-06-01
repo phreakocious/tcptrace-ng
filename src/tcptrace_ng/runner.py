@@ -48,17 +48,29 @@ def parse_listing(text: str) -> list[ConnRow]:
     return rows
 
 
-def list_connections(pcap: Path, timeout: float = 60.0) -> list[ConnRow]:
-    """Run `tcptrace <pcap>` and parse the listing.
+def list_connections(
+    pcap: Path,
+    timeout: float = 60.0,
+    no_dns: bool = False,
+) -> list[ConnRow]:
+    """Run `tcptrace [-n] <pcap>` and parse the listing.
+
+    `no_dns=True` adds `-n` so tcptrace prints raw IPs and port numbers instead
+    of resolving them — much faster on pcaps with many distinct endpoints.
 
     Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
     """
     if shutil.which("tcptrace") is None:
         raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
 
+    argv = ["tcptrace"]
+    if no_dns:
+        argv.append("-n")
+    argv.append(str(pcap))
+
     try:
         result = subprocess.run(
-            ["tcptrace", str(pcap)],
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -84,11 +96,22 @@ def analyze_connection(
     conn_n: int,
     output_dir: Path,
     timeout: float = 60.0,
+    *,
+    no_dns: bool = False,
+    with_rtt: bool = False,
+    with_warnings: bool = False,
+    zero_x_axis: bool = False,
 ) -> AnalyzeResult:
     """Run tcptrace for one connection: emit details text and .xpl files.
 
     `output_dir` is the working dir for tcptrace (where .xpl files land).
     Returns the stdout (for details.txt) and the list of produced .xpl files.
+
+    Flags (all default-off):
+      no_dns        — `-n`, skip hostname/port-name resolution
+      with_rtt      — `-r`, include RTT statistics in long output
+      with_warnings — `-w`, include warning messages (bad checksums, etc.)
+      zero_x_axis   — `-zx`, plot time axis from 0 instead of wallclock
     """
     if shutil.which("tcptrace") is None:
         raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
@@ -96,9 +119,20 @@ def analyze_connection(
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"conn-{conn_n}--"
 
+    argv = ["tcptrace", "-l", f"-o{conn_n}", "-G"]
+    if no_dns:
+        argv.append("-n")
+    if with_rtt:
+        argv.append("-r")
+    if with_warnings:
+        argv.append("-w")
+    if zero_x_axis:
+        argv.append("-zx")
+    argv += [f"--output_prefix={prefix}", str(pcap)]
+
     try:
         result = subprocess.run(
-            ["tcptrace", "-l", f"-o{conn_n}", "-G", f"--output_prefix={prefix}", str(pcap)],
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -115,20 +149,39 @@ def analyze_connection(
     return AnalyzeResult(details_text=result.stdout, xpl_files=xpls)
 
 
-def analyze_all(pcap: Path, timeout: float = 60.0) -> list[ConnStats]:
+def analyze_all(
+    pcap: Path,
+    timeout: float = 60.0,
+    *,
+    no_dns: bool = False,
+    with_rtt: bool = False,
+    with_warnings: bool = False,
+) -> list[ConnStats]:
     """Run `tcptrace -l <pcap>` once and parse stats for every connection.
 
     No `-o<n>` scope, no `-G` (no xpls). One subprocess call yields the long
     per-connection block for every connection in the pcap.
+
+    Flags (all default-off): `no_dns` → `-n`; `with_rtt` → `-r`;
+    `with_warnings` → `-w`.
 
     Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
     """
     if shutil.which("tcptrace") is None:
         raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
 
+    argv = ["tcptrace", "-l"]
+    if no_dns:
+        argv.append("-n")
+    if with_rtt:
+        argv.append("-r")
+    if with_warnings:
+        argv.append("-w")
+    argv.append(str(pcap))
+
     try:
         result = subprocess.run(
-            ["tcptrace", "-l", str(pcap)],
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,

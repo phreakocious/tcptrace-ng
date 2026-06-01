@@ -160,7 +160,14 @@ body, .nicegui-content, .q-page, .q-layout {
 .tcptrace-legend .swatch {
     display: inline-block;
     margin-right: 12px;
+    font-weight: 600;
 }
+/* Legend swatches put the class on the same element as .swatch, so we need
+   a compound selector — the .tcptrace-output descendant rule below only
+   styles spans nested inside <pre class="tcptrace-output">. */
+.tcptrace-legend .swatch.good { color: #00ff00; }
+.tcptrace-legend .swatch.look { color: #ffff00; }
+.tcptrace-legend .swatch.bad  { color: #ff5555; }
 
 pre.tcptrace-output {
     font-family: Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono",
@@ -173,9 +180,27 @@ pre.tcptrace-output {
     white-space: pre;
 }
 .tcptrace-output .good   { color: #00ff00; }
-.tcptrace-output .bad    { color: #ff0000; }
+.tcptrace-output .bad    { color: #ff5555; }
 .tcptrace-output .look   { color: #ffff00; }
 .tcptrace-output .normal { color: #ddd; }
+
+/* ---- raw-output dialog ---- */
+.tcptrace-output-card {
+    background: #050505 !important;
+    color: #ddd !important;
+    max-width: 1100px;
+    width: 95vw;
+    max-height: 85vh;
+    overflow: auto;
+}
+.tcptrace-rawout-btn {
+    color: #888 !important;
+    text-transform: none !important;
+    letter-spacing: 0;
+    font-size: 11px;
+    padding: 0 8px !important;
+    min-height: 22px !important;
+}
 
 /* ---- chip filter strip ---- */
 .tcptrace-chip-row {

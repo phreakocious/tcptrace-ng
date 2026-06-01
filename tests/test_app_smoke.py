@@ -107,10 +107,10 @@ async def test_conn_click_renders_classified_text(user: User, tmp_path, monkeypa
             if app_mod.state.selected_conn == 1 and 1 in app_mod.state.analyses:
                 break
 
-        # Open the (default-collapsed) tcptrace output expansion to make
-        # the classified text visible to the user fixture.
-        expansion = next(iter(user.find(kind=_ui.expansion).elements))
-        expansion.value = True
+        # Open the raw-output dialog via its sticky-header button so the
+        # classified text becomes visible to the user fixture (the dialog is
+        # in the DOM from initial render but Quasar hides it until opened).
+        user.find("tcptrace output", kind=_ui.button).click()
 
         await user.should_see("complete conn: yes")
         await user.should_see("rexmt data pkts: 3")
@@ -231,6 +231,54 @@ def test_build_xpl_zip_packs_xpl_files(tmp_path):
         assert "conn-1/conn-1--a2b_tsg.xpl" in zf.namelist()
 
 
+async def test_toggling_no_dns_reanalyzes_with_n_flag(user: User, tmp_path, monkeypatch):
+    """Flipping the 'no DNS' checkbox re-runs analyze_all with no_dns=True so
+    tcptrace's own `-n` flag is propagated through."""
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+
+    app_mod = importlib.import_module("tcptrace_ng.app")
+
+    calls: list[bool] = []
+
+    def fake_analyze_all(pcap, timeout=60.0, *, no_dns=False, **_kw):
+        calls.append(no_dns)
+        raise RunnerError("stub")  # bail to fallback path; we only care about kwargs
+
+    def fake_list(pcap, timeout=60.0, **_kw):
+        return [ConnRow(n=1, host_a="a:1", host_b="b:2", raw_line="  1: a:1 - b:2 (a2b)")]
+
+    with (
+        patch.object(app_mod, "analyze_all", side_effect=fake_analyze_all),
+        patch.object(app_mod, "list_connections", side_effect=fake_list),
+    ):
+        app_mod.build_page()
+        await user.open("/")
+
+        select = _select_element(user)
+        select.set_value(str(pcap))
+        await user.should_see("a:1")
+        assert calls == [False]  # first analyze: no_dns default off
+
+        # Find the "no DNS" checkbox via its label and flip it.
+        no_dns = next(
+            c for c in user.find(kind=_ui.checkbox).elements if c.text == "no DNS"
+        )
+        no_dns.set_value(True)
+        # Allow the async analyze handler (scheduled off the value-change event)
+        # to flush before asserting.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if len(calls) >= 2:
+                break
+        # Second analyze ran with no_dns=True.
+        assert len(calls) >= 2, f"expected re-analyze on toggle, got calls={calls}"
+        assert calls[-1] is True
+        # And the in-memory state reflects the toggle.
+        assert app_mod.state.no_dns is True
+
+
 async def test_pcap_switch_clears_analysis_state(user: User, tmp_path, monkeypatch):
     """Switching pcaps clears in-memory analyses, selection, and listing."""
     pcap_a = tmp_path / "a.pcap"
@@ -244,7 +292,7 @@ async def test_pcap_switch_clears_analysis_state(user: User, tmp_path, monkeypat
     rows_a = [ConnRow(n=1, host_a="a:1", host_b="b:2", raw_line="  1: a:1 - b:2 (a2b)")]
     rows_b = [ConnRow(n=9, host_a="x:1", host_b="y:2", raw_line="  9: x:1 - y:2 (a2b)")]
 
-    def fake_list(pcap, timeout=60.0):
+    def fake_list(pcap, timeout=60.0, **_kw):
         return rows_a if pcap.name == "a.pcap" else rows_b
 
     with (
@@ -282,13 +330,13 @@ async def test_on_pick_falls_back_to_pcap_conversion(user: User, tmp_path, monke
 
     call_log: list[str] = []
 
-    def fake_list(pcap, timeout=60.0):
+    def fake_list(pcap, timeout=60.0, **_kw):
         call_log.append(f"list:{pcap.name}")
         if pcap == cap:
             raise RunnerError("not a pcap")
         return converted_rows
 
-    def fake_convert(pcap, timeout=60.0):
+    def fake_convert(pcap, timeout=60.0, **_kw):
         call_log.append(f"convert:{pcap.name}")
         converted.write_bytes(b"")
         return converted
@@ -320,10 +368,10 @@ async def test_on_pick_surfaces_error_when_conversion_also_fails(user: User, tmp
 
     app_mod = importlib.import_module("tcptrace_ng.app")
 
-    def fake_list(pcap, timeout=60.0):
+    def fake_list(pcap, timeout=60.0, **_kw):
         raise RunnerError("not a pcap")
 
-    def fake_convert(pcap, timeout=60.0):
+    def fake_convert(pcap, timeout=60.0, **_kw):
         raise RunnerError("editcap missing")
 
     with (

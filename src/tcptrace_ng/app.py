@@ -18,6 +18,7 @@ import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from nicegui import run, ui
 
@@ -127,6 +128,13 @@ class _State:
         self.analyses: dict[int, AnalyzeResult] = {}
         self.timeout: float = 60.0
         self.debug: bool = False
+        # tcptrace command-line flag toggles. All default-off (matches the
+        # stock tcptrace default of resolving names + no extra long-output
+        # sections + wallclock graph axes).
+        self.no_dns: bool = False
+        self.with_rtt: bool = False
+        self.with_warnings: bool = False
+        self.zero_x_axis: bool = False
 
 
 state = _State()
@@ -134,6 +142,23 @@ state = _State()
 
 def _escape_html(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _cache_version() -> str:
+    """Compose the cache-version key from `__version__` plus any active tcptrace
+    flag toggles. Toggling a flag changes the key, so `invalidate_if_stale_version`
+    wipes the previous cache automatically — different flag sets yield different
+    tcptrace output and can't share artifacts."""
+    parts = [__version__]
+    if state.no_dns:
+        parts.append("n")
+    if state.with_rtt:
+        parts.append("r")
+    if state.with_warnings:
+        parts.append("w")
+    if state.zero_x_axis:
+        parts.append("zx")
+    return "+".join(parts)
 
 
 def _format_size(n: int) -> str:
@@ -272,6 +297,27 @@ def build_page() -> None:
                 .props("dense dark outlined options-dense")
                 .classes("min-w-[280px]")
             )
+            with ui.row().classes("items-center gap-2 tcptrace-flag-strip"):
+                no_dns_check = (
+                    ui.checkbox("no DNS", value=state.no_dns)
+                    .props("dense dark")
+                    .tooltip("-n: skip hostname / port-name resolution (much faster)")
+                )
+                rtt_check = (
+                    ui.checkbox("RTT", value=state.with_rtt)
+                    .props("dense dark")
+                    .tooltip("-r: include RTT statistics in the long output")
+                )
+                warn_check = (
+                    ui.checkbox("warn", value=state.with_warnings)
+                    .props("dense dark")
+                    .tooltip("-w: include tcptrace warning messages")
+                )
+                zerox_check = (
+                    ui.checkbox("0-axis", value=state.zero_x_axis)
+                    .props("dense dark")
+                    .tooltip("-zx: plot graph time axis from 0 instead of wallclock")
+                )
             ui.space()
             cache_label = ui.label().classes("tcptrace-cache-label mr-2")
             clear_btn = ui.button("Clear cache").props("flat dense no-caps color=grey-5")
@@ -391,8 +437,19 @@ def build_page() -> None:
                         fwd_label, bwd_label = _direction_labels(row)
                         fwd_ctx, bwd_ctx = row.fwd_ctx, row.bwd_ctx
                 groups, tabs, default_tab = [], None, ""
+                output_dialog = (
+                    _build_output_dialog(state.analyses[n])
+                    if n in state.analyses
+                    else None
+                )
                 with ui.column().classes("w-full gap-0 tcptrace-sticky-head"):
-                    ui.label(title_main).classes("tcptrace-title")
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        ui.label(title_main).classes("tcptrace-title")
+                        ui.space()
+                        if output_dialog is not None:
+                            ui.button(
+                                "tcptrace output", on_click=output_dialog.open
+                            ).props("flat dense").classes("tcptrace-rawout-btn")
                     if subtitle:
                         ui.label(subtitle).classes("tcptrace-subtitle")
                     if fwd_ctx:
@@ -447,28 +504,35 @@ def build_page() -> None:
             else:
                 ui.label("no graphs available").classes("tcptrace-empty w-full")
 
-            with ui.expansion("tcptrace output", value=False).classes("w-full tcptrace-expansion"):
-                ui.html(
-                    '<div class="tcptrace-legend">'
-                    '<span class="swatch"><span class="tcptrace-output good">'
-                    "GOOD</span></span>"
-                    '<span class="swatch"><span class="tcptrace-output look">'
-                    "INTERESTING</span></span>"
-                    '<span class="swatch"><span class="tcptrace-output bad">'
-                    "BAD</span></span>"
-                    "</div>"
+        def _build_output_dialog(result: AnalyzeResult) -> ui.dialog:
+            """Color-coded raw tcptrace output in a centered modal — opened
+            from the sticky-header button, dismissed by click-outside or ESC."""
+            legend_html = (
+                '<div class="tcptrace-legend">'
+                '<span class="swatch good">GOOD</span>'
+                '<span class="swatch look">INTERESTING</span>'
+                '<span class="swatch bad">BAD</span>'
+                "</div>"
+            )
+            html_lines: list[str] = []
+            for line in result.details_text.splitlines():
+                cls = classify(line)
+                if cls is None:
+                    if not state.debug:
+                        continue
+                    cls = Class.NORMAL
+                html_lines.append(
+                    f'<span class="{cls.value}">{_escape_html(line)}</span>'
                 )
-                html_lines: list[str] = []
-                for line in result.details_text.splitlines():
-                    cls = classify(line)
-                    if cls is None:
-                        if not state.debug:
-                            continue
-                        cls = Class.NORMAL
-                    css = cls.value
-                    html_lines.append(f'<span class="{css}">{_escape_html(line)}</span>')
-                pre_html = '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
+            pre_html = (
+                '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
+            )
+
+            dialog = ui.dialog()
+            with dialog, ui.card().classes("tcptrace-output-card p-0"):
+                ui.html(legend_html)
                 ui.html(pre_html)
+            return dialog
 
         def _try_parse(xpl: Path) -> tuple[XplPlot | None, str | None]:
             """Single try/except wrapper around parse_xpl. Returns (plot, None)
@@ -615,14 +679,14 @@ def build_page() -> None:
                 is_fresh(
                     details_path,
                     state.selected_pcap,
-                    __version__,
+                    _cache_version(),
                     layout.version_file,
                 )
                 and all(
                     is_fresh(
                         x,
                         state.selected_pcap,
-                        __version__,
+                        _cache_version(),
                         layout.version_file,
                     )
                     for x in cached_xpls
@@ -642,6 +706,10 @@ def build_page() -> None:
                         n,
                         layout.conn_dir(n),
                         state.timeout,
+                        no_dns=state.no_dns,
+                        with_rtt=state.with_rtt,
+                        with_warnings=state.with_warnings,
+                        zero_x_axis=state.zero_x_axis,
                     )
                 except Exception as exc:
                     ui.notify(f"conn {n} failed: {exc}", type="negative")
@@ -674,10 +742,10 @@ def build_page() -> None:
             if state.selected_pcap is None:
                 return
 
-            invalidate_if_stale_version(state.selected_pcap, __version__)
+            invalidate_if_stale_version(state.selected_pcap, _cache_version())
 
             layout = CacheLayout(state.selected_pcap)
-            cached = load_stats(layout, __version__)
+            cached = load_stats(layout, _cache_version())
             if cached is not None:
                 state.stats = cached
                 render_sidebar()
@@ -686,13 +754,23 @@ def build_page() -> None:
             state.analyzing = True
             render_sidebar()
             try:
-                stats = await run.io_bound(analyze_all, state.selected_pcap, state.timeout)
+                stats = await run.io_bound(
+                    analyze_all,
+                    state.selected_pcap,
+                    state.timeout,
+                    no_dns=state.no_dns,
+                    with_rtt=state.with_rtt,
+                    with_warnings=state.with_warnings,
+                )
             except RunnerError as exc:
                 # Fall back to cheap listing (preserves today's convert-to-pcap retry).
                 fallback_ok = False
                 try:
                     state.stats = await run.io_bound(
-                        list_connections, state.selected_pcap, state.timeout
+                        list_connections,
+                        state.selected_pcap,
+                        state.timeout,
+                        no_dns=state.no_dns,
                     )
                     fallback_ok = True
                 except RunnerError:
@@ -703,7 +781,10 @@ def build_page() -> None:
                         state.selected_pcap = converted
                         layout = CacheLayout(state.selected_pcap)
                         state.stats = await run.io_bound(
-                            list_connections, state.selected_pcap, state.timeout
+                            list_connections,
+                            state.selected_pcap,
+                            state.timeout,
+                            no_dns=state.no_dns,
                         )
                         fallback_ok = True
                     except RunnerError as exc2:
@@ -725,7 +806,7 @@ def build_page() -> None:
 
             state.stats = stats
             state.analyzing = False
-            write_version(layout, __version__)
+            write_version(layout, _cache_version())
             save_stats(layout, stats)
             render_sidebar()
 
@@ -759,12 +840,26 @@ def build_page() -> None:
                 type="positive",
             )
 
+        async def _on_flag_change(field: str, value: bool) -> None:
+            """Set the flag on state, then re-trigger the pick for the current
+            pcap so the analyze flow re-runs with the new flags. The cache key
+            changes via `_cache_version()`, so any on-disk cache from the old
+            flag set is wiped by `invalidate_if_stale_version`."""
+            setattr(state, field, bool(value))
+            if state.selected_pcap is None:
+                return
+            await _on_pcap_pick(SimpleNamespace(value=str(state.selected_pcap)))
+
         # ---------- wire events ----------
         clear_btn.on_click(_clear_all)
         reanalyze_btn.on_click(_reanalyze)
         download_btn.on_click(_download_zip)
         filter_input.on_value_change(_on_filter_change)
         pcap_select.on_value_change(_on_pcap_pick)
+        no_dns_check.on_value_change(lambda e: _on_flag_change("no_dns", e.value))
+        rtt_check.on_value_change(lambda e: _on_flag_change("with_rtt", e.value))
+        warn_check.on_value_change(lambda e: _on_flag_change("with_warnings", e.value))
+        zerox_check.on_value_change(lambda e: _on_flag_change("zero_x_axis", e.value))
         ui.timer(_PCAP_RESCAN_SECONDS, refresh_pcap_dropdown)
 
         # ---------- initial render ----------

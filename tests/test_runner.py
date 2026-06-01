@@ -161,6 +161,87 @@ def test_analyze_all_runs_tcptrace_l_and_parses(tmp_path):
     assert all(isinstance(r, ConnStats) for r in rows)
 
 
+def test_list_connections_adds_n_flag_when_no_dns_true(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.returncode = 0
+        list_connections(pcap, no_dns=True)
+
+    cmd = mock_run.call_args[0][0]
+    assert "-n" in cmd
+    assert cmd.index("-n") < cmd.index(str(pcap))  # flag before positional
+
+
+def test_list_connections_omits_n_flag_by_default(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.returncode = 0
+        list_connections(pcap)
+
+    assert "-n" not in mock_run.call_args[0][0]
+
+
+def test_analyze_all_passes_n_r_w_flags(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = fixture
+        mock_run.return_value.returncode = 0
+        analyze_all(pcap, no_dns=True, with_rtt=True, with_warnings=True)
+
+    cmd = mock_run.call_args[0][0]
+    assert "-n" in cmd
+    assert "-r" in cmd
+    assert "-w" in cmd
+    # The pcap path is the final positional; flags come before it.
+    assert cmd[-1] == str(pcap)
+
+
+def test_analyze_connection_passes_all_flags_including_zx(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.returncode = 0
+        analyze_connection(
+            pcap,
+            conn_n=2,
+            output_dir=out_dir,
+            no_dns=True,
+            with_rtt=True,
+            with_warnings=True,
+            zero_x_axis=True,
+        )
+
+    cmd = mock_run.call_args[0][0]
+    assert "-n" in cmd
+    assert "-r" in cmd
+    assert "-w" in cmd
+    assert "-zx" in cmd
+    # output_prefix and pcap path stay at the tail.
+    assert cmd[-2] == "--output_prefix=conn-2--"
+    assert cmd[-1] == str(pcap)
+
+
 def test_analyze_all_raises_on_nonzero_exit(tmp_path):
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"")
