@@ -2,6 +2,8 @@
 
 Local web UI for [tcptrace](https://github.com/blitz/tcptrace) pcap analysis, with interactive in-browser graphs.
 
+![tcptrace-ng UI](docs/example.png)
+
 ## Quickstart
 
 ```bash
@@ -21,7 +23,8 @@ tcptrace-ng
 A browser opens to a local NiceGUI page laid out as a top bar + sidebar + main panel. Pick a pcap in the header; the sidebar fills with that pcap's connections (filterable). Click any connection to analyze it on the spot. The main panel shows:
 
 - One tab per generated `.xpl` graph (time-sequence, throughput, RTT, owin, ssize), rendered as interactive Plotly charts with pan/zoom.
-- A collapsible "tcptrace output" section with color-coded text per connection (green = good, yellow = interesting, red = bad).
+- A **tcptrace output** button (top-right) opens the raw color-coded analysis in a modal (green = good, yellow = interesting, red = bad).
+- Header checkboxes toggle common tcptrace flags — `-n` (skip DNS), `-r` (RTT stats), `-w` (warnings), `-zx` (zero x-axis). Toggling re-runs analysis and busts the cache for that flag combo.
 
 Click another connection to swap the view --- already-analyzed connections render instantly from cache. The sidebar footer has a "↓ xpl zip" button that bundles every connection you've analyzed in this session, in case you still want to view them in desktop `xplot`/`jplot`.
 
