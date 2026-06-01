@@ -12,6 +12,7 @@ Analyzed connections stay in `state.analyses` so re-clicking is instant.
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import time
@@ -34,6 +35,7 @@ from .cache import (
     write_version,
 )
 from .classifier import Class, classify
+from .decap import DECAP_VERSION, decap_pcap, detect_encaps
 from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure
 from .runner import (
     AnalyzeResult,
@@ -117,6 +119,11 @@ class _State:
 
     def __init__(self) -> None:
         self.selected_pcap: Path | None = None
+        # The actual pcap fed to tcptrace. Equals selected_pcap unless outer
+        # tunnel encaps (Geneve/VXLAN/GRE) were detected and stripped; then
+        # it points at <cache>/decap.pcap. Always None when no pcap is picked.
+        self.effective_pcap: Path | None = None
+        self.decap_encaps: set[str] = set()
         self.stats: list[
             ConnStats | ConnRow
         ] = []  # may be ConnStats (rich) or ConnRow (basic) per pick
@@ -146,10 +153,13 @@ def _escape_html(s: str) -> str:
 
 def _cache_version() -> str:
     """Compose the cache-version key from `__version__` plus any active tcptrace
-    flag toggles. Toggling a flag changes the key, so `invalidate_if_stale_version`
-    wipes the previous cache automatically — different flag sets yield different
-    tcptrace output and can't share artifacts."""
-    parts = [__version__]
+    flag toggles plus the decap-output schema version. Toggling a flag changes
+    the key, so `invalidate_if_stale_version` wipes the previous cache
+    automatically — different flag sets yield different tcptrace output and
+    can't share artifacts. The decap version is always included so changes to
+    decap rewrite semantics invalidate every cache (including for plain pcaps
+    that didn't trigger decap)."""
+    parts = [__version__, f"d{DECAP_VERSION}"]
     if state.no_dns:
         parts.append("n")
     if state.with_rtt:
@@ -324,7 +334,10 @@ def build_page() -> None:
             reanalyze_btn = ui.button("Reanalyze").props("flat dense no-caps color=grey-5")
 
         def refresh_cache_label() -> None:
-            cache_label.set_text(f"cache: {_format_size(total_cache_size(cwd))}")
+            parts = [f"cache: {_format_size(total_cache_size(cwd))}"]
+            if state.decap_encaps:
+                parts.append(f"decap: {'+'.join(sorted(state.decap_encaps))}")
+            cache_label.set_text(" · ".join(parts))
 
         def refresh_pcap_dropdown() -> None:
             """Rescan cwd and update the dropdown so new captures (and aging
@@ -702,7 +715,7 @@ def build_page() -> None:
                 try:
                     result = await run.io_bound(
                         analyze_connection,
-                        state.selected_pcap,
+                        state.effective_pcap,
                         n,
                         layout.conn_dir(n),
                         state.timeout,
@@ -728,9 +741,53 @@ def build_page() -> None:
             state.conn_filter = e.value or ""
             render_sidebar()
 
+        async def _ensure_decapped(src: Path, layout: CacheLayout) -> Path:
+            """Detect outer encaps; if any, return path to a cached decap'd copy.
+
+            Falls back to `src` on any error so a flaky decap can't break the
+            normal analysis path. The decap output lives at
+            `<cache>/decap.pcap` next to the other cached artifacts.
+            """
+            try:
+                encaps = await run.io_bound(detect_encaps, src)
+            except Exception:
+                state.decap_encaps = set()
+                return src
+            if not encaps:
+                state.decap_encaps = set()
+                return src
+            decap_path = layout.decap_pcap
+            if is_fresh(decap_path, src, _cache_version(), layout.version_file):
+                try:
+                    meta = json.loads(layout.decap_meta.read_text())
+                    state.decap_encaps = set(meta.get("encaps", []))
+                except (OSError, json.JSONDecodeError):
+                    state.decap_encaps = encaps
+                return decap_path
+            layout.ensure_root()
+            try:
+                res = await run.io_bound(decap_pcap, src, decap_path)
+            except Exception as exc:
+                ui.notify(f"decap failed, analyzing original: {exc}", type="warning")
+                state.decap_encaps = set()
+                return src
+            layout.decap_meta.write_text(
+                json.dumps(
+                    {
+                        "encaps": sorted(res.encaps),
+                        "frames_total": res.frames_total,
+                        "frames_decapped": res.frames_decapped,
+                    }
+                )
+            )
+            state.decap_encaps = res.encaps
+            return decap_path
+
         async def _on_pcap_pick(e) -> None:
             value = e.value
             state.selected_pcap = Path(value) if value else None
+            state.effective_pcap = state.selected_pcap
+            state.decap_encaps = set()
             state.selected_conn = None
             state.stats = []
             state.analyses = {}
@@ -745,6 +802,13 @@ def build_page() -> None:
             invalidate_if_stale_version(state.selected_pcap, _cache_version())
 
             layout = CacheLayout(state.selected_pcap)
+            state.effective_pcap = await _ensure_decapped(state.selected_pcap, layout)
+            refresh_cache_label()
+            if state.decap_encaps:
+                ui.notify(
+                    f"decap'd outer {'/'.join(sorted(state.decap_encaps))}",
+                    type="info",
+                )
             cached = load_stats(layout, _cache_version())
             if cached is not None:
                 state.stats = cached
@@ -756,7 +820,7 @@ def build_page() -> None:
             try:
                 stats = await run.io_bound(
                     analyze_all,
-                    state.selected_pcap,
+                    state.effective_pcap,
                     state.timeout,
                     no_dns=state.no_dns,
                     with_rtt=state.with_rtt,
@@ -768,7 +832,7 @@ def build_page() -> None:
                 try:
                     state.stats = await run.io_bound(
                         list_connections,
-                        state.selected_pcap,
+                        state.effective_pcap,
                         state.timeout,
                         no_dns=state.no_dns,
                     )
@@ -780,9 +844,14 @@ def build_page() -> None:
                         )
                         state.selected_pcap = converted
                         layout = CacheLayout(state.selected_pcap)
+                        # Re-run encap detection against the converted pcap; a
+                        # pcapng with Geneve inside would otherwise slip past.
+                        state.effective_pcap = await _ensure_decapped(
+                            state.selected_pcap, layout
+                        )
                         state.stats = await run.io_bound(
                             list_connections,
-                            state.selected_pcap,
+                            state.effective_pcap,
                             state.timeout,
                             no_dns=state.no_dns,
                         )
@@ -810,7 +879,7 @@ def build_page() -> None:
             save_stats(layout, stats)
             render_sidebar()
 
-        def _clear_all() -> None:
+        async def _clear_all() -> None:
             import shutil as _sh
 
             root = cwd / ".tcptrace"
@@ -823,8 +892,12 @@ def build_page() -> None:
             render_main()
             render_sidebar()
             ui.notify("cache cleared", type="positive")
+            # The decap'd copy lived inside the wiped tree; re-prime the pick
+            # so effective_pcap is rebuilt before the next analysis.
+            if state.selected_pcap is not None:
+                await _on_pcap_pick(SimpleNamespace(value=str(state.selected_pcap)))
 
-        def _reanalyze() -> None:
+        async def _reanalyze() -> None:
             if state.selected_pcap is None:
                 ui.notify("no pcap selected", type="warning")
                 return
@@ -839,6 +912,7 @@ def build_page() -> None:
                 f"cache cleared for {state.selected_pcap.name}",
                 type="positive",
             )
+            await _on_pcap_pick(SimpleNamespace(value=str(state.selected_pcap)))
 
         async def _on_flag_change(field: str, value: bool) -> None:
             """Set the flag on state, then re-trigger the pick for the current

@@ -390,3 +390,72 @@ async def test_on_pick_surfaces_error_when_conversion_also_fails(user: User, tmp
 
         assert app_mod.state.stats == []
         assert app_mod.state.selected_pcap == cap
+
+
+async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypatch):
+    """A pcap with Geneve outer frames is auto-decapped; the runner gets the
+    decap'd copy, and state.decap_encaps records what was stripped."""
+    import struct
+
+    import dpkt
+
+    monkeypatch.chdir(tmp_path)
+    pcap = tmp_path / "geneve.pcap"
+
+    # Build one Geneve-wrapped frame: outer Ethernet + IPv4 + UDP/6081 +
+    # Geneve(TEB) + inner Ethernet + IPv4 + TCP.
+    inner_tcp = dpkt.tcp.TCP(sport=12345, dport=80, seq=1, ack=0, off_x2=0x50, flags=0x02)
+    inner_ip = dpkt.ip.IP(
+        src=b"\x0a\x00\x00\x01", dst=b"\x0a\x00\x00\x02",
+        p=dpkt.ip.IP_PROTO_TCP, data=bytes(inner_tcp),
+    )
+    inner_ip.len = 40
+    inner_eth = dpkt.ethernet.Ethernet(
+        src=b"\x00\x11\x22\x33\x44\x55", dst=b"\xaa\xbb\xcc\xdd\xee\xff",
+        type=0x0800, data=bytes(inner_ip),
+    )
+    geneve = struct.pack("!BBH", 0x00, 0x00, 0x6558) + b"\x00\x00\x00\x00"
+    outer_udp = dpkt.udp.UDP(sport=33333, dport=6081, data=geneve + bytes(inner_eth))
+    outer_udp.ulen = 8 + len(outer_udp.data)
+    outer_ip = dpkt.ip.IP(
+        src=b"\xc0\xa8\x01\x01", dst=b"\xc0\xa8\x01\x02",
+        p=dpkt.ip.IP_PROTO_UDP, data=bytes(outer_udp),
+    )
+    outer_ip.len = 20 + 8 + len(outer_udp.data)
+    outer_eth = dpkt.ethernet.Ethernet(
+        src=b"\x00\x00\x00\x00\x00\x01", dst=b"\x00\x00\x00\x00\x00\x02",
+        type=0x0800, data=bytes(outer_ip),
+    )
+    with pcap.open("wb") as f:
+        w = dpkt.pcap.Writer(f, linktype=1)
+        w.writepkt(bytes(outer_eth), ts=1000.0)
+
+    app_mod = importlib.import_module("tcptrace_ng.app")
+
+    seen_paths: list = []
+
+    def fake_analyze_all(p, timeout=60.0, **_kw):
+        seen_paths.append(p)
+        raise RunnerError("stub")
+
+    def fake_list(p, timeout=60.0, **_kw):
+        seen_paths.append(p)
+        return [ConnRow(n=1, host_a="a:1", host_b="b:2", raw_line="  1: a:1 - b:2 (a2b)")]
+
+    with (
+        patch.object(app_mod, "analyze_all", side_effect=fake_analyze_all),
+        patch.object(app_mod, "list_connections", side_effect=fake_list),
+    ):
+        app_mod.build_page()
+        await user.open("/")
+        select = _select_element(user)
+        select.set_value(str(pcap))
+        await user.should_see("a:1")
+
+        assert app_mod.state.decap_encaps == {"geneve"}
+        assert app_mod.state.effective_pcap != pcap
+        assert app_mod.state.effective_pcap.name == "decap.pcap"
+        # Every runner call should have been fed the decap'd copy, not the source.
+        assert seen_paths, "runner was never invoked"
+        for p in seen_paths:
+            assert p == app_mod.state.effective_pcap, f"runner got {p}, not decap path"

@@ -41,6 +41,16 @@ class CacheLayout:
     def version_file(self) -> Path:
         return self.root / "version"
 
+    @property
+    def decap_pcap(self) -> Path:
+        """Decapsulated copy of the source pcap (if outer encaps were detected)."""
+        return self.root / "decap.pcap"
+
+    @property
+    def decap_meta(self) -> Path:
+        """JSON sidecar describing what was decapped: encaps, frame counts."""
+        return self.root / "decap.json"
+
     def conn_dir(self, n: int) -> Path:
         return self.root / f"conn-{n}"
 

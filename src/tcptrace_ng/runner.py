@@ -6,6 +6,7 @@ never raw subprocess output.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,31 @@ from .stats_parser import ConnStats, parse_stats
 
 class RunnerError(RuntimeError):
     """Raised when an external tool fails or is missing."""
+
+
+_VENDORED_TCPTRACE = (
+    Path(__file__).resolve().parents[2] / "vendor" / "tcptrace" / "tcptrace"
+)
+
+
+def _resolve_tcptrace() -> str:
+    """Locate the tcptrace binary: $TCPTRACE_BIN > vendored > PATH.
+
+    The vendored copy lives at `<repo>/vendor/tcptrace/tcptrace` (a submodule
+    of github.com/blitz/tcptrace, built via `make vendor-tcptrace`). Only
+    findable when running from a source checkout — installed wheels fall back
+    to PATH.
+    """
+    if env := os.environ.get("TCPTRACE_BIN"):
+        return env
+    if _VENDORED_TCPTRACE.is_file() and os.access(_VENDORED_TCPTRACE, os.X_OK):
+        return str(_VENDORED_TCPTRACE)
+    found = shutil.which("tcptrace")
+    if found is None:
+        raise RunnerError(
+            "tcptrace not found (try: make vendor-tcptrace, or brew install tcptrace)"
+        )
+    return found
 
 
 @dataclass(frozen=True)
@@ -60,10 +86,8 @@ def list_connections(
 
     Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
     """
-    if shutil.which("tcptrace") is None:
-        raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
-
-    argv = ["tcptrace"]
+    tcptrace = _resolve_tcptrace()
+    argv = [tcptrace]
     if no_dns:
         argv.append("-n")
     argv.append(str(pcap))
@@ -113,13 +137,11 @@ def analyze_connection(
       with_warnings — `-w`, include warning messages (bad checksums, etc.)
       zero_x_axis   — `-zx`, plot time axis from 0 instead of wallclock
     """
-    if shutil.which("tcptrace") is None:
-        raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
-
+    tcptrace = _resolve_tcptrace()
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"conn-{conn_n}--"
 
-    argv = ["tcptrace", "-l", f"-o{conn_n}", "-G"]
+    argv = [tcptrace, "-l", f"-o{conn_n}", "-G"]
     if no_dns:
         argv.append("-n")
     if with_rtt:
@@ -167,10 +189,8 @@ def analyze_all(
 
     Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
     """
-    if shutil.which("tcptrace") is None:
-        raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
-
-    argv = ["tcptrace", "-l"]
+    tcptrace = _resolve_tcptrace()
+    argv = [tcptrace, "-l"]
     if no_dns:
         argv.append("-n")
     if with_rtt:

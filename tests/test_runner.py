@@ -7,6 +7,7 @@ from tcptrace_ng.runner import (
     AnalyzeResult,
     ConnRow,
     RunnerError,
+    _resolve_tcptrace,
     analyze_all,
     analyze_connection,
     list_connections,
@@ -45,7 +46,10 @@ def test_list_connections_calls_tcptrace_subprocess(sample_listing, tmp_path):
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 100)
 
-    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
         mock_run.return_value.stdout = sample_listing
         mock_run.return_value.returncode = 0
         rows = list_connections(pcap)
@@ -58,7 +62,10 @@ def test_list_connections_calls_tcptrace_subprocess(sample_listing, tmp_path):
 def test_list_connections_raises_on_nonzero_exit(tmp_path):
     pcap = tmp_path / "bad.pcap"
     pcap.write_bytes(b"")
-    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
         mock_run.return_value.stdout = ""
         mock_run.return_value.stderr = "not a pcap"
         mock_run.return_value.returncode = 1
@@ -117,7 +124,10 @@ def test_analyze_connection_invokes_correct_tcptrace_command(tmp_path):
     out_dir.mkdir()
     (out_dir / "conn-4--a2b_tsg.xpl").write_text("go\n")
 
-    with patch("tcptrace_ng.runner.subprocess.run") as mock_run:
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
         mock_run.return_value.stdout = "long detail text"
         mock_run.return_value.stderr = ""
         mock_run.return_value.returncode = 0
@@ -144,7 +154,7 @@ def test_analyze_all_runs_tcptrace_l_and_parses(tmp_path):
     fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
 
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = fixture
@@ -165,7 +175,7 @@ def test_list_connections_adds_n_flag_when_no_dns_true(tmp_path):
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"")
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = ""
@@ -181,7 +191,7 @@ def test_list_connections_omits_n_flag_by_default(tmp_path):
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"")
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = ""
@@ -196,7 +206,7 @@ def test_analyze_all_passes_n_r_w_flags(tmp_path):
     pcap.write_bytes(b"")
     fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = fixture
@@ -217,7 +227,7 @@ def test_analyze_connection_passes_all_flags_including_zx(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = ""
@@ -242,11 +252,49 @@ def test_analyze_connection_passes_all_flags_including_zx(tmp_path):
     assert cmd[-1] == str(pcap)
 
 
+def test_resolve_tcptrace_prefers_env_var(monkeypatch):
+    monkeypatch.setenv("TCPTRACE_BIN", "/custom/path/tcptrace")
+    assert _resolve_tcptrace() == "/custom/path/tcptrace"
+
+
+def test_resolve_tcptrace_uses_vendored_when_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("TCPTRACE_BIN", raising=False)
+    fake = tmp_path / "tcptrace"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    with (
+        patch("tcptrace_ng.runner._VENDORED_TCPTRACE", fake),
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/bin/tcptrace"),
+    ):
+        assert _resolve_tcptrace() == str(fake)
+
+
+def test_resolve_tcptrace_falls_back_to_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("TCPTRACE_BIN", raising=False)
+    missing = tmp_path / "nonexistent"
+    with (
+        patch("tcptrace_ng.runner._VENDORED_TCPTRACE", missing),
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/bin/tcptrace"),
+    ):
+        assert _resolve_tcptrace() == "/usr/bin/tcptrace"
+
+
+def test_resolve_tcptrace_raises_when_nothing_found(tmp_path, monkeypatch):
+    monkeypatch.delenv("TCPTRACE_BIN", raising=False)
+    missing = tmp_path / "nonexistent"
+    with (
+        patch("tcptrace_ng.runner._VENDORED_TCPTRACE", missing),
+        patch("tcptrace_ng.runner.shutil.which", return_value=None),
+        pytest.raises(RunnerError, match="tcptrace not found"),
+    ):
+        _resolve_tcptrace()
+
+
 def test_analyze_all_raises_on_nonzero_exit(tmp_path):
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"")
     with (
-        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
         patch("tcptrace_ng.runner.subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = ""

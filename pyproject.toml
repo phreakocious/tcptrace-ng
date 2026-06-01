@@ -9,6 +9,7 @@ authors = [{ name = "phreakocious" }]
 dependencies = [
     "nicegui>=3.12.1",
     "plotly>=5.20",
+    "dpkt>=1.9",
 ]
 
 [project.optional-dependencies]

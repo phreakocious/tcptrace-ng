@@ -26,6 +26,12 @@ A browser opens to a local NiceGUI page laid out as a top bar + sidebar + main p
 - A **tcptrace output** button (top-right) opens the raw color-coded analysis in a modal (green = good, yellow = interesting, red = bad).
 - Header checkboxes toggle common tcptrace flags — `-n` (skip DNS), `-r` (RTT stats), `-w` (warnings), `-zx` (zero x-axis). Toggling re-runs analysis and busts the cache for that flag combo.
 
+### Tunnel decapsulation
+
+tcptrace doesn't know about modern overlay encapsulations, so any flow wrapped in **Geneve** (UDP/6081), **VXLAN** (UDP/4789), or **GRE** (IP protocol 47) is invisible to it. tcptrace-ng auto-detects these in the first ~200 frames; if any are present, it rewrites the pcap once (stripping outer headers) and feeds the decapsulated copy to tcptrace. The decap'd pcap is cached at `.tcptrace/<pcap>/decap.pcap`. The header shows `decap: geneve` (or `vxlan+gre`, etc.) when a decap pass ran.
+
+Bare-IP inners (common with GRE) get a synthetic Ethernet header so the output stays DLT_EN10MB. IPv6 extension headers (HBH/routing/destination/fragment) are already handled natively by tcptrace's `ipv6.c`.
+
 Click another connection to swap the view --- already-analyzed connections render instantly from cache. The sidebar footer has a "↓ xpl zip" button that bundles every connection you've analyzed in this session, in case you still want to view them in desktop `xplot`/`jplot`.
 
 ## Caching
