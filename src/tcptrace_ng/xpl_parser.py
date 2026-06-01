@@ -123,20 +123,37 @@ _HEADER_KEYS = {"title", "xlabel", "ylabel", "xunits", "yunits"}
 _TIMEVAL_HEADS = {"timeval", "unsigned", "signed"}
 
 _COLORS = {
-    "white", "red", "green", "yellow", "blue", "magenta",
-    "cyan", "orange", "purple", "pink", "black",
+    "white",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "orange",
+    "purple",
+    "pink",
+    "black",
 }
 
 _LINE_LIKE: dict[str, type] = {"line": Line, "dline": DLine, "box": Box, "dbox": DBox}
 _POINT_LIKE: dict[str, type] = {"dot": Dot, "diamond": Diamond}
 
 _ARROW_DIRECTIONS: dict[str, Direction] = {
-    "uarrow": "up", "darrow": "down", "larrow": "left", "rarrow": "right",
+    "uarrow": "up",
+    "darrow": "down",
+    "larrow": "left",
+    "rarrow": "right",
 }
 
 _TICK_KINDS = {
-    "utick": "u", "dtick": "d", "ltick": "l", "rtick": "r",
-    "htick": "h", "vtick": "v", "tick": "",
+    "utick": "u",
+    "dtick": "d",
+    "ltick": "l",
+    "rtick": "r",
+    "htick": "h",
+    "vtick": "v",
+    "tick": "",
 }
 
 _TEXT_VERBS = {"atext", "btext", "ltext", "rtext", "ctext", "text"}
@@ -236,9 +253,7 @@ def parse_xpl(source: str | bytes | Path) -> XplPlot:
     return plot
 
 
-def _parse_text(
-    parts: list[str], color: str, lines: list[str], i: int, n: int
-) -> Text | None:
+def _parse_text(parts: list[str], color: str, lines: list[str], i: int, n: int) -> Text | None:
     if len(parts) != 3:
         return None
     try:

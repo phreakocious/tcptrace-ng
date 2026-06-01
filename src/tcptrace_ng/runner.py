@@ -12,6 +12,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .stats_parser import ConnStats, parse_stats
+
 
 class RunnerError(RuntimeError):
     """Raised when an external tool fails or is missing."""
@@ -111,6 +113,34 @@ def analyze_connection(
 
     xpls = sorted(p for p in output_dir.glob(f"{prefix}*.xpl"))
     return AnalyzeResult(details_text=result.stdout, xpl_files=xpls)
+
+
+def analyze_all(pcap: Path, timeout: float = 60.0) -> list[ConnStats]:
+    """Run `tcptrace -l <pcap>` once and parse stats for every connection.
+
+    No `-o<n>` scope, no `-G` (no xpls). One subprocess call yields the long
+    per-connection block for every connection in the pcap.
+
+    Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
+    """
+    if shutil.which("tcptrace") is None:
+        raise RunnerError("tcptrace not found on PATH (try: brew install tcptrace)")
+
+    try:
+        result = subprocess.run(
+            ["tcptrace", "-l", str(pcap)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RunnerError(f"tcptrace timed out after {timeout}s") from e
+
+    if result.returncode != 0:
+        raise RunnerError(f"tcptrace failed (exit {result.returncode}): {result.stderr.strip()}")
+
+    return parse_stats(result.stdout)
 
 
 def try_convert_to_pcap(input_path: Path, timeout: float = 60.0) -> Path:

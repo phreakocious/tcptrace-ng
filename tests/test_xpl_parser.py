@@ -225,9 +225,7 @@ def test_text_with_trailing_color():
     # Real owin xpls emit: `ltext x y <color>\n<label>`
     src = "go\nwhite\nltext 1436561105.402114 114 red\nowin\n"
     plot = parse_xpl(src)
-    assert plot.commands == [
-        Text(color="red", x=1436561105.402114, y=114.0, label="owin")
-    ]
+    assert plot.commands == [Text(color="red", x=1436561105.402114, y=114.0, label="owin")]
     assert plot.unknown == []
 
 
@@ -294,26 +292,19 @@ go
     assert plot.ylabel == "sequence number"
 
     # First diamond uses 'orange' state.
-    assert plot.commands[0] == Diamond(
-        color="orange", x=1436561105.401428, y=2067359459.0
-    )
+    assert plot.commands[0] == Diamond(color="orange", x=1436561105.401428, y=2067359459.0)
     # Text from atext consumes the next line as label.
     text_cmds = [c for c in plot.commands if isinstance(c, Text)]
     assert len(text_cmds) == 1
     assert text_cmds[0].label == "SYN"
     # uarrow + darrow produce Arrows with up/down direction.
-    arrow_dirs = sorted(
-        c.direction for c in plot.commands if isinstance(c, Arrow)
-    )
+    arrow_dirs = sorted(c.direction for c in plot.commands if isinstance(c, Arrow))
     assert arrow_dirs == ["down", "up"]
     # Trailing 'white' on diamond/dot overrides current color (was 'white' already).
     trailing_white = [
-        c for c in plot.commands
-        if isinstance(c, (Dot, Diamond)) and c.color == "white"
+        c for c in plot.commands if isinstance(c, (Dot, Diamond)) and c.color == "white"
     ]
     assert len(trailing_white) == 2
     # Final green line picks up the green state.
-    green_lines = [
-        c for c in plot.commands if isinstance(c, Line) and c.color == "green"
-    ]
+    green_lines = [c for c in plot.commands if isinstance(c, Line) and c.color == "green"]
     assert len(green_lines) == 1

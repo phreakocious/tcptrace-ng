@@ -12,6 +12,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .classifier import Class
+from .stats_parser import ConnStats
+
 
 def pcap_cache_dir(pcap: Path) -> Path:
     """Return `.tcptrace/<pcap-name>/` next to the pcap."""
@@ -29,6 +32,10 @@ class CacheLayout:
     @property
     def listing_json(self) -> Path:
         return self.root / "listing.json"
+
+    @property
+    def stats_json(self) -> Path:
+        return self.root / "stats.json"
 
     @property
     def version_file(self) -> Path:
@@ -110,3 +117,52 @@ def total_cache_size(cwd: Path) -> int:
         if p.is_file():
             total += p.stat().st_size
     return total
+
+
+def save_stats(layout: CacheLayout, rows: list[ConnStats]) -> None:
+    """Persist ConnStats list as JSON. Only the fields the UI needs at page-load."""
+    layout.ensure_root()
+    payload = [
+        {
+            "n": r.n,
+            "host_a": r.host_a,
+            "host_b": r.host_b,
+            "client_is_a": r.client_is_a,
+            "total_bytes": r.total_bytes,
+            "total_packets": r.total_packets,
+            "duration_s": r.duration_s,
+            "rexmt_packets": r.rexmt_packets,
+            "has_rst": r.has_rst,
+            "complete_handshake": r.complete_handshake,
+            "verdict": r.verdict.value,
+            "fwd_ctx": r.fwd_ctx,
+            "bwd_ctx": r.bwd_ctx,
+        }
+        for r in rows
+    ]
+    layout.stats_json.write_text(json.dumps(payload))
+
+
+def load_stats(layout: CacheLayout, version: str) -> list[ConnStats] | None:
+    """Return ConnStats list if stats.json is fresh, else None."""
+    if not is_fresh(layout.stats_json, layout.pcap, version, layout.version_file):
+        return None
+    rows = json.loads(layout.stats_json.read_text())
+    return [
+        ConnStats(
+            n=r["n"],
+            host_a=r["host_a"],
+            host_b=r["host_b"],
+            client_is_a=r["client_is_a"],
+            total_bytes=r["total_bytes"],
+            total_packets=r["total_packets"],
+            duration_s=r["duration_s"],
+            rexmt_packets=r["rexmt_packets"],
+            has_rst=r["has_rst"],
+            complete_handshake=r["complete_handshake"],
+            verdict=Class(r["verdict"]),
+            fwd_ctx=r["fwd_ctx"],
+            bwd_ctx=r["bwd_ctx"],
+        )
+        for r in rows
+    ]

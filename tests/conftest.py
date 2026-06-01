@@ -31,7 +31,7 @@ def _build_synthetic_pcap() -> bytes:
     """Three packets forming a SYN/SYN-ACK/ACK handshake between 10.0.0.1:1234 and 10.0.0.2:5678."""
 
     # Global header: pcap magic, version, tz, sigfigs, snaplen, linktype=ethernet (1)
-    pcap_hdr = struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+    pcap_hdr = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
 
     def packet(ts_sec: int, ts_usec: int, flags: int, seq: int, ack: int) -> bytes:
         # Ethernet
@@ -40,21 +40,37 @@ def _build_synthetic_pcap() -> bytes:
         ip_len = 20 + 20  # ip + tcp, no payload
         ip = struct.pack(
             "!BBHHHBBH4s4s",
-            0x45, 0, ip_len, 0, 0, 64, 6, 0,
-            b"\x0a\x00\x00\x01", b"\x0a\x00\x00\x02",
+            0x45,
+            0,
+            ip_len,
+            0,
+            0,
+            64,
+            6,
+            0,
+            b"\x0a\x00\x00\x01",
+            b"\x0a\x00\x00\x02",
         )
         # TCP: sport, dport, seq, ack, off/reserved, flags, window, csum, urg
         tcp = struct.pack(
             "!HHIIBBHHH",
-            1234, 5678, seq, ack, (5 << 4), flags, 65535, 0, 0,
+            1234,
+            5678,
+            seq,
+            ack,
+            (5 << 4),
+            flags,
+            65535,
+            0,
+            0,
         )
         payload = eth + ip + tcp
         rec_hdr = struct.pack("<IIII", ts_sec, ts_usec, len(payload), len(payload))
         return rec_hdr + payload
 
-    p1 = packet(1000, 0, 0x02, 0, 0)              # SYN client->server
-    p2 = packet(1000, 1000, 0x12, 0, 1)           # SYN/ACK server->client (we keep src/dst simplified)
-    p3 = packet(1000, 2000, 0x10, 1, 1)           # ACK client->server
+    p1 = packet(1000, 0, 0x02, 0, 0)  # SYN client->server
+    p2 = packet(1000, 1000, 0x12, 0, 1)  # SYN/ACK server->client (we keep src/dst simplified)
+    p3 = packet(1000, 2000, 0x10, 1, 1)  # ACK client->server
 
     return pcap_hdr + p1 + p2 + p3
 

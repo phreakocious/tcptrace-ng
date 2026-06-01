@@ -1,11 +1,24 @@
-"""Dark CSS for the NiceGUI page.
+"""Dark theme — both the CSS and the Plotly palette constants.
 
 The `.tcptrace-output` block and color classes are load-bearing: they style
 the color-coded tcptrace text output that the classifier categorizes line by
 line. Everything else is chrome (header, sidebar, conn rows, expansions).
+
+The palette constants below feed the Plotly adapter so the chart grid/lines
+share their dim shade with the CSS chrome.
 """
 
 from __future__ import annotations
+
+# Plotly line color: tcptrace's saturated white/green/yellow segment lines clobber
+# the events the user is scanning for on a dark background; force them all to one
+# dim gray. Markers/arrows/dots keep their semantic colors.
+LINE_DIM_COLOR = "#555555"
+
+# Axis grid + zero-line: plotly_dark's defaults are too bright and compete with
+# data lines/markers. Both axes get the same dim shade.
+GRID_COLOR = "#1c1c1c"
+ZERO_LINE_COLOR = "#2a2a2a"
 
 DARK_CSS = """
 body, .nicegui-content, .q-page, .q-layout {
@@ -70,16 +83,30 @@ body, .nicegui-content, .q-page, .q-layout {
     color: #bbb;
     font-size: 12px;
 }
-.tcptrace-conn-analyzed .conn-host {
-    color: #e6e6e6;
+
+/* ---- conn row v2 ---- */
+.tcptrace-conn-row .conn-meta-top {
+    display: flex; align-items: center; gap: 6px;
+    font-family: Menlo, monospace; font-size: 10px;
+    color: #777; margin-bottom: 2px;
+}
+.tcptrace-conn-row .conn-badges {
+    letter-spacing: 0.04em;
+    color: #aaa;
+}
+.tcptrace-conn-row .conn-meta-bot {
+    font-family: Menlo, monospace; font-size: 10px;
+    color: #666; margin-top: 2px;
 }
 .tcptrace-conn-dot {
     width: 6px; height: 6px; border-radius: 50%;
-    background: #00ff00;
     display: inline-block;
-    margin-right: 6px;
-    opacity: 0.85;
+    opacity: 0.9;
 }
+.tcptrace-dot-good   { background: #00ff00; }
+.tcptrace-dot-look   { background: #ffff00; }
+.tcptrace-dot-bad    { background: #ff5555; }
+.tcptrace-dot-normal { background: #555; }
 
 /* ---- main panel ---- */
 .tcptrace-main {
@@ -95,6 +122,12 @@ body, .nicegui-content, .q-page, .q-layout {
     font-family: Menlo, monospace;
     font-size: 12px;
     color: #888;
+}
+.tcptrace-context {
+    font-family: Menlo, monospace;
+    font-size: 11px;
+    color: #6a6a6a;
+    line-height: 1.45;
 }
 .tcptrace-empty {
     color: #555;
@@ -144,10 +177,29 @@ pre.tcptrace-output {
 .tcptrace-output .look   { color: #ffff00; }
 .tcptrace-output .normal { color: #ddd; }
 
+/* ---- chip filter strip ---- */
+.tcptrace-chip-row {
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+.tcptrace-chip-row .q-chip {
+    font-size: 10px !important;
+    height: 20px;
+}
+
 /* ---- misc ---- */
 .tcptrace-cache-label {
     font-family: Menlo, monospace;
     font-size: 11px;
     color: #888;
+}
+
+/* ---- sticky tab/title header ---- */
+.tcptrace-sticky-head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: #000;
+    padding-bottom: 4px;
 }
 """

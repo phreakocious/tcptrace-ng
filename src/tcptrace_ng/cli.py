@@ -17,10 +17,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="tcptrace-ng",
         description="Local web UI for tcptrace pcap analysis with interactive graphs.",
     )
-    p.add_argument("dir", nargs="?", default=".", help="directory containing pcap files (default: cwd)")
+    p.add_argument(
+        "dir", nargs="?", default=".", help="directory containing pcap files (default: cwd)"
+    )
     p.add_argument("--port", type=int, default=None, help="port to bind (default: pick free)")
     p.add_argument("--no-browser", action="store_true", help="don't auto-open browser")
-    p.add_argument("--timeout", type=float, default=60.0, help="per-subprocess timeout seconds (default: 60)")
+    p.add_argument(
+        "--timeout", type=float, default=60.0, help="per-subprocess timeout seconds (default: 60)"
+    )
     p.add_argument("--debug", action="store_true", help="verbose logs, show suppressed lines")
     p.add_argument("-V", "--version", action="version", version=f"tcptrace-ng {__version__}")
     return p

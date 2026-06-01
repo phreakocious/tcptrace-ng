@@ -1,0 +1,108 @@
+1 arg remaining, starting with 'just_attack.pcap'
+Ostermann's tcptrace -- version 6.6.7 -- Thu Nov  4, 2004
+
+107 packets seen, 105 TCP packets traced
+elapsed wallclock time: 0:00:00.005549, 19282 pkts/sec analyzed
+trace file elapsed time: 0:00:00.726913
+TCP connection info:
+21 TCP connections traced:
+TCP connection 1:
+	host a:        100.99.98.101:49405
+	host b:        100.99.98.97:80
+	complete conn: no	(SYNs: 2)  (FINs: 0)
+	first packet:  Fri Jul 10 15:45:05.401428 2015
+	last packet:   Fri Jul 10 15:45:05.402775 2015
+	elapsed time:  0:00:00.001347
+	total packets: 5
+	filename:      just_attack.pcap
+   a->b:			      b->a:
+     total packets:             3           total packets:             2      
+     ack pkts sent:             2           ack pkts sent:             2      
+     pure acks sent:            1           pure acks sent:            1      
+     sack pkts sent:            0           sack pkts sent:            0      
+     dsack pkts sent:           0           dsack pkts sent:           0      
+     max sack blks/ack:         0           max sack blks/ack:         0      
+     unique bytes sent:       226           unique bytes sent:         0      
+     actual data pkts:          1           actual data pkts:          0      
+     actual data bytes:       226           actual data bytes:         0      
+     rexmt data pkts:           0           rexmt data pkts:           0      
+     rexmt data bytes:          0           rexmt data bytes:          0      
+     zwnd probe pkts:           0           zwnd probe pkts:           0      
+     zwnd probe bytes:          0           zwnd probe bytes:          0      
+     outoforder pkts:           0           outoforder pkts:           0      
+     pushed data pkts:          1           pushed data pkts:          0      
+     SYN/FIN pkts sent:       1/0           SYN/FIN pkts sent:       1/0      
+     req 1323 ws/ts:          Y/N           req 1323 ws/ts:          Y/N      
+     adv wind scale:            8           adv wind scale:            7      
+     req sack:                  Y           req sack:                  Y      
+     sacks sent:                0           sacks sent:                0      
+     urgent data pkts:          0 pkts      urgent data pkts:          0 pkts 
+     urgent data bytes:         0 bytes     urgent data bytes:         0 bytes
+     mss requested:          1460 bytes     mss requested:          1460 bytes
+     max segm size:           226 bytes     max segm size:             0 bytes
+     min segm size:           226 bytes     min segm size:             0 bytes
+     avg segm size:           225 bytes     avg segm size:             0 bytes
+     max win adv:           65536 bytes     max win adv:           30336 bytes
+     min win adv:           65536 bytes     min win adv:           30336 bytes
+     zero win adv:              0 times     zero win adv:              0 times
+     avg win adv:           65536 bytes     avg win adv:           30336 bytes
+     initial window:          226 bytes     initial window:            0 bytes
+     initial window:            1 pkts      initial window:            0 pkts 
+     ttl stream length:        NA           ttl stream length:        NA      
+     missed data:              NA           missed data:              NA      
+     truncated data:            0 bytes     truncated data:            0 bytes
+     truncated packets:         0 pkts      truncated packets:         0 pkts 
+     data xmit time:        0.000 secs      data xmit time:        0.000 secs 
+     idletime max:          633.6 ms        idletime max:          633.1 ms   
+     throughput:           167780 Bps       throughput:                0 Bps  
+================================
+TCP connection 2:
+	host c:        100.99.98.101:49406
+	host d:        100.99.98.97:80
+	complete conn: no	(SYNs: 2)  (FINs: 0)
+	first packet:  Fri Jul 10 15:45:05.423806 2015
+	last packet:   Fri Jul 10 15:45:05.424580 2015
+	elapsed time:  0:00:00.000774
+	total packets: 5
+	filename:      just_attack.pcap
+   c->d:			      d->c:
+     total packets:             3           total packets:             2      
+     ack pkts sent:             2           ack pkts sent:             2      
+     pure acks sent:            1           pure acks sent:            1      
+     sack pkts sent:            0           sack pkts sent:            0      
+     dsack pkts sent:           0           dsack pkts sent:           0      
+     max sack blks/ack:         0           max sack blks/ack:         0      
+     unique bytes sent:       226           unique bytes sent:         0      
+     actual data pkts:          1           actual data pkts:          0      
+     actual data bytes:       226           actual data bytes:         0      
+     rexmt data pkts:           0           rexmt data pkts:           0      
+     rexmt data bytes:          0           rexmt data bytes:          0      
+     zwnd probe pkts:           0           zwnd probe pkts:           0      
+     zwnd probe bytes:          0           zwnd probe bytes:          0      
+     outoforder pkts:           0           outoforder pkts:           0      
+     pushed data pkts:          1           pushed data pkts:          0      
+     SYN/FIN pkts sent:       1/0           SYN/FIN pkts sent:       1/0      
+     req 1323 ws/ts:          Y/N           req 1323 ws/ts:          Y/N      
+     adv wind scale:            8           adv wind scale:            7      
+     req sack:                  Y           req sack:                  Y      
+     sacks sent:                0           sacks sent:                0      
+     urgent data pkts:          0 pkts      urgent data pkts:          0 pkts 
+     urgent data bytes:         0 bytes     urgent data bytes:         0 bytes
+     mss requested:          1460 bytes     mss requested:          1460 bytes
+     max segm size:           226 bytes     max segm size:             0 bytes
+     min segm size:           226 bytes     min segm size:             0 bytes
+     avg segm size:           225 bytes     avg segm size:             0 bytes
+     max win adv:           65536 bytes     max win adv:           30336 bytes
+     min win adv:           65536 bytes     min win adv:           30336 bytes
+     zero win adv:              0 times     zero win adv:              0 times
+     avg win adv:           65536 bytes     avg win adv:           30336 bytes
+     initial window:          226 bytes     initial window:            0 bytes
+     initial window:            1 pkts      initial window:            0 pkts 
+     ttl stream length:        NA           ttl stream length:        NA      
+     missed data:              NA           missed data:              NA      
+     truncated data:            0 bytes     truncated data:            0 bytes
+     truncated packets:         0 pkts      truncated packets:         0 pkts 
+     data xmit time:        0.000 secs      data xmit time:        0.000 secs 
+     idletime max:          611.5 ms        idletime max:          611.3 ms   
+     throughput:           291990 Bps       throughput:                0 Bps  
+================================

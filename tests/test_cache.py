@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 from tcptrace_ng.cache import (
@@ -8,11 +9,15 @@ from tcptrace_ng.cache import (
     invalidate_if_stale_version,
     is_fresh,
     load_listing,
+    load_stats,
     pcap_cache_dir,
     save_listing,
+    save_stats,
     total_cache_size,
     write_version,
 )
+from tcptrace_ng.classifier import Class
+from tcptrace_ng.stats_parser import ConnStats
 
 
 def test_pcap_cache_dir_is_relative_to_pcap(tmp_path: Path):
@@ -168,3 +173,47 @@ def test_invalidate_if_stale_version_noop_when_no_cache(tmp_path: Path):
     # No cache directory exists yet.
     assert invalidate_if_stale_version(pcap, "0.1.0") is False
     assert not (tmp_path / ".tcptrace").exists()
+
+
+def _stats() -> list[ConnStats]:
+    return [
+        ConnStats(
+            n=1,
+            host_a="1.1.1.1:1",
+            host_b="2.2.2.2:2",
+            client_is_a=True,
+            total_bytes=100,
+            total_packets=4,
+            duration_s=0.5,
+            rexmt_packets=1,
+            has_rst=False,
+            complete_handshake=True,
+            verdict=Class.LOOK,
+            fwd_ctx="MSS 1460 · ws 5",
+            bwd_ctx="MSS 1440 · ws 3",
+        ),
+    ]
+
+
+def test_save_and_load_stats_round_trip(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    layout = CacheLayout(pcap)
+    write_version(layout, "9.9.9")
+
+    original = _stats()
+    save_stats(layout, original)
+    # Touch pcap-mtime backwards so the cache is "fresh"
+    os.utime(pcap, (time.time() - 60, time.time() - 60))
+
+    loaded = load_stats(layout, "9.9.9")
+    assert loaded == original
+
+
+def test_load_stats_returns_none_when_stale_version(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    layout = CacheLayout(pcap)
+    write_version(layout, "old")
+    save_stats(layout, _stats())
+    assert load_stats(layout, "new") is None

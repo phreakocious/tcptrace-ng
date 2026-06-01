@@ -7,11 +7,13 @@ from tcptrace_ng.runner import (
     AnalyzeResult,
     ConnRow,
     RunnerError,
+    analyze_all,
     analyze_connection,
     list_connections,
     parse_listing,
     try_convert_to_pcap,
 )
+from tcptrace_ng.stats_parser import ConnStats
 
 
 def test_parse_listing_extracts_three_rows(sample_listing):
@@ -82,6 +84,7 @@ def test_try_convert_to_pcap_runs_editcap_when_not_pcap(tmp_path):
 
     def fake_run(cmd, **kw):
         from types import SimpleNamespace
+
         if cmd[0] == "capinfos":
             return SimpleNamespace(stdout="File type:  Sniffer\n", returncode=0, stderr="")
         if cmd[0] == "editcap":
@@ -132,3 +135,41 @@ def test_analyze_connection_invokes_correct_tcptrace_command(tmp_path):
     assert isinstance(result, AnalyzeResult)
     assert result.details_text == "long detail text"
     assert result.xpl_files == [out_dir / "conn-4--a2b_tsg.xpl"]
+
+
+def test_analyze_all_runs_tcptrace_l_and_parses(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+
+    fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
+
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = fixture
+        mock_run.return_value.returncode = 0
+        rows = analyze_all(pcap)
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "tcptrace"
+    assert "-l" in cmd
+    assert not any(a.startswith("-o") for a in cmd)  # no per-conn scope
+    assert "-G" not in cmd  # no xpl generation
+    assert str(pcap) in cmd
+    assert len(rows) == 2
+    assert all(isinstance(r, ConnStats) for r in rows)
+
+
+def test_analyze_all_raises_on_nonzero_exit(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    with (
+        patch("tcptrace_ng.runner.shutil.which", return_value="/usr/local/bin/tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = "boom"
+        mock_run.return_value.returncode = 1
+        with pytest.raises(RunnerError):
+            analyze_all(pcap)

@@ -1,13 +1,13 @@
 [project]
 name = "tcptrace-ng"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local web UI for tcptrace pcap analysis with interactive in-browser graphs."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "phreakocious" }]
 dependencies = [
-    "nicegui>=2.0",
+    "nicegui>=3.12.1",
     "plotly>=5.20",
 ]
 

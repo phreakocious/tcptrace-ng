@@ -11,10 +11,12 @@ Analyzed connections stay in `state.analyses` so re-clicking is instant.
 
 from __future__ import annotations
 
-import dataclasses
 import io
+import os
 import sys
+import time
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from nicegui import run, ui
@@ -25,32 +27,88 @@ from .cache import (
     clear_pcap_cache,
     invalidate_if_stale_version,
     is_fresh,
-    load_listing,
-    save_listing,
+    load_stats,
+    save_stats,
     total_cache_size,
     write_version,
 )
 from .classifier import Class, classify
-from .plotly_adapter import to_plotly_figure
+from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure
 from .runner import (
     AnalyzeResult,
     ConnRow,
     RunnerError,
+    analyze_all,
     analyze_connection,
     list_connections,
     try_convert_to_pcap,
 )
+from .stats_parser import ConnStats
 from .theme import DARK_CSS
-from .xpl_parser import parse_xpl
+from .xpl_grouper import GroupedXpl, group_xpls
+from .xpl_parser import XplPlot, parse_xpl
 
 PCAP_GLOBS = ("*.pcap", "*.pcapng", "*.cap")
 
+# How often to rescan the working directory for new/updated pcaps. The user
+# generally writes captures while the page is open; long enough to be cheap
+# (one round of stats() per pcap), short enough to feel live.
+_PCAP_RESCAN_SECONDS = 30.0
 
-def _scan_pcaps(cwd: Path) -> list[Path]:
-    found: list[Path] = []
+
+def _scan_pcaps(cwd: Path) -> list[tuple[Path, os.stat_result]]:
+    """Pcaps paired with their stat() result, sorted by mtime descending.
+
+    One stat() per pcap; the result feeds both the sort key and the
+    size/relative-time labels rendered into the dropdown.
+    """
+    found: list[tuple[Path, os.stat_result]] = []
     for pat in PCAP_GLOBS:
-        found.extend(sorted(cwd.glob(pat)))
+        for p in cwd.glob(pat):
+            found.append((p, p.stat()))
+    found.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
     return found
+
+
+def _humanize_delta(seconds: float) -> tuple[float, str]:
+    """Pick the largest sensible unit for `seconds`. Returns (value, unit-suffix).
+
+    Callers decide on precision: durations want one decimal (3.4s), relative
+    timestamps want int (3s ago). ms is sub-second only; d is for spans ≥ a day.
+    """
+    if seconds < 1:
+        return (seconds * 1000, "ms")
+    if seconds < 60:
+        return (seconds, "s")
+    if seconds < 3600:
+        return (seconds / 60, "m")
+    if seconds < 86400:
+        return (seconds / 3600, "h")
+    return (seconds / 86400, "d")
+
+
+def _format_mtime(stat_result: os.stat_result, now: float) -> str:
+    """Terse relative time, ISO-date once we're past a week.
+
+    Clamps a negative delta to zero so clock skew (NTP, dual-boot, VM snapshot)
+    doesn't surface as a nonsense `-3s ago` label.
+    """
+    delta = max(0.0, now - stat_result.st_mtime)
+    if delta >= 7 * 86400:
+        return datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).strftime("%Y-%m-%d")
+    value, unit = _humanize_delta(delta)
+    # mtime granularity for the user is seconds; sub-second deltas (clamped
+    # future-mtime, just-written file) collapse to "0s ago" rather than "0ms".
+    if unit == "ms":
+        return "0s ago"
+    return f"{int(value)}{unit} ago"
+
+
+def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[str, str]:
+    return {
+        str(p): f"{p.name}  ({_format_size(st.st_size)} · {_format_mtime(st, now)})"
+        for p, st in pcaps
+    }
 
 
 class _State:
@@ -58,9 +116,14 @@ class _State:
 
     def __init__(self) -> None:
         self.selected_pcap: Path | None = None
-        self.listing: list[ConnRow] = []
+        self.stats: list[
+            ConnStats | ConnRow
+        ] = []  # may be ConnStats (rich) or ConnRow (basic) per pick
+        self.analyzing: bool = False
         self.selected_conn: int | None = None
         self.conn_filter: str = ""
+        self.chip_filters: set[str] = set()
+        self.sort_key: str = "n"
         self.analyses: dict[int, AnalyzeResult] = {}
         self.timeout: float = 60.0
         self.debug: bool = False
@@ -83,15 +146,11 @@ def _format_size(n: int) -> str:
     return f"{n / 1024 / 1024 / 1024:.2f} GB"
 
 
-def _matches_filter(row: ConnRow, q: str) -> bool:
+def _matches_filter(row, q: str) -> bool:
     if not q:
         return True
     needle = q.lower()
-    return (
-        needle in str(row.n)
-        or needle in row.host_a.lower()
-        or needle in row.host_b.lower()
-    )
+    return needle in str(row.n) or needle in row.host_a.lower() or needle in row.host_b.lower()
 
 
 def build_xpl_zip(analyses: dict[int, AnalyzeResult]) -> bytes:
@@ -103,6 +162,93 @@ def build_xpl_zip(analyses: dict[int, AnalyzeResult]) -> bytes:
     return buf.getvalue()
 
 
+def _format_duration(s: float) -> str:
+    value, unit = _humanize_delta(s)
+    if unit == "ms":
+        return f"{value:.0f}ms"
+    return f"{value:.1f}{unit}"
+
+
+def _badges(stats: ConnStats) -> list[str]:
+    out: list[str] = []
+    if stats.rexmt_packets > 0:
+        out.append("RX")
+    if stats.has_rst:
+        out.append("RST")
+    if stats.complete_handshake:
+        out.append("FIN")
+    else:
+        out.append("INC")
+    return out
+
+
+_VERDICT_CSS = {
+    Class.GOOD: "tcptrace-dot-good",
+    Class.LOOK: "tcptrace-dot-look",
+    Class.BAD: "tcptrace-dot-bad",
+    Class.NORMAL: "tcptrace-dot-normal",
+}
+
+
+_BULK_BYTES_THRESHOLD = 100 * 1024  # 100 KB; hardcoded per spec
+
+
+def _matches_chips(row, chips: set[str]) -> bool:
+    if not chips:
+        return True
+    if not isinstance(row, ConnStats):
+        # Stats-less fallback rows never satisfy stats-based chips
+        return False
+    if "bad" in chips and row.verdict != Class.BAD:
+        return False
+    if "rst" in chips and not row.has_rst:
+        return False
+    if "rexmt" in chips and row.rexmt_packets == 0:
+        return False
+    if "incomplete" in chips and row.complete_handshake:
+        return False
+    return not ("bulk" in chips and row.total_bytes < _BULK_BYTES_THRESHOLD)
+
+
+def _sort_rows(rows: list, key: str) -> list:
+    def get(r, attr, default):
+        return getattr(r, attr, default)
+
+    if key == "n":
+        return sorted(rows, key=lambda r: get(r, "n", 0))
+    if key == "bytes":
+        return sorted(rows, key=lambda r: get(r, "total_bytes", 0), reverse=True)
+    if key == "duration":
+        return sorted(rows, key=lambda r: get(r, "duration_s", 0.0), reverse=True)
+    if key == "rexmt":
+        return sorted(rows, key=lambda r: get(r, "rexmt_packets", 0), reverse=True)
+    return rows
+
+
+_METRIC_LABELS = {
+    "tsg": "Time-sequence",
+    "tput": "Throughput",
+    "rtt": "RTT",
+    "owin": "Outstanding window",
+    "ssize": "Segment size",
+    "tline": "Timeline",
+}
+
+
+def _direction_labels(row) -> tuple[str, str]:
+    """Return (forward_label, backward_label) using client/server when known."""
+    if isinstance(row, ConnStats) and row.client_is_a is not None:
+        return (
+            ("client → server", "server → client")
+            if row.client_is_a
+            else ("server → client", "client → server")
+        )
+    return (
+        f"{row.host_a} → {row.host_b}",
+        f"{row.host_b} → {row.host_a}",
+    )
+
+
 def build_page() -> None:
     """Register the `/` route on the default NiceGUI app."""
 
@@ -112,16 +258,12 @@ def build_page() -> None:
 
         cwd = Path.cwd()
         pcaps = _scan_pcaps(cwd)
-        pcap_options: dict[str, str] = {
-            str(p): f"{p.name}  ({_format_size(p.stat().st_size)})" for p in pcaps
-        }
+        pcap_options = _pcap_options(pcaps, time.time())
 
         # =========== header ===========
-        with ui.header(elevated=False).classes(
-            "tcptrace-header items-center gap-3 px-4"
-        ):
+        with ui.header(elevated=False).classes("tcptrace-header items-center gap-3 px-4"):
             ui.label("tcptrace-ng").classes("tcptrace-brand text-base")
-            ui.label("›").classes("tcptrace-sep")
+            ui.label("›").classes("tcptrace-sep")  # noqa: RUF001 — intentional brand separator (single right-pointing angle quotation mark)
             pcap_select = (
                 ui.select(
                     options=pcap_options or {"": "no pcaps in this directory"},
@@ -132,43 +274,79 @@ def build_page() -> None:
             )
             ui.space()
             cache_label = ui.label().classes("tcptrace-cache-label mr-2")
-            clear_btn = ui.button("Clear cache").props(
-                "flat dense no-caps color=grey-5"
-            )
-            reanalyze_btn = ui.button("Reanalyze").props(
-                "flat dense no-caps color=grey-5"
-            )
+            clear_btn = ui.button("Clear cache").props("flat dense no-caps color=grey-5")
+            reanalyze_btn = ui.button("Reanalyze").props("flat dense no-caps color=grey-5")
 
         def refresh_cache_label() -> None:
             cache_label.set_text(f"cache: {_format_size(total_cache_size(cwd))}")
 
+        def refresh_pcap_dropdown() -> None:
+            """Rescan cwd and update the dropdown so new captures (and aging
+            relative-time labels) surface without a full page reload."""
+            fresh = _scan_pcaps(cwd)
+            options = _pcap_options(fresh, time.time()) or {"": "no pcaps in this directory"}
+            pcap_select.set_options(options, value=pcap_select.value)
+
         # =========== sidebar ===========
-        with ui.left_drawer(fixed=True, value=True).props(
-            "width=300 bordered"
-        ).classes("tcptrace-sidebar p-0"):
-            with ui.column().classes("w-full h-full gap-0 no-wrap"):
-                with ui.column().classes(
-                    "w-full tcptrace-sidebar-header px-3 py-2 gap-1"
-                ):
-                    conn_count_label = ui.label("").classes(
-                        "text-xs text-gray-500"
-                    )
-                    filter_input = (
-                        ui.input(placeholder="filter…")
-                        .props("dense dark borderless debounce=150")
-                        .classes("tcptrace-filter w-full")
-                    )
-                conn_list_container = ui.column().classes(
-                    "w-full flex-grow overflow-auto gap-0"
+        with (
+            ui.left_drawer(fixed=True, value=True)
+            .props("width=300 bordered")
+            .classes("tcptrace-sidebar p-0"),
+            ui.column().classes("w-full h-full gap-0 no-wrap"),
+        ):
+            with ui.column().classes("w-full tcptrace-sidebar-header px-3 py-2 gap-1"):
+                conn_count_label = ui.label("").classes("text-xs text-gray-500")
+                with ui.row().classes("tcptrace-chip-row w-full gap-1"):
+                    for key, label in [
+                        ("bad", "Bad"),
+                        ("rst", "RST"),
+                        ("rexmt", "Retransmits"),
+                        ("incomplete", "Incomplete"),
+                        ("bulk", "Bulk ≥100K"),
+                    ]:
+                        chip = ui.chip(label).props("dense outline clickable")
+
+                        def _toggle(_, k=key, c=chip):
+                            if k in state.chip_filters:
+                                state.chip_filters.discard(k)
+                            else:
+                                state.chip_filters.add(k)
+                            c.props("color=primary" if k in state.chip_filters else "color=grey-8")
+                            render_sidebar()
+
+                        chip.on("click", _toggle)
+                        chip.props("color=grey-8")
+                filter_input = (
+                    ui.input(placeholder="filter…")
+                    .props("dense dark borderless debounce=150")
+                    .classes("tcptrace-filter w-full")
                 )
-                with ui.row().classes(
-                    "w-full tcptrace-sidebar-footer px-3 py-2"
-                ):
-                    download_btn = (
-                        ui.button("↓ xpl zip").props(
-                            "flat dense no-caps color=grey-5 disable"
-                        ).classes("w-full")
+                sort_select = (
+                    ui.select(
+                        options={
+                            "n": "sort: #",
+                            "bytes": "sort: bytes ↓",
+                            "duration": "sort: duration ↓",
+                            "rexmt": "sort: retransmits ↓",
+                        },
+                        value=state.sort_key,
                     )
+                    .props("dense dark borderless options-dense")
+                    .classes("tcptrace-sort w-full")
+                )
+
+                def _on_sort_change(e):
+                    state.sort_key = e.value or "n"
+                    render_sidebar()
+
+                sort_select.on_value_change(_on_sort_change)
+            conn_list_container = ui.column().classes("w-full flex-grow overflow-auto gap-0")
+            with ui.row().classes("w-full tcptrace-sidebar-footer px-3 py-2"):
+                download_btn = (
+                    ui.button("↓ xpl zip")
+                    .props("flat dense no-caps color=grey-5 disable")
+                    .classes("w-full")
+                )
 
         # =========== main ===========
         main_container = ui.column().classes("tcptrace-main w-full gap-3")
@@ -191,82 +369,85 @@ def build_page() -> None:
             main_container.clear()
             with main_container:
                 if not pcaps:
-                    ui.label(f"no pcap files in {cwd}").classes(
-                        "tcptrace-empty text-red"
-                    )
+                    ui.label(f"no pcap files in {cwd}").classes("tcptrace-empty text-red")
                     return
                 if state.selected_pcap is None:
-                    ui.label("select a pcap from the header").classes(
+                    ui.label("select a pcap from the header").classes("tcptrace-empty w-full")
+                    return
+                if state.selected_conn is None:
+                    ui.label("click a connection on the left to analyze it").classes(
                         "tcptrace-empty w-full"
                     )
                     return
-                if state.selected_conn is None:
-                    ui.label(
-                        "click a connection on the left to analyze it"
-                    ).classes("tcptrace-empty w-full")
-                    return
                 n = state.selected_conn
-                row = next((r for r in state.listing if r.n == n), None)
-                if row is None:
-                    title_main = f"Conn {n}"
-                    subtitle = ""
-                else:
-                    title_main = f"Conn {n}"
+                row = next((r for r in state.stats if r.n == n), None)
+                title_main = f"Conn {n}"
+                subtitle = ""
+                fwd_ctx = bwd_ctx = ""
+                fwd_label = bwd_label = ""
+                if row is not None:
                     subtitle = f"{row.host_a}  ↔  {row.host_b}"
-                with ui.column().classes("w-full gap-0"):
+                    if isinstance(row, ConnStats):
+                        fwd_label, bwd_label = _direction_labels(row)
+                        fwd_ctx, bwd_ctx = row.fwd_ctx, row.bwd_ctx
+                groups, tabs, default_tab = [], None, ""
+                with ui.column().classes("w-full gap-0 tcptrace-sticky-head"):
                     ui.label(title_main).classes("tcptrace-title")
                     if subtitle:
                         ui.label(subtitle).classes("tcptrace-subtitle")
+                    if fwd_ctx:
+                        ui.label(f"{fwd_label}  {fwd_ctx}").classes("tcptrace-context")
+                    if bwd_ctx:
+                        ui.label(f"{bwd_label}  {bwd_ctx}").classes("tcptrace-context")
+                    if n in state.analyses:
+                        groups, tabs, default_tab = _render_tabs_head(state.analyses[n])
                 if n not in state.analyses:
                     with ui.row().classes("w-full items-center gap-2 mt-6"):
                         ui.spinner(size="md")
-                        ui.label(
-                            f"running tcptrace for conn {n}…"
-                        ).classes("text-gray-400")
+                        ui.label(f"running tcptrace for conn {n}…").classes("text-gray-400")
                     return
-                _render_analysis(state.analyses[n])
+                _render_analysis(state.analyses[n], groups, tabs, default_tab)
 
-        def _render_analysis(result: AnalyzeResult) -> None:
-            if result.xpl_files:
-                tab_names = [
-                    xpl.stem.split("--", 1)[-1] for xpl in result.xpl_files
-                ]
-                with ui.tabs().props(
-                    "dense dark active-color=white outside-arrows mobile-arrows"
-                ).classes("w-full") as tabs:
-                    for name in tab_names:
-                        ui.tab(name)
-                with ui.tab_panels(tabs, value=tab_names[0]).classes(
-                    "w-full"
-                ).style("background: transparent;"):
-                    for xpl, name in zip(result.xpl_files, tab_names):
-                        with ui.tab_panel(name).classes("p-0"):
-                            try:
-                                plot = parse_xpl(xpl)
-                            except Exception as exc:
-                                ui.label(
-                                    f"[unparseable graph: {xpl.name}: {exc}]"
-                                ).classes("text-red")
-                                continue
-                            if not plot.commands:
-                                ui.label(
-                                    "no data in this direction"
-                                ).classes(
-                                    "tcptrace-empty w-full"
-                                ).style("margin-top: 32px;")
-                                continue
-                            if state.debug and plot.unknown:
-                                for cmd in plot.unknown:
-                                    print(
-                                        f"[tcptrace-ng debug] unknown xpl "
-                                        f"command in {xpl.name}: {cmd}",
-                                        file=sys.stderr,
-                                    )
-                            ui.plotly(to_plotly_figure(plot)).classes("w-full")
+        def _render_tabs_head(result: AnalyzeResult) -> tuple[list[GroupedXpl], object | None, str]:
+            """Render the tab strip. Returns (groups, tabs_element, default_tab_label).
 
-            with ui.expansion("tcptrace output", value=False).classes(
-                "w-full tcptrace-expansion"
+            Returns ([], None, "") when there are no plottable groups; caller is
+            responsible for rendering an empty-state in _render_analysis.
+            """
+            groups = [g for g in group_xpls(result.xpl_files) if _group_has_data(g)]
+            if not groups:
+                return [], None, ""
+            default_metric = "tsg" if any(g.metric == "tsg" for g in groups) else groups[0].metric
+            with (
+                ui.tabs()
+                .props("dense dark active-color=white outside-arrows mobile-arrows")
+                .classes("w-full") as tabs
             ):
+                for g in groups:
+                    ui.tab(_METRIC_LABELS[g.metric])
+            return groups, tabs, _METRIC_LABELS[default_metric]
+
+        def _render_analysis(
+            result: AnalyzeResult,
+            groups: list[GroupedXpl],
+            tabs,
+            default_tab: str,
+        ) -> None:
+            row = next((r for r in state.stats if r.n == state.selected_conn), None)
+            if groups and tabs is not None:
+                fwd_label, bwd_label = _direction_labels(row) if row is not None else ("→", "←")
+                with (
+                    ui.tab_panels(tabs, value=default_tab)
+                    .classes("w-full")
+                    .style("background: transparent;")
+                ):
+                    for g in groups:
+                        with ui.tab_panel(_METRIC_LABELS[g.metric]).classes("p-0"):
+                            _render_metric_panel(g, fwd_label, bwd_label)
+            else:
+                ui.label("no graphs available").classes("tcptrace-empty w-full")
+
+            with ui.expansion("tcptrace output", value=False).classes("w-full tcptrace-expansion"):
                 ui.html(
                     '<div class="tcptrace-legend">'
                     '<span class="swatch"><span class="tcptrace-output good">'
@@ -285,15 +466,83 @@ def build_page() -> None:
                             continue
                         cls = Class.NORMAL
                     css = cls.value
-                    html_lines.append(
-                        f'<span class="{css}">{_escape_html(line)}</span>'
-                    )
-                pre_html = (
-                    '<pre class="tcptrace-output">'
-                    + "\n".join(html_lines)
-                    + "</pre>"
-                )
+                    html_lines.append(f'<span class="{css}">{_escape_html(line)}</span>')
+                pre_html = '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
                 ui.html(pre_html)
+
+        def _try_parse(xpl: Path) -> tuple[XplPlot | None, str | None]:
+            """Single try/except wrapper around parse_xpl. Returns (plot, None)
+            on success or (None, message) on failure so callers can pick their
+            own recovery (skip, render-error-label, fall back to other side)."""
+            try:
+                return parse_xpl(xpl), None
+            except Exception as exc:
+                return None, f"{xpl.name}: {exc}"
+
+        def _group_has_data(g: GroupedXpl) -> bool:
+            for xpl in (g.forward, g.backward, g.combined):
+                if xpl is None:
+                    continue
+                plot, _err = _try_parse(xpl)
+                if plot is not None and plot.commands:
+                    return True
+            return False
+
+        def _render_metric_panel(g: GroupedXpl, fwd_label: str, bwd_label: str) -> None:
+            if g.combined is not None:
+                _render_xpl(g.combined)
+                return
+            if g.forward is None and g.backward is None:
+                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
+                    "margin-top: 32px;"
+                )
+                return
+            _render_paired_xpls(g.forward, g.backward, fwd_label, bwd_label)
+
+        def _render_paired_xpls(
+            fwd: Path | None, bwd: Path | None, fwd_label: str, bwd_label: str
+        ) -> None:
+            """Render forward and backward together as a single stacked figure."""
+            fwd_plot = _try_parse(fwd)[0] if fwd is not None else None
+            bwd_plot = _try_parse(bwd)[0] if bwd is not None else None
+            # Drop empty plots so the stack collapses to a single subplot when
+            # one direction is header-only.
+            if fwd_plot is not None and not fwd_plot.commands:
+                fwd_plot = None
+            if bwd_plot is not None and not bwd_plot.commands:
+                bwd_plot = None
+            if fwd_plot is None and bwd_plot is None:
+                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
+                    "margin-top: 32px;"
+                )
+                return
+            fig = to_paired_plotly_figure(fwd_plot, bwd_plot, fwd_label, bwd_label)
+            # Stacked: each subplot needs vertical room. Scale with the viewport
+            # so a 13" laptop doesn't push the tcptrace-output below the fold
+            # and a 4K display doesn't leave a giant blank gap. 240px leaves
+            # room for the header + sticky title/context/tab strip; the floor
+            # keeps both subplots usable on small viewports.
+            ui.plotly(fig).classes("w-full").style(
+                "height: calc(100vh - 240px); min-height: 480px;"
+            )
+
+        def _render_xpl(xpl: Path) -> None:
+            plot, err = _try_parse(xpl)
+            if err is not None:
+                ui.label(f"[unparseable graph: {err}]").classes("text-red")
+                return
+            if not plot.commands:
+                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
+                    "margin-top: 32px;"
+                )
+                return
+            if state.debug and plot.unknown:
+                for cmd in plot.unknown:
+                    print(
+                        f"[tcptrace-ng debug] unknown xpl command in {xpl.name}: {cmd}",
+                        file=sys.stderr,
+                    )
+            ui.plotly(to_plotly_figure(plot)).classes("w-full")
 
         def render_sidebar() -> None:
             conn_list_container.clear()
@@ -301,42 +550,52 @@ def build_page() -> None:
                 conn_count_label.set_text("pick a pcap")
                 return
             filtered = [
-                r for r in state.listing if _matches_filter(r, state.conn_filter)
+                r
+                for r in state.stats
+                if _matches_filter(r, state.conn_filter) and _matches_chips(r, state.chip_filters)
             ]
-            total = len(state.listing)
+            filtered = _sort_rows(filtered, state.sort_key)
+            total = len(state.stats)
             shown = len(filtered)
-            if total == 0:
+            if state.analyzing:
+                conn_count_label.set_text("analyzing…")
+            elif total == 0:
                 conn_count_label.set_text("no connections")
             elif shown == total:
                 conn_count_label.set_text(f"{total} connections")
             else:
                 conn_count_label.set_text(f"{shown} of {total}")
-            with conn_list_container:
-                with ui.list().props("dense").classes("w-full"):
-                    for row in filtered:
-                        selected = state.selected_conn == row.n
-                        analyzed = row.n in state.analyses
-                        cls = "tcptrace-conn-row"
-                        if selected:
-                            cls += " tcptrace-conn-selected"
-                        if analyzed:
-                            cls += " tcptrace-conn-analyzed"
-                        item = ui.item(
-                            on_click=lambda r=row: _on_conn_click(r.n)
-                        ).classes(cls)
-                        with item, ui.item_section():
-                            dot = (
-                                '<span class="tcptrace-conn-dot"></span>'
-                                if analyzed
-                                else ""
-                            )
+            with conn_list_container, ui.list().props("dense").classes("w-full"):
+                for row in filtered:
+                    selected = state.selected_conn == row.n
+                    cls = "tcptrace-conn-row"
+                    if selected:
+                        cls += " tcptrace-conn-selected"
+                    item = ui.item(on_click=lambda r=row: _on_conn_click(r.n)).classes(cls)
+                    with item, ui.item_section():
+                        if isinstance(row, ConnStats):
+                            dot_cls = _VERDICT_CSS[row.verdict]
+                            badge_str = " ".join(_badges(row))
+                            bytes_str = _format_size(row.total_bytes)
+                            dur_str = _format_duration(row.duration_s)
+                            pkts_str = f"{row.total_packets} pkts"
                             ui.html(
-                                f'<div class="conn-num">{dot}'
-                                f"{row.n}</div>"
-                                f'<div class="conn-host">'
-                                f"{_escape_html(row.host_a)}</div>"
-                                f'<div class="conn-host">↔ '
-                                f"{_escape_html(row.host_b)}</div>"
+                                f'<div class="conn-meta-top">'
+                                f'<span class="conn-num">{row.n}</span>'
+                                f'<span class="tcptrace-conn-dot {dot_cls}"></span>'
+                                f'<span class="conn-badges">{_escape_html(badge_str)}</span>'
+                                f"</div>"
+                                f'<div class="conn-host">{_escape_html(row.host_a)}</div>'
+                                f'<div class="conn-host">↔ {_escape_html(row.host_b)}</div>'
+                                f'<div class="conn-meta-bot">'
+                                f"{bytes_str} · {dur_str} · {pkts_str}</div>"
+                            )
+                        else:
+                            # Stats-less fallback (cheap listing)
+                            ui.html(
+                                f'<div class="conn-num">{row.n}</div>'
+                                f'<div class="conn-host">{_escape_html(row.host_a)}</div>'
+                                f'<div class="conn-host">↔ {_escape_html(row.host_b)}</div>'
                             )
 
         async def _on_conn_click(n: int) -> None:
@@ -405,7 +664,7 @@ def build_page() -> None:
             value = e.value
             state.selected_pcap = Path(value) if value else None
             state.selected_conn = None
-            state.listing = []
+            state.stats = []
             state.analyses = {}
             state.conn_filter = ""
             filter_input.set_value("")
@@ -418,47 +677,56 @@ def build_page() -> None:
             invalidate_if_stale_version(state.selected_pcap, __version__)
 
             layout = CacheLayout(state.selected_pcap)
-            cached_rows = load_listing(layout, __version__)
-            if cached_rows is not None:
-                state.listing = [ConnRow(**r) for r in cached_rows]
+            cached = load_stats(layout, __version__)
+            if cached is not None:
+                state.stats = cached
                 render_sidebar()
                 return
 
+            state.analyzing = True
+            render_sidebar()
             try:
-                state.listing = await run.io_bound(
-                    list_connections, state.selected_pcap, state.timeout
-                )
+                stats = await run.io_bound(analyze_all, state.selected_pcap, state.timeout)
             except RunnerError as exc:
+                # Fall back to cheap listing (preserves today's convert-to-pcap retry).
+                fallback_ok = False
                 try:
-                    converted = await run.io_bound(
-                        try_convert_to_pcap, state.selected_pcap, state.timeout
-                    )
-                except RunnerError:
-                    ui.notify(f"tcptrace failed: {exc}", type="negative")
-                    state.listing = []
-                    render_sidebar()
-                    return
-                state.selected_pcap = converted
-                layout = CacheLayout(state.selected_pcap)
-                try:
-                    state.listing = await run.io_bound(
+                    state.stats = await run.io_bound(
                         list_connections, state.selected_pcap, state.timeout
                     )
-                except RunnerError as exc2:
-                    ui.notify(f"tcptrace failed: {exc2}", type="negative")
-                    state.listing = []
-                    render_sidebar()
-                    return
+                    fallback_ok = True
+                except RunnerError:
+                    try:
+                        converted = await run.io_bound(
+                            try_convert_to_pcap, state.selected_pcap, state.timeout
+                        )
+                        state.selected_pcap = converted
+                        layout = CacheLayout(state.selected_pcap)
+                        state.stats = await run.io_bound(
+                            list_connections, state.selected_pcap, state.timeout
+                        )
+                        fallback_ok = True
+                    except RunnerError as exc2:
+                        ui.notify(f"tcptrace failed: {exc2}", type="negative")
+                        state.stats = []
+                state.analyzing = False
+                if fallback_ok:
+                    ui.notify(
+                        f"rich stats unavailable, showing basic listing ({exc})", type="warning"
+                    )
+                render_sidebar()
+                return
             except Exception as exc:
                 ui.notify(f"tcptrace failed: {exc}", type="negative")
-                state.listing = []
+                state.stats = []
+                state.analyzing = False
                 render_sidebar()
                 return
 
+            state.stats = stats
+            state.analyzing = False
             write_version(layout, __version__)
-            save_listing(
-                layout, [dataclasses.asdict(r) for r in state.listing]
-            )
+            save_stats(layout, stats)
             render_sidebar()
 
         def _clear_all() -> None:
@@ -497,6 +765,7 @@ def build_page() -> None:
         download_btn.on_click(_download_zip)
         filter_input.on_value_change(_on_filter_change)
         pcap_select.on_value_change(_on_pcap_pick)
+        ui.timer(_PCAP_RESCAN_SECONDS, refresh_pcap_dropdown)
 
         # ---------- initial render ----------
         refresh_cache_label()

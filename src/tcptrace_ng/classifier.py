@@ -16,9 +16,7 @@ class Class(Enum):
     NORMAL = "normal"
 
 
-_SUPPRESS = re.compile(
-    r"urgent data|zwnd probe|truncated |ttl stream |initial window"
-)
+_SUPPRESS = re.compile(r"urgent data|zwnd probe|truncated |ttl stream |initial window")
 
 _GOOD_PATTERNS = [
     re.compile(r"complete conn: yes"),
