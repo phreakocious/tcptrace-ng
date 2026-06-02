@@ -422,6 +422,172 @@ def test_build_metric_figure_routes_tsg_through_to_tsg_figure(monkeypatch):
     )
 
 
+def test_build_metric_figure_routes_tput_through_throughput_synthesis(monkeypatch):
+    """When metric=='tput', _build_metric_figure synthesizes via TsgModel and
+    returns a throughput figure (not the generic xpl figure)."""
+    from pathlib import Path
+
+    from tcptrace_ng.app import _build_metric_figure
+
+    cache = Path(".tcptrace/firmware_flash.pcapng/conn-12")
+    fwd = cache / "conn-12--w2x_tsg.xpl"
+    if not fwd.exists():
+        pytest.skip("cached tsg.xpl not present")
+
+    fig = _build_metric_figure(
+        forward=fwd,
+        backward=None,
+        combined=None,
+        fwd_label="→",
+        bwd_label="←",
+        metric="tput",
+        details_text="",
+    )
+    assert fig is not None
+    # Throughput figure uses "x2" / "y2" subplots or a single axis — verify
+    # at minimum that there are traces and a layout with an x-axis.
+    assert fig.get("data") is not None
+    assert "xaxis" in fig.get("layout", {})
+    # to_throughput_figure always puts "throughput" in the figure title;
+    # the generic xpl path never does, so this catches a routing regression.
+    assert "throughput" in fig["layout"]["title"]["text"].lower()
+    # At least one trace should carry throughput-specific hover text
+    # (goodput/wire strings are only emitted by to_throughput_figure).
+    assert any(
+        "goodput" in (t.get("hovertemplate") or "").lower()
+        or "wire" in (t.get("hovertemplate") or "").lower()
+        for t in fig["data"]
+    )
+
+
+def test_build_tput_model_returns_throughput_pair(monkeypatch):
+    """_build_tput_model should return a ThroughputModelPair with at least one
+    non-None direction when fed a valid tsg.xpl."""
+    from pathlib import Path
+
+    from tcptrace_ng.app import _build_tput_model
+    from tcptrace_ng.throughput import ThroughputModelPair
+
+    cache = Path(".tcptrace/firmware_flash.pcapng/conn-12")
+    fwd = cache / "conn-12--w2x_tsg.xpl"
+    if not fwd.exists():
+        pytest.skip("cached tsg.xpl not present")
+
+    pair = _build_tput_model(forward=fwd, backward=None, details_text="")
+    assert isinstance(pair, ThroughputModelPair)
+    assert pair.fwd is not None
+    assert len(pair.fwd.samples) > 0
+
+
+def test_render_throughput_stats_panel_updates_on_relayout():
+    """_render_throughput_stats_panel with a viewport window produces a
+    DirectionSummary that reflects the narrowed range.
+
+    A synthetic ThroughputModelPair is built so the test runs without cached
+    xpl files.  Samples are spread over t=0..10s; one call uses the full range
+    (t0=None, t1=None) and another uses only the first half (t0=None, t1=5.0).
+    The high-rate samples live in the second half, so peak_goodput changes
+    between the two calls.
+    """
+    import unittest.mock as mock
+
+    from tcptrace_ng.app import _render_throughput_stats_panel
+    from tcptrace_ng.throughput import (
+        DirectionSummary,
+        RateSample,
+        ThroughputModel,
+        ThroughputModelPair,
+    )
+
+    # Low-rate samples in t=0..5, high-rate samples in t=6..10.
+    samples_low = tuple(
+        RateSample(t=float(i), goodput_Bps=1_000.0, wire_Bps=1_100.0, max_Bps=None, window_s=1.0)
+        for i in range(6)
+    )
+    samples_high = tuple(
+        RateSample(t=float(i), goodput_Bps=100_000.0, wire_Bps=110_000.0, max_Bps=None, window_s=1.0)
+        for i in range(6, 11)
+    )
+    all_samples = samples_low + samples_high
+
+    # Minimal DirectionSummary (used only as a default; window_stats recomputes).
+    stub_summary = DirectionSummary(
+        total_payload_bytes=500_000,
+        total_wire_bytes=550_000,
+        retx_overhead_frac=0.09,
+        peak_goodput_Bps=100_000.0,
+        mean_goodput_Bps=50_000.0,
+        p50_goodput_Bps=50_000.0,
+        p95_goodput_Bps=90_000.0,
+        bdp_utilization_frac=None,
+        stall_count=0,
+        total_stall_s=0.0,
+        cliff_count=0,
+    )
+
+    # Per-segment byte series matching the samples (needed for window_stats byte counts).
+    payload_times = tuple(float(i) for i in range(11))
+    payload_bytes_seq = tuple(1_000 for _ in range(11))
+    wire_times = payload_times
+    wire_bytes_seq = payload_bytes_seq
+
+    fwd_model = ThroughputModel(
+        samples=all_samples,
+        stalls=(),
+        cliffs=(),
+        summary=stub_summary,
+        src="10.0.0.1:1234",
+        dst="10.0.0.2:80",
+        _payload_seg_times=payload_times,
+        _payload_seg_bytes=payload_bytes_seq,
+        _wire_seg_times=wire_times,
+        _wire_seg_bytes=wire_bytes_seq,
+    )
+    pair = ThroughputModelPair(fwd=fwd_model, bwd=None)
+
+    rendered_full: list[str] = []
+    rendered_half: list[str] = []
+
+    class _FakeContainer:
+        def __init__(self, target: list[str]):
+            self._target = target
+
+        def clear(self):
+            self._target.clear()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    with mock.patch("tcptrace_ng.app.ui") as fake_ui:
+        container_full = _FakeContainer(rendered_full)
+        fake_ui.html.side_effect = lambda s: rendered_full.append(s)
+        _render_throughput_stats_panel(container_full, pair, "→", "←", None, None)
+
+        container_half = _FakeContainer(rendered_half)
+        fake_ui.html.side_effect = lambda s: rendered_half.append(s)
+        _render_throughput_stats_panel(container_half, pair, "→", "←", None, 5.0)
+
+    assert rendered_full, "expected at least one ui.html call for full range"
+    assert rendered_half, "expected at least one ui.html call for sub-range"
+
+    combined_full = "".join(rendered_full)
+    combined_half = "".join(rendered_half)
+
+    # Both ranges should emit the section labels.
+    assert "Goodput" in combined_full
+    assert "Wire" in combined_full
+    assert "Goodput" in combined_half
+
+    # The two summaries must differ: high-rate samples are in t=6..10, so the
+    # viewport ending at t=5 should have a lower peak goodput.
+    assert combined_full != combined_half, (
+        "full-range and sub-range HTML should differ (different rate samples)"
+    )
+
+
 async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypatch):
     """A pcap with Geneve outer frames is auto-decapped; the runner gets the
     decap'd copy, and state.decap_encaps records what was stripped."""

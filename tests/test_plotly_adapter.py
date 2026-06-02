@@ -1,9 +1,20 @@
+import pytest
+
 from tcptrace_ng.plotly_adapter import (
     _humanize_title,
     to_paired_plotly_figure,
     to_plotly_figure,
+    to_throughput_figure,
 )
 from tcptrace_ng.theme import LINE_DIM_COLOR
+from tcptrace_ng.throughput import (
+    Cliff,
+    DirectionSummary,
+    RateSample,
+    Stall,
+    ThroughputModel,
+    ThroughputModelPair,
+)
 from tcptrace_ng.xpl_parser import Arrow, Box, Diamond, Dot, Line, Text, Tick, XplPlot
 
 
@@ -321,37 +332,6 @@ def test_paired_figure_falls_back_to_single_when_only_forward_present():
     assert all(t.get("xaxis", "x") == "x" for t in fig["data"])
 
 
-def test_orphan_marker_color_gets_one_legend_entry_when_hinted():
-    """A hinted marker color earns a single legend entry on its first trace.
-    Subsequent traces of the same color (any kind: dots, ticks, etc.) stay
-    hidden but share the legendgroup, so toggling collapses them all."""
-    plot = XplPlot(
-        commands=[
-            Dot(color="yellow", x=1.0, y=10.0),
-            Dot(color="yellow", x=2.0, y=20.0),
-            Tick(color="yellow", x=3.0, y=30.0, kind="u"),
-        ]
-    )
-    fig = to_plotly_figure(plot, metric="tput")
-    yellow_traces = [t for t in fig["data"] if t.get("legendgroup") == "yellow"]
-    assert yellow_traces, "expected at least one trace per orphan color"
-    legend_entries = [t for t in yellow_traces if t.get("showlegend")]
-    assert len(legend_entries) == 1, (
-        "exactly one legend entry per orphan color, regardless of marker kind count"
-    )
-    assert legend_entries[0]["name"] == "per-packet (inst.)"
-
-
-def test_tput_metric_hint_names_yellow_dots_per_packet():
-    """tcptrace emits unlabeled yellow dots for per-packet instantaneous
-    throughput (bytes_in_THIS_packet / time_since_LAST_packet) — a wire-speed
-    number that often shows multi-MB/s spikes for tiny transfers. The metric
-    hint surfaces this in the legend so users don't read it as transfer rate."""
-    plot = XplPlot(commands=[Dot(color="yellow", x=1.0, y=9_360_000)])
-    fig = to_plotly_figure(plot, metric="tput")
-    legend_entries = [t for t in fig["data"] if t.get("showlegend")]
-    assert [t["name"] for t in legend_entries] == ["per-packet (inst.)"]
-
 
 def test_unhinted_orphan_color_stays_out_of_legend():
     """No fallback to the color name — "orange" or "white" alone doesn't tell
@@ -363,19 +343,6 @@ def test_unhinted_orphan_color_stays_out_of_legend():
     # The trace is still rendered — the user can still see the marker; it
     # just doesn't earn a meaningless legend entry.
     assert any(t.get("legendgroup") == "orange" for t in fig["data"])
-
-
-def test_paired_figure_passes_metric_to_both_directions():
-    """A paired-figure tput render labels yellow dots in both subplots, but
-    the legend stays one entry (dedup across directions via legend_seen)."""
-    fwd = XplPlot(commands=[Dot(color="yellow", x=1.0, y=9e6)])
-    bwd = XplPlot(commands=[Dot(color="yellow", x=2.0, y=8e6)])
-    fig = to_paired_plotly_figure(fwd, bwd, "fwd", "bwd", metric="tput")
-    legend_entries = [t for t in fig["data"] if t.get("showlegend")]
-    assert [t["name"] for t in legend_entries] == ["per-packet (inst.)"]
-    # Both directions still rendered; they just share the legendgroup.
-    yellow_traces = [t for t in fig["data"] if t.get("legendgroup") == "yellow"]
-    assert {t["xaxis"] for t in yellow_traces} == {"x", "x2"}
 
 
 def test_high_cardinality_labels_collapse_to_one_trace_per_color():
@@ -1126,3 +1093,306 @@ def test_handshake_kinds_render_in_handshake_color():
     assert colors["S"] == _SEVERITY_COLOR["handshake"]
     assert colors["A"] == _SEVERITY_COLOR["handshake"]
     assert colors["FA"] == _SEVERITY_COLOR["handshake"]
+
+
+# ---------------------------------------------------------------------------
+# TestThroughputFigure
+# ---------------------------------------------------------------------------
+
+def _dummy_summary() -> DirectionSummary:
+    return DirectionSummary(
+        total_payload_bytes=0,
+        total_wire_bytes=0,
+        retx_overhead_frac=0.0,
+        peak_goodput_Bps=0.0,
+        mean_goodput_Bps=0.0,
+        p50_goodput_Bps=0.0,
+        p95_goodput_Bps=0.0,
+        bdp_utilization_frac=None,
+        stall_count=0,
+        total_stall_s=0.0,
+        cliff_count=0,
+    )
+
+
+def _sample(t: float, goodput: float = 1000.0, wire: float = 1100.0, max_bps: float | None = 10000.0) -> RateSample:
+    return RateSample(t=t, goodput_Bps=goodput, wire_Bps=wire, max_Bps=max_bps, window_s=0.1)
+
+
+def _tput_model(
+    samples=(),
+    stalls=(),
+    cliffs=(),
+    src="1.1.1.1:1",
+    dst="2.2.2.2:2",
+) -> ThroughputModel:
+    return ThroughputModel(
+        samples=samples,
+        stalls=stalls,
+        cliffs=cliffs,
+        summary=_dummy_summary(),
+        src=src,
+        dst=dst,
+    )
+
+
+def _stall(severity="warn", t_start=1.0, duration_s=0.5) -> Stall:
+    return Stall(
+        t_start=t_start,
+        t_end=t_start + duration_s,
+        duration_s=duration_s,
+        pending_bytes=100,
+        rtt_multiple=6.0,
+        severity=severity,
+    )
+
+
+def _cliff(severity="warn", t=2.0, drop_frac=0.7, cause_hint="post-loss") -> Cliff:
+    return Cliff(
+        t=t,
+        goodput_before_Bps=10000.0,
+        goodput_after_Bps=3000.0,
+        drop_frac=drop_frac,
+        cause_hint=cause_hint,
+        severity=severity,
+    )
+
+
+class TestThroughputFigure:
+    def test_returns_data_and_layout_keys(self):
+        model = _tput_model(samples=(_sample(1.0),))
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        assert "data" in fig
+        assert "layout" in fig
+
+    def test_paired_layout_has_two_axes(self):
+        fwd = _tput_model(samples=(_sample(1.0),))
+        bwd = _tput_model(samples=(_sample(2.0),), src="2.2.2.2:2", dst="1.1.1.1:1")
+        fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+        assert "xaxis" in fig["layout"]
+        assert "yaxis" in fig["layout"]
+        assert "xaxis2" in fig["layout"]
+        assert "yaxis2" in fig["layout"]
+
+    def test_x_axis_matched_between_subplots(self):
+        fwd = _tput_model(samples=(_sample(1.0),))
+        bwd = _tput_model(samples=(_sample(2.0),), src="2.2.2.2:2", dst="1.1.1.1:1")
+        fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+        assert fig["layout"]["xaxis2"]["matches"] == "x"
+
+    def test_y_axis_format(self):
+        fwd = _tput_model(samples=(_sample(1.0),))
+        bwd = _tput_model(samples=(_sample(2.0),), src="2.2.2.2:2", dst="1.1.1.1:1")
+        fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+        assert fig["layout"]["yaxis"]["tickformat"] == ".3s"
+        assert fig["layout"]["yaxis"]["ticksuffix"] == "B/s"
+        assert fig["layout"]["yaxis2"]["tickformat"] == ".3s"
+        assert fig["layout"]["yaxis2"]["ticksuffix"] == "B/s"
+
+    def test_trace_order_per_direction(self):
+        """Traces must appear in order: stalls, envelope, wire, goodput."""
+        model = _tput_model(
+            samples=(_sample(1.0), _sample(1.1)),
+            stalls=(_stall(),),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        traces = fig["data"]
+        stall_idx = next(i for i, t in enumerate(traces) if t.get("name") == "stall")
+        ceil_idx = next(i for i, t in enumerate(traces) if t.get("name") == "ceiling")
+        wire_idx = next(i for i, t in enumerate(traces) if t.get("name") == "wire")
+        gput_idx = next(i for i, t in enumerate(traces) if t.get("name") == "goodput")
+        assert stall_idx < ceil_idx < wire_idx < gput_idx
+
+    def test_stall_severity_alpha_tinting(self):
+        model = _tput_model(
+            samples=(_sample(1.0),),
+            stalls=(
+                _stall(severity="info", t_start=0.5),
+                _stall(severity="warn", t_start=1.5),
+                _stall(severity="severe", t_start=2.5),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=True)
+        stall_traces = [t for t in fig["data"] if t.get("name") == "stall"]
+        assert len(stall_traces) == 3
+        alphas = [float(t["fillcolor"].split(",")[-1].rstrip(")")) for t in stall_traces]
+        assert alphas[0] == pytest.approx(0.10)
+        assert alphas[1] == pytest.approx(0.15)
+        assert alphas[2] == pytest.approx(0.22)
+
+    def test_show_info_false_hides_info_stall(self):
+        model = _tput_model(
+            samples=(_sample(1.0),),
+            stalls=(
+                _stall(severity="info", t_start=0.5),
+                _stall(severity="warn", t_start=1.5),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=False)
+        stall_traces = [t for t in fig["data"] if t.get("name") == "stall"]
+        assert len(stall_traces) == 1
+
+    def test_show_info_true_includes_info_stall(self):
+        model = _tput_model(
+            samples=(_sample(1.0),),
+            stalls=(
+                _stall(severity="info", t_start=0.5),
+                _stall(severity="warn", t_start=1.5),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=True)
+        stall_traces = [t for t in fig["data"] if t.get("name") == "stall"]
+        assert len(stall_traces) == 2
+
+    def test_show_info_false_hides_info_cliff(self):
+        model = _tput_model(
+            samples=(_sample(1.0), _sample(1.1)),
+            cliffs=(
+                _cliff(severity="info", t=1.05),
+                _cliff(severity="warn", t=1.08),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=False)
+        non_paper = [
+            a for a in fig["layout"]["annotations"]
+            if a.get("yref") != "paper" and "cliff" in a.get("text", "")
+        ]
+        assert len(non_paper) == 1
+        assert "warn" not in non_paper[0]["text"]  # cause_hint, not severity
+
+    def test_show_info_true_includes_info_cliff(self):
+        model = _tput_model(
+            samples=(_sample(1.0), _sample(1.1)),
+            cliffs=(
+                _cliff(severity="info", t=1.05),
+                _cliff(severity="warn", t=1.08),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=True)
+        non_paper = [
+            a for a in fig["layout"]["annotations"]
+            if a.get("yref") != "paper" and "cliff" in a.get("text", "")
+        ]
+        assert len(non_paper) == 2
+
+    def test_cliff_annotation_text_format(self):
+        model = _tput_model(
+            samples=(_sample(1.0), _sample(1.1)),
+            cliffs=(_cliff(severity="warn", t=1.05, drop_frac=0.75, cause_hint="rwin-shrink"),),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        cliff_anns = [
+            a for a in fig["layout"]["annotations"]
+            if "cliff" in a.get("text", "")
+        ]
+        assert len(cliff_anns) == 1
+        assert cliff_anns[0]["text"] == "cliff -75% (rwin-shrink)"
+
+    def test_cliff_color_by_severity(self):
+        model = _tput_model(
+            samples=(_sample(1.0), _sample(1.1)),
+            cliffs=(
+                _cliff(severity="severe", t=1.02),
+                _cliff(severity="warn", t=1.04),
+            ),
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        cliff_anns = [
+            a for a in fig["layout"]["annotations"]
+            if "cliff" in a.get("text", "")
+        ]
+        colors = {a["font"]["color"] for a in cliff_anns}
+        assert "#ff5555" in colors  # severe
+        assert "#ffaa00" in colors  # warn — unified with _SEVERITY_COLOR
+
+    def test_legend_dedup_across_directions(self):
+        samples = (_sample(1.0), _sample(1.1))
+        fwd = _tput_model(
+            samples=samples,
+            stalls=(_stall(),),
+            cliffs=(_cliff(),),
+        )
+        bwd = _tput_model(
+            samples=samples,
+            stalls=(_stall(t_start=1.5),),
+            cliffs=(_cliff(t=1.6),),
+            src="2.2.2.2:2",
+            dst="1.1.1.1:1",
+        )
+        fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+        legend_traces = [t for t in fig["data"] if t.get("showlegend")]
+        legend_names = [t["name"] for t in legend_traces]
+        for name in ("ceiling", "wire", "goodput", "stall"):
+            assert legend_names.count(name) == 1, f"'{name}' should appear once, got {legend_names.count(name)}"
+
+    def test_no_rtt_drops_envelope(self):
+        samples = tuple(_sample(float(i), max_bps=None) for i in range(5))
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        ceiling_traces = [t for t in fig["data"] if t.get("name") == "ceiling"]
+        assert ceiling_traces == []
+
+    def test_no_ack_data_drops_goodput_and_adds_annotation(self):
+        samples = tuple(_sample(float(i), goodput=0.0) for i in range(5))
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        gput_traces = [t for t in fig["data"] if t.get("name") == "goodput"]
+        assert gput_traces == []
+        ann_texts = [a["text"] for a in fig["layout"]["annotations"]]
+        assert any("goodput unavailable" in t for t in ann_texts)
+
+    def test_no_segments_shows_blank_annotation(self):
+        model = _tput_model(samples=())
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        assert fig["data"] == []
+        ann_texts = [a["text"] for a in fig["layout"]["annotations"]]
+        assert any("no data sent" in t for t in ann_texts)
+
+    def test_single_direction_pair_has_one_subplot(self):
+        model = _tput_model(samples=(_sample(1.0),))
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model, bwd=None))
+        assert "xaxis" in fig["layout"]
+        assert "yaxis" in fig["layout"]
+        assert "xaxis2" not in fig["layout"]
+        assert "yaxis2" not in fig["layout"]
+
+    def test_both_none_returns_no_data(self):
+        fig = to_throughput_figure(ThroughputModelPair())
+        assert fig["data"] == []
+        ann_texts = [a["text"] for a in fig["layout"]["annotations"]]
+        assert any("no throughput data" in t for t in ann_texts)
+
+    def test_y_axis_range_clips_runaway_ceiling(self):
+        # Ceiling 100x larger than data — would hide the data if it drove
+        # the axis. y_range is driven by data instead.
+        high_max = 1_000_000.0
+        samples = (
+            _sample(1.0, wire=10000.0, max_bps=high_max),
+            _sample(1.1, wire=10000.0, max_bps=high_max),
+        )
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        y_range = fig["layout"]["yaxis"]["range"]
+        assert y_range[0] == pytest.approx(0.0)
+        assert y_range[1] == pytest.approx(13000.0)
+
+    def test_y_axis_range_includes_ceiling_when_within_range(self):
+        # Ceiling 2x data — fits within the 5x clip, drives the axis.
+        samples = (
+            _sample(1.0, wire=10000.0, max_bps=20000.0),
+            _sample(1.1, wire=10000.0, max_bps=20000.0),
+        )
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        y_range = fig["layout"]["yaxis"]["range"]
+        assert y_range[1] == pytest.approx(22000.0)
+
+    def test_y_axis_range_falls_back_to_data_when_no_ceiling(self):
+        samples = (
+            _sample(1.0, wire=50000.0, max_bps=None),
+            _sample(1.1, wire=80000.0, max_bps=None),
+        )
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        y_range = fig["layout"]["yaxis"]["range"]
+        assert y_range[1] == pytest.approx(80000.0 * 1.3)

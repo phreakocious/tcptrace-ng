@@ -22,6 +22,7 @@ from .tcp_inspect import (
     TsgModelPair,
 )
 from .theme import GRID_COLOR, LINE_DIM_COLOR, ZERO_LINE_COLOR
+from .throughput import RateSample, ThroughputModel, ThroughputModelPair
 from .xpl_parser import (
     Arrow,
     Box,
@@ -82,18 +83,8 @@ _SUBPLOT_LABEL_FONT = {"color": "#888888", "size": 11, "family": "Menlo, monospa
 # building that many WebGL contexts long before render starts.
 _LABEL_LEGEND_THRESHOLD = 32
 
-# Synthetic legend hints for marker colors that tcptrace emits without an
-# `ltext` label, keyed by metric. Without these the user just sees colored
-# dots with no explanation. Most painfully: tput's yellow per-packet
-# instantaneous samples (bytes_in_this_packet / time_since_last_packet) —
-# the math is right but it's wire-speed, not transfer throughput, so a
-# 23 KB conn can show 9 MB/s spikes between back-to-back packets.
-# See vendor/tcptrace/thruput.c:142-153 for the source of the unlabeled emit.
-_MARKER_LEGEND_HINTS: dict[str, dict[str, str]] = {
-    "tput": {
-        "yellow": "per-packet (inst.)",
-    },
-}
+# Synthetic legend hints for unlabeled marker colors in generic XPL plots, keyed by metric.
+_MARKER_LEGEND_HINTS: dict[str, dict[str, str]] = {}
 
 
 def _is_epoch_time_axis(plot: XplPlot) -> bool:
@@ -967,7 +958,7 @@ def _anomaly_annotations(
     for a, count in clusters:
         text = _ANOMALY_GLYPH.get(a.kind, a.kind)
         if count > 1:
-            text = f"{text} ×{count}"
+            text = f"{text} ×{count}"  # noqa: RUF001 — intentional Unicode multiplication sign
         y = a.seq_lo if a.seq_lo is not None else 0
         yshift = _KIND_YSHIFT.get(a.kind, _DEFAULT_YSHIFT)
         if last_time is not None and (a.time - last_time) <= _ANOMALY_COLLISION_S:
@@ -1392,3 +1383,419 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
         )
     layout["annotations"] = annotations
     return {"data": traces, "layout": layout}
+
+
+# ---------------------------------------------------------------------------
+# Throughput figure
+# ---------------------------------------------------------------------------
+
+_STALL_ALPHA = {"info": 0.10, "warn": 0.15, "severe": 0.22}
+
+
+def _throughput_direction_label(model: ThroughputModel) -> str:
+    if model.src and model.dst:
+        return f"{model.src} → {model.dst}"
+    return ""
+
+
+def _tput_xaxis(*, show_ticks: bool) -> dict[str, Any]:
+    return {
+        "type": "date",
+        "tickformat": "%H:%M:%S.%L",
+        "hoverformat": "%Y-%m-%d %H:%M:%S.%6f",
+        "gridcolor": GRID_COLOR,
+        "zerolinecolor": ZERO_LINE_COLOR,
+        "showticklabels": show_ticks,
+        "title": {"text": "time" if show_ticks else ""},
+    }
+
+
+def _tput_yaxis() -> dict[str, Any]:
+    return {
+        "title": {"text": "throughput"},
+        "tickformat": ".3s",
+        "ticksuffix": "B/s",
+        "gridcolor": GRID_COLOR,
+        "zerolinecolor": ZERO_LINE_COLOR,
+    }
+
+
+def _tput_yaxis_range(samples: tuple[RateSample, ...]) -> list[float]:
+    if not samples:
+        return [0.0, 1.0]
+    data_max = max(
+        (max(s.wire_Bps, s.goodput_Bps) for s in samples),
+        default=0.0,
+    )
+    y_data = data_max * 1.3
+    ceil_vals = sorted(s.max_Bps for s in samples if s.max_Bps is not None)
+    if ceil_vals and data_max > 0:
+        ceil_p50 = ceil_vals[len(ceil_vals) // 2]
+        # Include the ceiling only when it's within an order of magnitude of
+        # the data — otherwise it would dominate the axis and squash the
+        # data into invisibility (rwin/RTT can legitimately be much higher
+        # than achieved goodput on app-limited connections).
+        if ceil_p50 <= data_max * 5:
+            return [0.0, max(y_data, ceil_p50 * 1.1, 1.0)]
+    return [0.0, max(y_data, 1.0)]
+
+
+def _stall_traces(
+    model: ThroughputModel,
+    y_range: list[float],
+    *,
+    xaxis_ref: str,
+    yaxis_ref: str,
+    show_info: bool,
+    legend_seen: set[str],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    y0, y1 = y_range
+    for stall in model.stalls:
+        if stall.severity == "info" and not show_info:
+            continue
+        alpha = _STALL_ALPHA[stall.severity]
+        show = "stall" not in legend_seen
+        if show:
+            legend_seen.add("stall")
+        dur_ms = stall.duration_s * 1000.0
+        text = f"stall {dur_ms:.0f}ms ({stall.rtt_multiple:.1f}×RTT)"  # noqa: RUF001 — intentional Unicode multiplication sign for RTT-multiple display
+        t0 = _epoch_to_iso(stall.t_start)
+        t1 = _epoch_to_iso(stall.t_end)
+        out.append({
+            "type": "scatter",
+            "mode": "lines",
+            "x": [t0, t1, t1, t0, t0, None],
+            "y": [y0, y0, y1, y1, y0, None],
+            "fill": "toself",
+            "fillcolor": f"rgba(255,119,255,{alpha})",
+            "line": {"color": "rgba(0,0,0,0)", "width": 0},
+            "text": text,
+            "hoverinfo": "text",
+            "name": "stall",
+            "legendgroup": "stall",
+            "showlegend": show,
+            "xaxis": xaxis_ref,
+            "yaxis": yaxis_ref,
+        })
+    return out
+
+
+def _envelope_trace(
+    model: ThroughputModel,
+    *,
+    xaxis_ref: str,
+    yaxis_ref: str,
+    legend_seen: set[str],
+) -> dict[str, Any] | None:
+    xs: list[Any] = []
+    ys: list[Any] = []
+    for s in model.samples:
+        if s.max_Bps is None:
+            if xs and xs[-1] is not None:
+                xs.append(None)
+                ys.append(None)
+        else:
+            xs.append(_epoch_to_iso(s.t))
+            ys.append(s.max_Bps)
+    while xs and xs[0] is None:
+        xs.pop(0)
+        ys.pop(0)
+    while xs and xs[-1] is None:
+        xs.pop()
+        ys.pop()
+    if not xs:
+        return None
+    show = "ceiling" not in legend_seen
+    if show:
+        legend_seen.add("ceiling")
+    # scattergl OK here (no fill, unlike wire/goodput which need scatter for fill: tozeroy)
+    return {
+        "type": "scattergl",
+        "mode": "lines",
+        "x": xs,
+        "y": ys,
+        "line": {"color": "#888", "dash": "dot", "width": 1},
+        "opacity": 0.6,
+        "hovertemplate": "ceiling %{y:.3s}B/s (rwin/RTT)<extra></extra>",
+        "name": "ceiling",
+        "legendgroup": "ceiling",
+        "showlegend": show,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
+
+
+def _wire_trace(
+    model: ThroughputModel,
+    *,
+    xaxis_ref: str,
+    yaxis_ref: str,
+    legend_seen: set[str],
+) -> dict[str, Any] | None:
+    if not model.samples:
+        return None
+    xs = [_epoch_to_iso(s.t) for s in model.samples]
+    ys = [s.wire_Bps for s in model.samples]
+    show = "wire" not in legend_seen
+    if show:
+        legend_seen.add("wire")
+    return {
+        "type": "scatter",
+        "mode": "lines",
+        "x": xs,
+        "y": ys,
+        "fill": "tozeroy",
+        "fillcolor": "rgba(85,153,255,0.25)",
+        "line": {"color": "#5599ff", "width": 1},
+        "hovertemplate": "wire %{y:.3s}B/s<extra></extra>",
+        "name": "wire",
+        "legendgroup": "wire",
+        "showlegend": show,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
+
+
+def _goodput_trace(
+    model: ThroughputModel,
+    *,
+    xaxis_ref: str,
+    yaxis_ref: str,
+    legend_seen: set[str],
+) -> dict[str, Any] | None:
+    if not model.samples:
+        return None
+    if all(s.goodput_Bps == 0.0 for s in model.samples):
+        return None
+    xs = [_epoch_to_iso(s.t) for s in model.samples]
+    ys = [s.goodput_Bps for s in model.samples]
+    show = "goodput" not in legend_seen
+    if show:
+        legend_seen.add("goodput")
+    return {
+        "type": "scatter",
+        "mode": "lines",
+        "x": xs,
+        "y": ys,
+        "fill": "tozeroy",
+        "fillcolor": "rgba(85,255,85,0.45)",
+        "line": {"color": "#55ff55", "width": 1},
+        "hovertemplate": "goodput %{y:.3s}B/s<extra></extra>",
+        "name": "goodput",
+        "legendgroup": "goodput",
+        "showlegend": show,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
+
+
+def _cliff_annotations(
+    model: ThroughputModel,
+    y_range: list[float],
+    *,
+    xref: str,
+    yref: str,
+    show_info: bool,
+    legend_seen: set[str],
+) -> list[dict[str, Any]]:
+    anns: list[dict[str, Any]] = []
+    y_top = y_range[1] if y_range[1] > 0 else 1.0
+    # Three vertical positions to stagger clustered cliffs and prevent text
+    # collisions. Cycle through them in temporal order.
+    stagger = [0.92, 0.78, 0.64]
+    visible_idx = 0
+    for cliff in model.cliffs:
+        if cliff.severity == "info" and not show_info:
+            continue
+        pct = cliff.drop_frac * 100.0
+        color = _SEVERITY_COLOR[cliff.severity]
+        y_pos = y_top * stagger[visible_idx % len(stagger)]
+        visible_idx += 1
+        anns.append({
+            "x": _epoch_to_iso(cliff.t),
+            "y": y_pos,
+            "xref": xref,
+            "yref": yref,
+            "text": f"cliff -{pct:.0f}% ({cliff.cause_hint})",
+            "showarrow": True,
+            "arrowhead": 2,
+            "arrowcolor": color,
+            "font": {"color": color, "size": 10},
+            "ax": 0,
+            "ay": -20,
+        })
+    return anns
+
+
+def _no_data_annotation(label: str, *, y_paper: float = 0.5) -> dict[str, Any]:
+    return {
+        "text": label,
+        "xref": "paper",
+        "yref": "paper",
+        "x": 0.5,
+        "y": y_paper,
+        "xanchor": "center",
+        "yanchor": "middle",
+        "showarrow": False,
+        "font": {"color": "#555", "size": 13},
+    }
+
+
+def _build_tput_direction(
+    model: ThroughputModel,
+    *,
+    xaxis_ref: str,
+    yaxis_ref: str,
+    show_info: bool,
+    legend_seen: set[str],
+    y_paper: float = 0.5,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Returns (traces, annotations) for one direction."""
+    if not model.samples:
+        dir_label = _throughput_direction_label(model)
+        label = f"(no data sent {dir_label})" if dir_label else "(no data)"
+        return [], [_no_data_annotation(label, y_paper=y_paper)]
+
+    y_range = _tput_yaxis_range(model.samples)
+    traces: list[dict[str, Any]] = []
+    anns: list[dict[str, Any]] = []
+
+    traces.extend(_stall_traces(
+        model, y_range,
+        xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref,
+        show_info=show_info, legend_seen=legend_seen,
+    ))
+
+    env = _envelope_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    if env is not None:
+        traces.append(env)
+
+    wire = _wire_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    if wire is not None:
+        traces.append(wire)
+
+    gput = _goodput_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    if gput is not None:
+        traces.append(gput)
+    elif all(s.goodput_Bps == 0.0 for s in model.samples):
+        anns.append({
+            "text": "goodput unavailable — no ACK data",
+            "xref": "paper",
+            "yref": yaxis_ref,
+            "x": 0.99,
+            "y": y_range[1] * 0.95,
+            "xanchor": "right",
+            "yanchor": "top",
+            "showarrow": False,
+            "font": {"color": "#555", "size": 10},
+        })
+
+    anns.extend(_cliff_annotations(
+        model, y_range,
+        xref=xaxis_ref, yref=yaxis_ref,
+        show_info=show_info, legend_seen=legend_seen,
+    ))
+
+    return traces, anns
+
+
+def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) -> dict[str, Any]:
+    fwd = pair.fwd
+    bwd = pair.bwd
+
+    if fwd is not None and fwd.src and fwd.dst:
+        title = f"{fwd.src} → {fwd.dst} throughput"
+    elif bwd is not None and bwd.src and bwd.dst:
+        title = f"{bwd.dst} → {bwd.src} throughput"
+    else:
+        title = "throughput"
+
+    layout = _base_layout(title, dragmode="pan", showlegend=True)
+    # Cliff annotations live near y_top, so the default top-right legend
+    # collides with them. Float the legend horizontally below the title.
+    layout["legend"] = {
+        "orientation": "h",
+        "xanchor": "right",
+        "x": 1.0,
+        "yanchor": "bottom",
+        "y": 1.02,
+        "bgcolor": "rgba(0,0,0,0)",
+        "font": {"size": 11, "family": "Menlo, monospace"},
+    }
+
+    if fwd is None and bwd is None:
+        layout["xaxis"] = _tput_xaxis(show_ticks=True)
+        layout["yaxis"] = _tput_yaxis()
+        layout["annotations"] = [_no_data_annotation("no throughput data")]
+        return {"data": [], "layout": layout}
+
+    if fwd is None or bwd is None:
+        only = fwd if fwd is not None else bwd
+        legend_seen: set[str] = set()
+        yax = _tput_yaxis()
+        yax["range"] = _tput_yaxis_range(only.samples)
+        yax["autorange"] = False
+        layout["xaxis"] = _tput_xaxis(show_ticks=True)
+        layout["yaxis"] = yax
+        traces, anns = _build_tput_direction(
+            only, xaxis_ref="x", yaxis_ref="y",
+            show_info=show_info, legend_seen=legend_seen,
+        )
+        layout["annotations"] = anns
+        return {"data": traces, "layout": layout}
+
+    # Both directions.
+    legend_seen = set()
+
+    fwd_xaxis = _tput_xaxis(show_ticks=False)
+    fwd_xaxis["anchor"] = "y"
+    fwd_yax = _tput_yaxis()
+    fwd_yax["domain"] = list(_FWD_DOMAIN)
+    fwd_yax["anchor"] = "x"
+    fwd_yax["range"] = _tput_yaxis_range(fwd.samples)
+    fwd_yax["autorange"] = False
+
+    bwd_xaxis = _tput_xaxis(show_ticks=True)
+    bwd_xaxis["matches"] = "x"
+    bwd_xaxis["anchor"] = "y2"
+    bwd_xaxis["side"] = "bottom"
+    bwd_yax = _tput_yaxis()
+    bwd_yax["domain"] = list(_BWD_DOMAIN)
+    bwd_yax["anchor"] = "x2"
+    bwd_yax["range"] = _tput_yaxis_range(bwd.samples)
+    bwd_yax["autorange"] = False
+
+    layout["xaxis"] = fwd_xaxis
+    layout["yaxis"] = fwd_yax
+    layout["xaxis2"] = bwd_xaxis
+    layout["yaxis2"] = bwd_yax
+
+    fwd_traces, fwd_anns = _build_tput_direction(
+        fwd, xaxis_ref="x", yaxis_ref="y",
+        show_info=show_info, legend_seen=legend_seen,
+        y_paper=(_FWD_DOMAIN[0] + _FWD_DOMAIN[1]) / 2,
+    )
+    bwd_traces, bwd_anns = _build_tput_direction(
+        bwd, xaxis_ref="x2", yaxis_ref="y2",
+        show_info=show_info, legend_seen=legend_seen,
+        y_paper=(_BWD_DOMAIN[0] + _BWD_DOMAIN[1]) / 2,
+    )
+
+    annotations = fwd_anns + bwd_anns
+    for text, y in (
+        (_throughput_direction_label(fwd), _FWD_DOMAIN[1]),
+        (_throughput_direction_label(bwd), _BWD_DOMAIN[1]),
+    ):
+        if not text:
+            continue
+        annotations.append({
+            "text": text,
+            "xref": "paper", "yref": "paper",
+            "x": 0, "y": y,
+            "xanchor": "left", "yanchor": "bottom",
+            "showarrow": False,
+            "font": _SUBPLOT_LABEL_FONT,
+        })
+    layout["annotations"] = annotations
+    return {"data": fwd_traces + bwd_traces, "layout": layout}

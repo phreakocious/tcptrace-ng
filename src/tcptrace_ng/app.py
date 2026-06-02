@@ -37,8 +37,9 @@ from .classifier import Class, classify
 from .csum import CsumEvent, scan_pcap as scan_csums
 from .decap import DECAP_VERSION, decap_pcap, detect_encaps
 from .offload import detect_offload
-from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure, to_tsg_figure
+from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure, to_throughput_figure, to_tsg_figure
 from .tcp_inspect import synthesize as synthesize_tsg
+from .throughput import DirectionSummary, ThroughputModelPair, synthesize_throughput
 from .runner import (
     AnalyzeResult,
     ConnRow,
@@ -381,6 +382,12 @@ def _build_metric_figure(
         )
         return to_tsg_figure(pair, show_info=show_info)
 
+    if metric == "tput":
+        tput_pair = _build_tput_model(forward, backward, details_text)
+        if tput_pair is None:
+            return None
+        return to_throughput_figure(tput_pair, show_info=show_info)
+
     if combined is not None:
         plot, _err = _safe_parse_xpl(combined)
         if plot is None or not plot.commands:
@@ -437,6 +444,39 @@ def _csum_for_plots(
     return fwd_times, bwd_times
 
 
+def _build_tput_model(
+    forward: Path | None,
+    backward: Path | None,
+    details_text: str,
+) -> ThroughputModelPair | None:
+    fwd_plot = None
+    bwd_plot = None
+    if forward is not None:
+        plot, _err = _safe_parse_xpl(forward)
+        if plot is not None and plot.commands:
+            fwd_plot = plot
+    if backward is not None:
+        plot, _err = _safe_parse_xpl(backward)
+        if plot is not None and plot.commands:
+            bwd_plot = plot
+    if fwd_plot is None and bwd_plot is None:
+        return None
+    fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+    tsg_pair = synthesize_tsg(
+        fwd_plot,
+        bwd_plot,
+        details_text,
+        bad_csum_times_fwd=fwd_csum,
+        bad_csum_times_bwd=bwd_csum,
+    )
+    stats = (
+        tsg_pair.fwd.summary if tsg_pair.fwd is not None
+        else tsg_pair.bwd.summary if tsg_pair.bwd is not None
+        else None
+    )
+    return synthesize_throughput(tsg_pair, stats)
+
+
 def _build_tsg_model(
     forward: Path | None,
     backward: Path | None,
@@ -490,6 +530,18 @@ def _format_count(v: int | None) -> str:
     if v is None:
         return "—"
     return f"{v:,}"
+
+
+def _format_throughput_Bps(v: float | None) -> str:  # noqa: N802 — `B` vs `b` is load-bearing; Bps ≠ bps
+    if v is None:
+        return "—"
+    if v < 1024:
+        return f"{v:.0f} B/s"
+    if v < 1024 * 1024:
+        return f"{v / 1024:.1f} KB/s"
+    if v < 1024 * 1024 * 1024:
+        return f"{v / (1024 * 1024):.1f} MB/s"
+    return f"{v / (1024 * 1024 * 1024):.2f} GB/s"
 
 
 def _format_bad_csum(ws) -> str:
@@ -555,6 +607,56 @@ def _stats_grid_html(label: str, ws) -> str:
             parts.append(f"<div>{v}</div>")
         parts.append("</div>")
     return "".join(parts)
+
+
+def _throughput_stats_grid_html(label: str, summary: DirectionSummary) -> str:
+    bdp = (
+        f"{summary.bdp_utilization_frac * 100:.1f}%"
+        if summary.bdp_utilization_frac is not None
+        else "—"
+    )
+    rows = [
+        ("Goodput",
+         f"avg {_format_throughput_Bps(summary.mean_goodput_Bps)}",
+         f"p50 {_format_throughput_Bps(summary.p50_goodput_Bps)}",
+         f"p95 {_format_throughput_Bps(summary.p95_goodput_Bps)}",
+         f"peak {_format_throughput_Bps(summary.peak_goodput_Bps)}"),
+        ("Wire",
+         f"{_format_bytes(summary.total_wire_bytes)} total",
+         f"{summary.retx_overhead_frac * 100:.1f}% retx overhead"),
+        ("BDP utilization",
+         bdp),
+        ("Anomalies",
+         f"{summary.stall_count} stalls ({summary.total_stall_s:.2f}s total)",
+         f"{summary.cliff_count} cliffs"),
+    ]
+    parts = [f'<div class="dir-label">{label}</div>']
+    titles = [r[0] for r in rows]
+    values = [r[1:] for r in rows]
+    for col_idx, title in enumerate(titles):
+        parts.append(f'<div><div class="col-title">{title}</div>')
+        for v in values[col_idx]:
+            parts.append(f"<div>{v}</div>")
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_throughput_stats_panel(
+    container,
+    pair: ThroughputModelPair,
+    fwd_label: str,
+    bwd_label: str,
+    t0: float | None,
+    t1: float | None,
+) -> None:
+    container.clear()
+    with container:
+        html_parts: list[str] = []
+        if pair.fwd is not None:
+            html_parts.append(_throughput_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1)))
+        if pair.bwd is not None:
+            html_parts.append(_throughput_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1)))
+        ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
 def _xrange_from_relayout(args: dict) -> tuple[float | None, float | None]:
@@ -945,6 +1047,44 @@ def build_page() -> None:
                                 plotly_el.update_figure(new_fig)
 
                             info_switch.on_value_change(_on_info_toggle)
+                    if metric == "tput":
+                        with ui.row().classes(
+                            "items-center gap-2 px-3 py-1 w-full justify-end"
+                        ):
+                            tput_info_switch = (
+                                ui.switch(
+                                    "Show info anomalies", value=state.show_info
+                                )
+                                .props("dense dark")
+                                .tooltip(
+                                    "Show info-tier stalls and cliffs — minor pauses"
+                                    " and small throughput drops; off by default"
+                                )
+                            )
+                        tput_pair = state.figure_cache.get((conn_n, metric, "model"))
+                        if tput_pair is not None:
+                            tput_stats_box = ui.column().classes("w-full")
+                            _render_throughput_stats_panel(
+                                tput_stats_box, tput_pair, fwd_label, bwd_label, None, None
+                            )
+
+                            def _on_tput_relayout(e) -> None:
+                                t0, t1 = _xrange_from_relayout(e.args or {})
+                                _render_throughput_stats_panel(
+                                    tput_stats_box, tput_pair, fwd_label, bwd_label, t0, t1
+                                )
+
+                            plotly_el.on("plotly_relayout", _on_tput_relayout)
+
+                            def _on_tput_info_toggle(e) -> None:
+                                state.show_info = bool(e.value)
+                                new_fig = to_throughput_figure(
+                                    tput_pair, show_info=state.show_info
+                                )
+                                state.figure_cache[(conn_n, metric)] = new_fig
+                                plotly_el.update_figure(new_fig)
+
+                            tput_info_switch.on_value_change(_on_tput_info_toggle)
 
             async def _populate(metric: str) -> None:
                 if metric in activated:
@@ -962,18 +1102,34 @@ def build_page() -> None:
                 container = panel_containers[metric]
                 with container:
                     ui.spinner(size="md").classes("self-center").style("margin-top: 32px;")
+                tsg_g = group_by_metric.get("tsg") if metric == "tput" else None
+                src_fwd = tsg_g.forward if tsg_g is not None else g.forward
+                src_bwd = tsg_g.backward if tsg_g is not None else g.backward
+                details = state.analyses[conn_n].details_text
                 try:
-                    fig = await run.io_bound(
-                        _build_metric_figure,
-                        g.forward,
-                        g.backward,
-                        g.combined,
-                        fwd_label,
-                        bwd_label,
-                        g.metric,
-                        state.analyses[conn_n].details_text,
-                        state.show_info,
-                    )
+                    if metric == "tput":
+                        # Run synthesis once: build the model, store it, render
+                        # the figure from it — avoids a second synthesize_tsg call.
+                        tput_pair = await run.io_bound(
+                            _build_tput_model,
+                            src_fwd,
+                            src_bwd,
+                            details,
+                        )
+                        state.figure_cache[(conn_n, metric, "model")] = tput_pair
+                        fig = to_throughput_figure(tput_pair, show_info=state.show_info) if tput_pair is not None else None
+                    else:
+                        fig = await run.io_bound(
+                            _build_metric_figure,
+                            src_fwd,
+                            src_bwd,
+                            g.combined,
+                            fwd_label,
+                            bwd_label,
+                            g.metric,
+                            details,
+                            state.show_info,
+                        )
                 except Exception as exc:
                     if state.selected_conn != conn_n:
                         return
@@ -987,7 +1143,7 @@ def build_page() -> None:
                         _build_tsg_model,
                         g.forward,
                         g.backward,
-                        state.analyses[conn_n].details_text,
+                        details,
                     )
                     state.figure_cache[(conn_n, metric, "model")] = model_pair
                 if state.selected_conn != conn_n:
