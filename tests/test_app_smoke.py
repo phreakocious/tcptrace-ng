@@ -231,9 +231,9 @@ def test_build_xpl_zip_packs_xpl_files(tmp_path):
         assert "conn-1/conn-1--a2b_tsg.xpl" in zf.namelist()
 
 
-async def test_toggling_no_dns_reanalyzes_with_n_flag(user: User, tmp_path, monkeypatch):
-    """Flipping the 'no DNS' checkbox re-runs analyze_all with no_dns=True so
-    tcptrace's own `-n` flag is propagated through."""
+async def test_toggling_dns_reanalyzes_without_n_flag(user: User, tmp_path, monkeypatch):
+    """The 'DNS' checkbox is opt-in: unchecked sends `no_dns=True` (i.e. `-n`)
+    to the runner; checking it removes `-n` so tcptrace resolves names."""
     pcap = tmp_path / "x.pcap"
     pcap.write_bytes(b"")
     monkeypatch.chdir(tmp_path)
@@ -259,24 +259,24 @@ async def test_toggling_no_dns_reanalyzes_with_n_flag(user: User, tmp_path, monk
         select = _select_element(user)
         select.set_value(str(pcap))
         await user.should_see("a:1")
-        assert calls == [False]  # first analyze: no_dns default off
+        assert calls == [True]  # default: DNS off → no_dns=True (-n added)
 
-        # Find the "no DNS" checkbox via its label and flip it.
-        no_dns = next(
-            c for c in user.find(kind=_ui.checkbox).elements if c.text == "no DNS"
+        # Find the "DNS" checkbox via its label and flip it on.
+        dns = next(
+            c for c in user.find(kind=_ui.checkbox).elements if c.text == "DNS"
         )
-        no_dns.set_value(True)
+        dns.set_value(True)
         # Allow the async analyze handler (scheduled off the value-change event)
         # to flush before asserting.
         for _ in range(20):
             await asyncio.sleep(0)
             if len(calls) >= 2:
                 break
-        # Second analyze ran with no_dns=True.
+        # Second analyze ran with no_dns=False (DNS enabled).
         assert len(calls) >= 2, f"expected re-analyze on toggle, got calls={calls}"
-        assert calls[-1] is True
+        assert calls[-1] is False
         # And the in-memory state reflects the toggle.
-        assert app_mod.state.no_dns is True
+        assert app_mod.state.dns is True
 
 
 async def test_pcap_switch_clears_analysis_state(user: User, tmp_path, monkeypatch):
@@ -390,6 +390,36 @@ async def test_on_pick_surfaces_error_when_conversion_also_fails(user: User, tmp
 
         assert app_mod.state.stats == []
         assert app_mod.state.selected_pcap == cap
+
+
+def test_build_metric_figure_routes_tsg_through_to_tsg_figure(monkeypatch):
+    """When metric=='tsg', _build_metric_figure should synthesize a TsgModel
+    and produce a figure with the TSG-style customdata + hovertemplate."""
+    from pathlib import Path
+
+    from tcptrace_ng.app import _build_metric_figure
+
+    # Use the cached firmware_flash tsg xpl as both forward and details source.
+    cache = Path(".tcptrace/firmware_flash.pcapng/conn-12")
+    fwd = cache / "conn-12--w2x_tsg.xpl"
+    if not fwd.exists():
+        import pytest
+        pytest.skip("cached tsg.xpl not present")
+
+    fig = _build_metric_figure(
+        forward=fwd,
+        backward=None,
+        combined=None,
+        fwd_label="→",
+        bwd_label="←",
+        metric="tsg",
+        details_text="",
+    )
+    assert fig is not None
+    # Some trace carries a hovertemplate that references customdata indices.
+    assert any(
+        "customdata" in (t.get("hovertemplate") or "") for t in fig["data"]
+    )
 
 
 async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypatch):

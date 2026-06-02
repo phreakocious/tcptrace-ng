@@ -22,6 +22,16 @@ def test_parse_xpl_name_unknown_returns_none():
     assert parse_xpl_name("conn-9--weird_thing.xpl") is None
 
 
+def test_parse_xpl_name_two_letter_host_labels():
+    """tcptrace rolls over to two-letter labels (aa/ab, ac/ad, …) past
+    conn 13; xpl filenames inherit them: `conn-14--aa2ab_tsg.xpl`,
+    `conn-14--ab2aa_owin.xpl`, `conn-14--aa_ab_tline.xpl`."""
+    assert parse_xpl_name("conn-14--aa2ab_tsg.xpl") == ("tsg", "forward")
+    assert parse_xpl_name("conn-14--ab2aa_owin.xpl") == ("owin", "backward")
+    assert parse_xpl_name("conn-14--aa_ab_tline.xpl") == ("tline", "combined")
+    assert parse_xpl_name("conn-56--dg2dh_rtt.xpl") == ("rtt", "forward")
+
+
 def test_group_xpls_orders_metrics_and_collapses_directions(tmp_path):
     files = [
         tmp_path / "conn-1--a2b_owin.xpl",

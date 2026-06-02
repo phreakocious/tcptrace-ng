@@ -124,6 +124,7 @@ def analyze_connection(
     no_dns: bool = False,
     with_rtt: bool = False,
     with_warnings: bool = False,
+    with_checksum: bool = False,
     zero_x_axis: bool = False,
 ) -> AnalyzeResult:
     """Run tcptrace for one connection: emit details text and .xpl files.
@@ -132,10 +133,13 @@ def analyze_connection(
     Returns the stdout (for details.txt) and the list of produced .xpl files.
 
     Flags (all default-off):
-      no_dns        — `-n`, skip hostname/port-name resolution
-      with_rtt      — `-r`, include RTT statistics in long output
-      with_warnings — `-w`, include warning messages (bad checksums, etc.)
-      zero_x_axis   — `-zx`, plot time axis from 0 instead of wallclock
+      no_dns         — `-n`, skip hostname/port-name resolution
+      with_rtt       — `-r`, include RTT statistics in long output
+      with_warnings  — `-w`, include warning messages
+      with_checksum  — `--checksum --warn_printbadcsum`, verify and report bad
+                       IP/TCP checksums (off-by-default in tcptrace because
+                       NIC csum offload is common — toggle this to surface it)
+      zero_x_axis    — `-zx`, plot time axis from 0 instead of wallclock
     """
     tcptrace = _resolve_tcptrace()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +152,8 @@ def analyze_connection(
         argv.append("-r")
     if with_warnings:
         argv.append("-w")
+    if with_checksum:
+        argv += ["--checksum", "--warn_printbadcsum"]
     if zero_x_axis:
         argv.append("-zx")
     argv += [f"--output_prefix={prefix}", str(pcap)]
@@ -178,6 +184,7 @@ def analyze_all(
     no_dns: bool = False,
     with_rtt: bool = False,
     with_warnings: bool = False,
+    with_checksum: bool = False,
 ) -> list[ConnStats]:
     """Run `tcptrace -l <pcap>` once and parse stats for every connection.
 
@@ -185,7 +192,7 @@ def analyze_all(
     per-connection block for every connection in the pcap.
 
     Flags (all default-off): `no_dns` → `-n`; `with_rtt` → `-r`;
-    `with_warnings` → `-w`.
+    `with_warnings` → `-w`; `with_checksum` → `--checksum --warn_printbadcsum`.
 
     Raises RunnerError on nonzero exit or if `tcptrace` is not on PATH.
     """
@@ -197,6 +204,8 @@ def analyze_all(
         argv.append("-r")
     if with_warnings:
         argv.append("-w")
+    if with_checksum:
+        argv += ["--checksum", "--warn_printbadcsum"]
     argv.append(str(pcap))
 
     try:

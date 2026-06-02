@@ -22,6 +22,34 @@ def test_parse_stats_hosts():
     assert rows[0].host_b == "100.99.98.97:80"
 
 
+def test_parse_stats_handles_two_letter_host_labels():
+    """tcptrace rolls over from single-letter (a/b … y/z) to two-letter
+    host labels (aa/ab, ac/ad, …) at conn 14. The parser must keep host
+    fields populated past that rollover."""
+    text = """\
+TCP connection 14:
+\thost aa:       10.0.0.1:51365
+\thost ab:       10.0.0.2:8009
+\ttotal packets:           5             total packets:           3
+\tunique bytes sent:    100              unique bytes sent:      50
+\telapsed time:    0:00:01.000000
+TCP connection 56:
+\thost dg:       10.0.0.10:51420
+\thost dh:       10.0.0.11:5009
+\ttotal packets:           7             total packets:           4
+\tunique bytes sent:    200              unique bytes sent:     100
+\telapsed time:    0:00:02.000000
+"""
+    rows = parse_stats(text)
+    assert len(rows) == 2
+    assert rows[0].n == 14
+    assert rows[0].host_a == "10.0.0.1:51365"
+    assert rows[0].host_b == "10.0.0.2:8009"
+    assert rows[1].n == 56
+    assert rows[1].host_a == "10.0.0.10:51420"
+    assert rows[1].host_b == "10.0.0.11:5009"
+
+
 def test_parse_stats_counts_and_bytes_summed_across_directions():
     rows = parse_stats(FIXTURE.read_text())
     # Connection 1 (just_attack.pcap conn 1): a->b=3pkts/226B, b->a=2pkts/0B.
@@ -239,3 +267,51 @@ TCP connection 1:
 """
     rows = parse_stats(body)
     assert rows[0].client_is_a is None
+
+
+RTT_FIXTURE = Path(__file__).parent / "fixtures" / "tcptrace_l_with_rtt.txt"
+
+
+def test_parse_stats_extracts_per_direction_rtt():
+    rows = parse_stats(RTT_FIXTURE.read_text())
+    assert len(rows) >= 1
+    r = rows[0]
+    # The fixture is conn 12 of firmware_flash.pcapng, captured with -r.
+    # Both directions should report RTT min/avg/max as floats (ms).
+    assert r.rtt_min_a is not None and r.rtt_min_a > 0
+    assert r.rtt_max_a is not None and r.rtt_max_a >= r.rtt_min_a
+    assert r.rtt_avg_a is not None
+    assert r.rtt_min_b is not None
+    assert r.rtt_max_b is not None
+    assert r.rtt_avg_b is not None
+
+
+def test_parse_stats_extracts_per_direction_mss_and_wscale():
+    body = """\
+TCP connection 1:
+\thost a:        1.1.1.1:1111
+\thost b:        2.2.2.2:2222
+   a->b:                                  b->a:
+     adv wind scale:            5           adv wind scale:            8
+     mss requested:          1460 bytes     mss requested:          1440 bytes
+================================
+"""
+    rows = parse_stats(body)
+    assert rows[0].mss_a == 1460
+    assert rows[0].mss_b == 1440
+    assert rows[0].wscale_a == 5
+    assert rows[0].wscale_b == 8
+
+
+def test_parse_stats_typed_fields_are_none_when_missing():
+    body = """\
+TCP connection 1:
+\thost a:        1.1.1.1:1
+\thost b:        2.2.2.2:2
+================================
+"""
+    rows = parse_stats(body)
+    assert rows[0].mss_a is None
+    assert rows[0].mss_b is None
+    assert rows[0].wscale_a is None
+    assert rows[0].wscale_b is None

@@ -218,6 +218,40 @@ pre.tcptrace-output {
     font-size: 11px;
     color: #888;
 }
+.tcptrace-warning-chip {
+    font-family: Menlo, monospace !important;
+    font-size: 11px !important;
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+    color: #f2c037 !important;
+    border: 1px solid #5a4710 !important;
+    background: #1a1407 !important;
+    padding: 0 8px !important;
+    min-height: 22px !important;
+}
+.tcptrace-warning-chip:hover {
+    background: #2a1f0c !important;
+}
+.tcptrace-warning-card {
+    background: #050505 !important;
+    color: #ddd !important;
+    max-width: 720px;
+    width: 90vw;
+    padding: 16px !important;
+}
+.tcptrace-warning-title {
+    color: #f2c037;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.tcptrace-warning-body {
+    font-family: Menlo, monospace;
+    font-size: 12px;
+    color: #ddd;
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
 
 /* ---- sticky tab/title header ---- */
 .tcptrace-sticky-head {
@@ -226,5 +260,32 @@ pre.tcptrace-output {
     z-index: 5;
     background: #000;
     padding-bottom: 4px;
+}
+
+/* TSG viewport stats panel — 4-column grid below the chart. */
+.tsg-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px 24px;
+  padding: 12px 16px;
+  margin-top: 8px;
+  border-top: 1px solid #1f1f1f;
+  font-family: Menlo, monospace;
+  font-size: 11px;
+  color: #cccccc;
+  background: rgba(10, 10, 10, 0.5);
+}
+.tsg-stats .col-title {
+  color: #888888;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+.tsg-stats .dir-label {
+  grid-column: 1 / -1;
+  color: #888888;
+  margin-top: 8px;
+}
+@media (max-width: 800px) {
+  .tsg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 """

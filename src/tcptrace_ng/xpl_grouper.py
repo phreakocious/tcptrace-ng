@@ -1,8 +1,9 @@
 """Group tcptrace xpl files by metric and direction for the new tab layout.
 
 tcptrace assigns letter pairs for direction labels: (a,b), (c,d), (e,f), …
-This module accepts any letter pair and maps `<lo>2<hi>` → forward,
-`<hi>2<lo>` → backward, `<lo>_<hi>_<metric>` → combined.
+through (y,z), then rolls over to two-letter pairs (aa,ab), (ac,ad), …
+This module accepts any same-length letter pair and maps `<lo>2<hi>` →
+forward, `<hi>2<lo>` → backward, `<lo>_<hi>_<metric>` → combined.
 
 Pure module: input is Paths/strings, output is data.
 """
@@ -15,8 +16,8 @@ from pathlib import Path
 
 _METRICS = ("tsg", "tput", "rtt", "owin", "ssize", "tline")
 
-_PAIR_RE = re.compile(r"^conn-\d+--([a-z])2([a-z])_(\w+)\.xpl$")
-_COMBINED_RE = re.compile(r"^conn-\d+--([a-z])_([a-z])_(\w+)\.xpl$")
+_PAIR_RE = re.compile(r"^conn-\d+--([a-z]+)2([a-z]+)_(\w+)\.xpl$")
+_COMBINED_RE = re.compile(r"^conn-\d+--([a-z]+)_([a-z]+)_(\w+)\.xpl$")
 
 
 def parse_xpl_name(name: str) -> tuple[str, str] | None:

@@ -7,9 +7,10 @@ Local web UI for [tcptrace](https://github.com/blitz/tcptrace) pcap analysis, wi
 ## Quickstart
 
 ```bash
-# 1. Install the system dependency
-brew install tcptrace                # macOS
-# or: apt install tcptrace            # Debian/Ubuntu
+# 1. Get a tcptrace binary — pick one:
+git clone --recurse-submodules <this repo> && cd tcptrace-ng && make vendor-tcptrace
+# or: brew install tcptrace            # macOS
+# or: apt install tcptrace             # Debian/Ubuntu
 
 # 2. Install tcptrace-ng
 pip install -e ".[dev]"
@@ -24,7 +25,8 @@ A browser opens to a local NiceGUI page laid out as a top bar + sidebar + main p
 
 - One tab per generated `.xpl` graph (time-sequence, throughput, RTT, owin, ssize), rendered as interactive Plotly charts with pan/zoom.
 - A **tcptrace output** button (top-right) opens the raw color-coded analysis in a modal (green = good, yellow = interesting, red = bad).
-- Header checkboxes toggle common tcptrace flags — `-n` (skip DNS), `-r` (RTT stats), `-w` (warnings), `-zx` (zero x-axis). Toggling re-runs analysis and busts the cache for that flag combo.
+- Header checkboxes toggle common tcptrace flags — **DNS** (opt-in, off by default → adds `-n` to skip hostname/port resolution), **RTT** (`-r`), **warn** (`-w`), **csum** (`--checksum --warn_printbadcsum` to verify and surface bad IP/TCP checksums — useful for catching NIC offload artifacts), **0-axis** (`-zx`). Toggling re-runs analysis and busts the cache for that flag combo.
+- A `⚠ N warnings` chip appears in the header when the pre-flight scan flags conditions that distort analysis. Currently detects NIC offload (LSO/GSO/TSO/LRO/GRO) — when the capture shows TCP segments larger than 1500 B, the captured MSS, time-sequence staircases, and retransmit detection are all unreliable. Click for full text.
 
 ### Tunnel decapsulation
 
@@ -50,6 +52,20 @@ tcptrace-ng [DIR]
   --debug              verbose logs
   -V, --version
 ```
+
+## Vendored tcptrace
+
+Upstream tcptrace ([tcptrace.org](http://tcptrace.org)) hasn't been touched since 2006; its TLS cert is expired and the source no longer builds on modern toolchains. [github.com/blitz/tcptrace](https://github.com/blitz/tcptrace) is the practical canonical source — it's what the FreeBSD port and Homebrew formula track. tcptrace-ng vendors a fork of that at `vendor/tcptrace` (submodule → [phreakocious/tcptrace](https://github.com/phreakocious/tcptrace)) with two build fixes for modern macOS/Linux toolchains:
+
+- `mod_traffic.c`: silenced an unused-return-value warning that `-Wreturn-type` now fails on.
+- `tcpdump.c`: replaced the private `pcap_offline_read()` (removed in modern libpcap) with `pcap_dispatch()` — [msagarpatel's 2021 Ubuntu fix](https://github.com/blitz/tcptrace/pull/9).
+
+```bash
+git submodule update --init    # if you didn't clone with --recurse-submodules
+make vendor-tcptrace           # configure + build → vendor/tcptrace/tcptrace
+```
+
+The runner resolves the binary in this order: `$TCPTRACE_BIN` (if set) → `vendor/tcptrace/tcptrace` (if built) → first `tcptrace` on `$PATH`. Installed wheels skip the vendored copy and fall back to `$PATH`.
 
 ## Development
 

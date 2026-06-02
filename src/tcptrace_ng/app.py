@@ -14,14 +14,13 @@ from __future__ import annotations
 import io
 import json
 import os
-import sys
 import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from nicegui import run, ui
+from nicegui import background_tasks, run, ui
 
 from . import __version__
 from .cache import (
@@ -35,8 +34,11 @@ from .cache import (
     write_version,
 )
 from .classifier import Class, classify
+from .csum import CsumEvent, scan_pcap as scan_csums
 from .decap import DECAP_VERSION, decap_pcap, detect_encaps
-from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure
+from .offload import detect_offload
+from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure, to_tsg_figure
+from .tcp_inspect import synthesize as synthesize_tsg
 from .runner import (
     AnalyzeResult,
     ConnRow,
@@ -46,7 +48,7 @@ from .runner import (
     list_connections,
     try_convert_to_pcap,
 )
-from .stats_parser import ConnStats
+from .stats_parser import STATS_PARSER_VERSION, ConnStats
 from .theme import DARK_CSS
 from .xpl_grouper import GroupedXpl, group_xpls
 from .xpl_parser import XplPlot, parse_xpl
@@ -124,6 +126,9 @@ class _State:
         # it points at <cache>/decap.pcap. Always None when no pcap is picked.
         self.effective_pcap: Path | None = None
         self.decap_encaps: set[str] = set()
+        # Findings from pre-flight scans (NIC offload, etc.) that don't break
+        # analysis but distort the results the user is about to see.
+        self.pcap_warnings: list[str] = []
         self.stats: list[
             ConnStats | ConnRow
         ] = []  # may be ConnStats (rich) or ConnRow (basic) per pick
@@ -133,15 +138,33 @@ class _State:
         self.chip_filters: set[str] = set()
         self.sort_key: str = "n"
         self.analyses: dict[int, AnalyzeResult] = {}
+        # Built plotly figure dicts keyed by (conn_n, metric). Populated lazily
+        # when a tab is activated; survives tab switches and re-clicks so
+        # already-built figures don't re-parse the xpl or rebuild the dict.
+        # Cleared when the pcap or flag set changes (i.e. cache version changes).
+        self.figure_cache: dict[tuple[int, str], dict | None] = {}
         self.timeout: float = 60.0
         self.debug: bool = False
-        # tcptrace command-line flag toggles. All default-off (matches the
-        # stock tcptrace default of resolving names + no extra long-output
-        # sections + wallclock graph axes).
-        self.no_dns: bool = False
+        # tcptrace command-line flag toggles. All default-off; we treat
+        # `dns` as an opt-in (tcptrace's default *is* to resolve names, but
+        # that hangs the UI on captures with many distinct endpoints, so the
+        # app inverts it and passes `-n` unless the user opts in).
+        self.dns: bool = False
         self.with_rtt: bool = False
         self.with_warnings: bool = False
         self.zero_x_axis: bool = False
+        # All packets whose TCP checksum failed our independent verification
+        # (csum.scan_pcap). One scan per pcap; per-connection use filters by
+        # endpoints. We deliberately never invoke tcptrace's `--checksum`
+        # filter — it drops bad-csum packets and hides half the connection
+        # whenever NIC TX offload leaves outbound checksums zeroed.
+        self.bad_csum_events: list[CsumEvent] = []
+        # When False (default), info-tier TSG annotations (partial-ACK,
+        # coalesced, benign dup-ACK, small win shrinks, …) are hidden from
+        # the chart and summarized in a top strip instead. The toggle is
+        # session-global so a user investigating a flow sees consistent
+        # density across whichever connection they jump into.
+        self.show_info: bool = False
 
 
 state = _State()
@@ -159,8 +182,8 @@ def _cache_version() -> str:
     can't share artifacts. The decap version is always included so changes to
     decap rewrite semantics invalidate every cache (including for plain pcaps
     that didn't trigger decap)."""
-    parts = [__version__, f"d{DECAP_VERSION}"]
-    if state.no_dns:
+    parts = [__version__, f"d{DECAP_VERSION}", f"s{STATS_PARSER_VERSION}"]
+    if not state.dns:
         parts.append("n")
     if state.with_rtt:
         parts.append("r")
@@ -214,7 +237,42 @@ def _badges(stats: ConnStats) -> list[str]:
         out.append("FIN")
     else:
         out.append("INC")
+    a, b = _csum_counts_for_endpoints(stats.host_a, stats.host_b)
+    if a + b > 0:
+        # The chip shows a→b/b→a totals. The acked-vs-lost split lives in the
+        # per-direction summary block under the chart; the chip is for triage
+        # at a glance.
+        out.append(f"CSUM {a}/{b}")
     return out
+
+
+def _split_endpoint(ep: str) -> tuple[str, int] | None:
+    """Parse `1.2.3.4:5` into `("1.2.3.4", 5)`. Returns None if it doesn't split."""
+    if ":" not in ep:
+        return None
+    ip, _, port = ep.rpartition(":")
+    if not port.isdigit():
+        return None
+    return ip, int(port)
+
+
+def _csum_times_directed(src: str, dst: str) -> list[float]:
+    """Bad-csum event times for packets going `src` → `dst` (each endpoint as
+    `ip:port`). Empty list when either endpoint won't parse."""
+    s = _split_endpoint(src)
+    d = _split_endpoint(dst)
+    if s is None or d is None:
+        return []
+    return [
+        ev.time
+        for ev in state.bad_csum_events
+        if (ev.src_ip, ev.src_port) == s and (ev.dst_ip, ev.dst_port) == d
+    ]
+
+
+def _csum_counts_for_endpoints(host_a: str, host_b: str) -> tuple[int, int]:
+    """(a→b, b→a) bad-checksum counts for one connection."""
+    return len(_csum_times_directed(host_a, host_b)), len(_csum_times_directed(host_b, host_a))
 
 
 _VERDICT_CSS = {
@@ -284,6 +342,273 @@ def _direction_labels(row) -> tuple[str, str]:
     )
 
 
+def _build_metric_figure(
+    forward: Path | None,
+    backward: Path | None,
+    combined: Path | None,
+    fwd_label: str,
+    bwd_label: str,
+    metric: str | None = None,
+    details_text: str = "",
+    show_info: bool = False,
+) -> dict | None:
+    """Parse xpl(s) and build a plotly figure dict. Returns None if no data.
+
+    The TSG metric routes through tcp_inspect.synthesize() + to_tsg_figure()
+    for semantic tooltips, anomaly annotations, and the in-flight overlay.
+    All other metrics use the generic paired path unchanged.
+    """
+    if metric == "tsg":
+        fwd_plot = None
+        bwd_plot = None
+        if forward is not None:
+            plot, _err = _safe_parse_xpl(forward)
+            if plot is not None and plot.commands:
+                fwd_plot = plot
+        if backward is not None:
+            plot, _err = _safe_parse_xpl(backward)
+            if plot is not None and plot.commands:
+                bwd_plot = plot
+        if fwd_plot is None and bwd_plot is None:
+            return None
+        fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+        pair = synthesize_tsg(
+            fwd_plot,
+            bwd_plot,
+            details_text,
+            bad_csum_times_fwd=fwd_csum,
+            bad_csum_times_bwd=bwd_csum,
+        )
+        return to_tsg_figure(pair, show_info=show_info)
+
+    if combined is not None:
+        plot, _err = _safe_parse_xpl(combined)
+        if plot is None or not plot.commands:
+            return None
+        return to_plotly_figure(plot, metric=metric)
+
+    fwd_plot = None
+    bwd_plot = None
+    if forward is not None:
+        plot, _err = _safe_parse_xpl(forward)
+        if plot is not None and plot.commands:
+            fwd_plot = plot
+    if backward is not None:
+        plot, _err = _safe_parse_xpl(backward)
+        if plot is not None and plot.commands:
+            bwd_plot = plot
+    if fwd_plot is None and bwd_plot is None:
+        return None
+    return to_paired_plotly_figure(
+        fwd_plot, bwd_plot, fwd_label, bwd_label, metric=metric
+    )
+
+
+def _safe_parse_xpl(xpl: Path) -> tuple[XplPlot | None, str | None]:
+    """Single try/except wrapper around parse_xpl. Returns (plot, None) on
+    success or (None, message) on failure so callers can pick recovery."""
+    try:
+        return parse_xpl(xpl), None
+    except Exception as exc:
+        return None, f"{xpl.name}: {exc}"
+
+
+def _csum_for_plots(
+    fwd_plot: XplPlot | None, bwd_plot: XplPlot | None
+) -> tuple[list[float], list[float]]:
+    """Map per-direction csum times by parsing endpoints out of the xpl titles.
+
+    Each tsg xpl carries a `<src:port> ==> <dst:port>` title; we use that as
+    the directional filter rather than the connection's `ConnStats` row, so
+    this also works for the raw-xpl preview path where stats aren't loaded.
+    """
+    from .tcp_inspect import _parse_endpoints  # avoid widening tcp_inspect's API
+
+    fwd_times: list[float] = []
+    bwd_times: list[float] = []
+    if fwd_plot is not None:
+        src, dst = _parse_endpoints(fwd_plot.title)
+        if src and dst:
+            fwd_times = _csum_times_directed(src, dst)
+    if bwd_plot is not None:
+        src, dst = _parse_endpoints(bwd_plot.title)
+        if src and dst:
+            bwd_times = _csum_times_directed(src, dst)
+    return fwd_times, bwd_times
+
+
+def _build_tsg_model(
+    forward: Path | None,
+    backward: Path | None,
+    details_text: str,
+):
+    """Parse + synthesize a TsgModelPair without building the figure.
+    Module-level so callers can run it through run.io_bound separately
+    from the figure build."""
+    fwd_plot = None
+    bwd_plot = None
+    if forward is not None:
+        plot, _err = _safe_parse_xpl(forward)
+        if plot is not None and plot.commands:
+            fwd_plot = plot
+    if backward is not None:
+        plot, _err = _safe_parse_xpl(backward)
+        if plot is not None and plot.commands:
+            bwd_plot = plot
+    if fwd_plot is None and bwd_plot is None:
+        return None
+    fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+    return synthesize_tsg(
+        fwd_plot,
+        bwd_plot,
+        details_text,
+        bad_csum_times_fwd=fwd_csum,
+        bad_csum_times_bwd=bwd_csum,
+    )
+
+
+def _format_bytes(n: float | int | None) -> str:
+    if n is None:
+        return "—"
+    n = float(n)
+    if n < 1024:
+        return f"{n:.0f} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _format_ms(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v:.1f} ms"
+
+
+def _format_count(v: int | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v:,}"
+
+
+def _format_bad_csum(ws) -> str:
+    """Render the bad-csum slot for the Reliability column.
+
+    Splits the count into `acked` (likely NIC offload) and `lost` (segment
+    later retransmitted, so the original was dropped). When everything's
+    acked we say so plainly; when nothing's acked we omit the split.
+    """
+    total = ws.n_bad_csum
+    if ws.n_bad_csum_lost > 0 and ws.n_bad_csum_acked > 0:
+        return (
+            f"{total} bad csum ({ws.n_bad_csum_lost} lost, "
+            f"{ws.n_bad_csum_acked} acked)"
+        )
+    if ws.n_bad_csum_lost > 0:
+        return f"{total} bad csum ({ws.n_bad_csum_lost} lost)"
+    if ws.n_bad_csum_acked > 0:
+        return f"{total} bad csum (all acked)"
+    return f"{total} bad csum"
+
+
+def _stats_grid_html(label: str, ws) -> str:
+    pct = (100.0 * ws.n_retx / ws.n_segs) if ws.n_segs else 0.0
+    rows = [
+        ("Volume",
+         f"{_format_count(ws.n_segs)} segs",
+         f"{_format_bytes(ws.bytes_sent)} sent",
+         f"{ws.throughput_eff_Bps / 1024:.1f} KB/s eff",
+         f"{_format_count(ws.n_sack_regions)} SACK"),
+        ("Reliability",
+         f"{ws.n_retx} retx ({pct:.1f}%)",
+         f" · {ws.n_rto} RTO",
+         f" · {ws.n_fast} fast",
+         (
+             f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
+             f"{ws.n_coalesced} coal · {ws.n_ooo} OOO · "
+             + _format_bad_csum(ws)
+             if ws.n_bad_csum > 0
+             else (
+                 f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
+                 f"{ws.n_coalesced} coal · {ws.n_ooo} OOO"
+             )
+         )),
+        ("Latency",
+         f"p50 {_format_ms(ws.rtt_p50_ms)}",
+         f"p95 {_format_ms(ws.rtt_p95_ms)}",
+         f"min/max {_format_ms(ws.rtt_min_ms)}/{_format_ms(ws.rtt_max_ms)}",
+         f"jitter {_format_ms(ws.jitter_ms)}"),
+        ("Receiver",
+         f"rwnd peak {_format_bytes(ws.rwin_peak)}",
+         f"scale ×{ws.rwin_scale}" if ws.rwin_scale is not None else "scale unknown",
+         f"shrinks: {ws.n_win_shrink}",
+         f"0-win: {ws.n_zero_win}"),
+    ]
+    parts = [f'<div class="dir-label">{label}</div>']
+    # Render as four columns; each column is one category.
+    titles = [r[0] for r in rows]
+    values = [r[1:] for r in rows]
+    for col_idx, title in enumerate(titles):
+        parts.append(f'<div><div class="col-title">{title}</div>')
+        for v in values[col_idx]:
+            parts.append(f"<div>{v}</div>")
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _xrange_from_relayout(args: dict) -> tuple[float | None, float | None]:
+    """Extract (t0, t1) in epoch seconds from a plotly_relayout event payload.
+
+    Returns (None, None) on autorange resets (double-click). x-axis is type=date,
+    so Plotly emits ISO strings (with timezone Z or +00:00)."""
+    # Autorange reset.
+    if args.get("xaxis.autorange") is True or args.get("autosize") is True:
+        return (None, None)
+    r0 = args.get("xaxis.range[0]")
+    r1 = args.get("xaxis.range[1]")
+    if r0 is None or r1 is None:
+        return (None, None)
+
+    def _to_epoch(v) -> float | None:
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            # Plotly emits e.g. "2018-09-28 23:46:24.7389" with millisecond precision.
+            for fmt in (
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%dT%H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+            ):
+                try:
+                    dt = datetime.strptime(v, fmt)
+                    return dt.replace(tzinfo=UTC).timestamp()
+                except ValueError:
+                    continue
+        return None
+
+    return (_to_epoch(r0), _to_epoch(r1))
+
+
+def _render_stats_panel(
+    container,
+    pair,
+    fwd_label: str,
+    bwd_label: str,
+    t0: float | None,
+    t1: float | None,
+) -> None:
+    container.clear()
+    with container:
+        html_parts: list[str] = []
+        if pair.fwd is not None:
+            html_parts.append(_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1)))
+        if pair.bwd is not None:
+            html_parts.append(_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1)))
+        ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
+
+
 def build_page() -> None:
     """Register the `/` route on the default NiceGUI app."""
 
@@ -308,10 +633,13 @@ def build_page() -> None:
                 .classes("min-w-[280px]")
             )
             with ui.row().classes("items-center gap-2 tcptrace-flag-strip"):
-                no_dns_check = (
-                    ui.checkbox("no DNS", value=state.no_dns)
+                dns_check = (
+                    ui.checkbox("DNS", value=state.dns)
                     .props("dense dark")
-                    .tooltip("-n: skip hostname / port-name resolution (much faster)")
+                    .tooltip(
+                        "resolve hostnames and port names (slow on captures with"
+                        " many distinct endpoints; off by default)"
+                    )
                 )
                 rtt_check = (
                     ui.checkbox("RTT", value=state.with_rtt)
@@ -329,6 +657,15 @@ def build_page() -> None:
                     .tooltip("-zx: plot graph time axis from 0 instead of wallclock")
                 )
             ui.space()
+            # Warning pill — hidden when there are no findings. Click opens a
+            # dialog with the full text; tooltip shows the first line on hover.
+            warning_chip = (
+                ui.button("")
+                .props("flat dense no-caps color=warning")
+                .classes("tcptrace-warning-chip mr-2")
+            )
+            warning_chip.visible = False
+            warning_dialog = ui.dialog()
             cache_label = ui.label().classes("tcptrace-cache-label mr-2")
             clear_btn = ui.button("Clear cache").props("flat dense no-caps color=grey-5")
             reanalyze_btn = ui.button("Reanalyze").props("flat dense no-caps color=grey-5")
@@ -338,6 +675,25 @@ def build_page() -> None:
             if state.decap_encaps:
                 parts.append(f"decap: {'+'.join(sorted(state.decap_encaps))}")
             cache_label.set_text(" · ".join(parts))
+
+        def refresh_warnings() -> None:
+            """Refresh the warning chip + dialog from `state.pcap_warnings`."""
+            warnings = state.pcap_warnings
+            if not warnings:
+                warning_chip.visible = False
+                return
+            n = len(warnings)
+            label = f"⚠ {n} warning" if n == 1 else f"⚠ {n} warnings"
+            warning_chip.set_text(label)
+            warning_chip.tooltip(warnings[0] if n == 1 else f"{warnings[0]}  (+{n - 1} more)")
+            warning_chip.visible = True
+            # Rebuild the dialog body each refresh so it reflects the latest list.
+            warning_dialog.clear()
+            with warning_dialog, ui.card().classes("tcptrace-warning-card"):
+                ui.label("Capture warnings").classes("tcptrace-warning-title")
+                for w in warnings:
+                    ui.label(w).classes("tcptrace-warning-body")
+                ui.button("close", on_click=warning_dialog.close).props("flat dense")
 
         def refresh_pcap_dropdown() -> None:
             """Rescan cwd and update the dropdown so new captures (and aging
@@ -481,10 +837,13 @@ def build_page() -> None:
         def _render_tabs_head(result: AnalyzeResult) -> tuple[list[GroupedXpl], object | None, str]:
             """Render the tab strip. Returns (groups, tabs_element, default_tab_label).
 
-            Returns ([], None, "") when there are no plottable groups; caller is
-            responsible for rendering an empty-state in _render_analysis.
+            Returns ([], None, "") when tcptrace emitted no xpl files for this
+            connection; caller renders an empty-state in _render_analysis.
+            Emptiness of any individual group is determined lazily when the
+            user activates its tab — pre-parsing every xpl just to check would
+            block the asyncio loop for hundreds of ms on dense captures.
             """
-            groups = [g for g in group_xpls(result.xpl_files) if _group_has_data(g)]
+            groups = group_xpls(result.xpl_files)
             if not groups:
                 return [], None, ""
             default_metric = "tsg" if any(g.metric == "tsg" for g in groups) else groups[0].metric
@@ -503,19 +862,154 @@ def build_page() -> None:
             tabs,
             default_tab: str,
         ) -> None:
-            row = next((r for r in state.stats if r.n == state.selected_conn), None)
-            if groups and tabs is not None:
-                fwd_label, bwd_label = _direction_labels(row) if row is not None else ("→", "←")
-                with (
-                    ui.tab_panels(tabs, value=default_tab)
-                    .classes("w-full")
-                    .style("background: transparent;")
-                ):
-                    for g in groups:
-                        with ui.tab_panel(_METRIC_LABELS[g.metric]).classes("p-0"):
-                            _render_metric_panel(g, fwd_label, bwd_label)
-            else:
+            """Render the tab panels as empty containers and wire lazy population.
+
+            Only the active tab's figure is built; other tabs build on click,
+            and each (conn, metric) figure is memoized in `state.figure_cache`
+            so re-activation is instant. Figure construction runs through
+            `run.io_bound` so the asyncio loop keeps ticking — without that,
+            a busy figure build (~hundreds of ms on dense captures) would
+            block the websocket and trip NiceGUI's client-side ping timeout.
+            """
+            if not (groups and tabs is not None):
                 ui.label("no graphs available").classes("tcptrace-empty w-full")
+                return
+            row = next((r for r in state.stats if r.n == state.selected_conn), None)
+            fwd_label, bwd_label = _direction_labels(row) if row is not None else ("→", "←")
+            conn_n = state.selected_conn
+
+            panel_containers: dict[str, ui.column] = {}
+            with (
+                ui.tab_panels(tabs, value=default_tab)
+                .classes("w-full")
+                .style("background: transparent;")
+            ):
+                for g in groups:
+                    with ui.tab_panel(_METRIC_LABELS[g.metric]).classes("p-0"):
+                        panel_containers[g.metric] = ui.column().classes("w-full gap-0")
+
+            metric_by_label = {_METRIC_LABELS[g.metric]: g.metric for g in groups}
+            group_by_metric = {g.metric: g for g in groups}
+            activated: set[str] = set()
+
+            def _show_figure(metric: str, fig: dict | None) -> None:
+                container = panel_containers[metric]
+                container.clear()
+                with container:
+                    if fig is None:
+                        ui.label("no data in this direction").classes(
+                            "tcptrace-empty w-full"
+                        ).style("margin-top: 32px;")
+                        return
+                    if metric == "tsg":
+                        with ui.row().classes(
+                            "items-center gap-2 px-3 py-1 w-full justify-end"
+                        ):
+                            info_switch = (
+                                ui.switch(
+                                    "Show info markers", value=state.show_info
+                                )
+                                .props("dense dark")
+                                .tooltip(
+                                    "Partial-ACK, coalesced (LRO), benign dup-ACK,"
+                                    " small win shrinks — off by default to keep"
+                                    " the chart focused on alerts and protocol"
+                                    " markers"
+                                )
+                            )
+                    plotly_el = ui.plotly(fig).classes("w-full").style(
+                        "height: calc(100vh - 320px); min-height: 480px;"
+                    )
+                    if metric == "tsg":
+                        model_pair = state.figure_cache.get((conn_n, metric, "model"))
+                        if model_pair is not None:
+                            stats_box = ui.column().classes("w-full")
+                            _render_stats_panel(
+                                stats_box, model_pair, fwd_label, bwd_label, None, None
+                            )
+
+                            def _on_relayout(e) -> None:
+                                t0, t1 = _xrange_from_relayout(e.args or {})
+                                _render_stats_panel(
+                                    stats_box, model_pair, fwd_label, bwd_label, t0, t1
+                                )
+
+                            plotly_el.on("plotly_relayout", _on_relayout)
+
+                            def _on_info_toggle(e) -> None:
+                                state.show_info = bool(e.value)
+                                new_fig = to_tsg_figure(
+                                    model_pair, show_info=state.show_info
+                                )
+                                state.figure_cache[(conn_n, metric)] = new_fig
+                                plotly_el.update_figure(new_fig)
+
+                            info_switch.on_value_change(_on_info_toggle)
+
+            async def _populate(metric: str) -> None:
+                if metric in activated:
+                    return
+                activated.add(metric)
+                g = group_by_metric.get(metric)
+                if g is None:
+                    return
+                cache_key = (conn_n, metric)
+                if cache_key in state.figure_cache:
+                    if state.selected_conn != conn_n:
+                        return
+                    _show_figure(metric, state.figure_cache[cache_key])
+                    return
+                container = panel_containers[metric]
+                with container:
+                    ui.spinner(size="md").classes("self-center").style("margin-top: 32px;")
+                try:
+                    fig = await run.io_bound(
+                        _build_metric_figure,
+                        g.forward,
+                        g.backward,
+                        g.combined,
+                        fwd_label,
+                        bwd_label,
+                        g.metric,
+                        state.analyses[conn_n].details_text,
+                        state.show_info,
+                    )
+                except Exception as exc:
+                    if state.selected_conn != conn_n:
+                        return
+                    container.clear()
+                    with container:
+                        ui.label(f"[render error: {exc}]").classes("text-red")
+                    return
+                state.figure_cache[cache_key] = fig
+                if metric == "tsg":
+                    model_pair = await run.io_bound(
+                        _build_tsg_model,
+                        g.forward,
+                        g.backward,
+                        state.analyses[conn_n].details_text,
+                    )
+                    state.figure_cache[(conn_n, metric, "model")] = model_pair
+                if state.selected_conn != conn_n:
+                    return
+                _show_figure(metric, fig)
+
+            async def _on_tab_change(e) -> None:
+                metric = metric_by_label.get(e.value)
+                if metric is not None:
+                    await _populate(metric)
+
+            tabs.on_value_change(_on_tab_change)
+
+            # Kick off the default tab's build without blocking this render —
+            # NiceGUI doesn't fire on_value_change for programmatically-set
+            # initial values, so we drive the first activation explicitly.
+            default_metric = next(
+                (g.metric for g in groups if _METRIC_LABELS[g.metric] == default_tab),
+                None,
+            )
+            if default_metric is not None:
+                background_tasks.create(_populate(default_metric))
 
         def _build_output_dialog(result: AnalyzeResult) -> ui.dialog:
             """Color-coded raw tcptrace output in a centered modal — opened
@@ -546,80 +1040,6 @@ def build_page() -> None:
                 ui.html(legend_html)
                 ui.html(pre_html)
             return dialog
-
-        def _try_parse(xpl: Path) -> tuple[XplPlot | None, str | None]:
-            """Single try/except wrapper around parse_xpl. Returns (plot, None)
-            on success or (None, message) on failure so callers can pick their
-            own recovery (skip, render-error-label, fall back to other side)."""
-            try:
-                return parse_xpl(xpl), None
-            except Exception as exc:
-                return None, f"{xpl.name}: {exc}"
-
-        def _group_has_data(g: GroupedXpl) -> bool:
-            for xpl in (g.forward, g.backward, g.combined):
-                if xpl is None:
-                    continue
-                plot, _err = _try_parse(xpl)
-                if plot is not None and plot.commands:
-                    return True
-            return False
-
-        def _render_metric_panel(g: GroupedXpl, fwd_label: str, bwd_label: str) -> None:
-            if g.combined is not None:
-                _render_xpl(g.combined)
-                return
-            if g.forward is None and g.backward is None:
-                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
-                    "margin-top: 32px;"
-                )
-                return
-            _render_paired_xpls(g.forward, g.backward, fwd_label, bwd_label)
-
-        def _render_paired_xpls(
-            fwd: Path | None, bwd: Path | None, fwd_label: str, bwd_label: str
-        ) -> None:
-            """Render forward and backward together as a single stacked figure."""
-            fwd_plot = _try_parse(fwd)[0] if fwd is not None else None
-            bwd_plot = _try_parse(bwd)[0] if bwd is not None else None
-            # Drop empty plots so the stack collapses to a single subplot when
-            # one direction is header-only.
-            if fwd_plot is not None and not fwd_plot.commands:
-                fwd_plot = None
-            if bwd_plot is not None and not bwd_plot.commands:
-                bwd_plot = None
-            if fwd_plot is None and bwd_plot is None:
-                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
-                    "margin-top: 32px;"
-                )
-                return
-            fig = to_paired_plotly_figure(fwd_plot, bwd_plot, fwd_label, bwd_label)
-            # Stacked: each subplot needs vertical room. Scale with the viewport
-            # so a 13" laptop doesn't push the tcptrace-output below the fold
-            # and a 4K display doesn't leave a giant blank gap. 240px leaves
-            # room for the header + sticky title/context/tab strip; the floor
-            # keeps both subplots usable on small viewports.
-            ui.plotly(fig).classes("w-full").style(
-                "height: calc(100vh - 240px); min-height: 480px;"
-            )
-
-        def _render_xpl(xpl: Path) -> None:
-            plot, err = _try_parse(xpl)
-            if err is not None:
-                ui.label(f"[unparseable graph: {err}]").classes("text-red")
-                return
-            if not plot.commands:
-                ui.label("no data in this direction").classes("tcptrace-empty w-full").style(
-                    "margin-top: 32px;"
-                )
-                return
-            if state.debug and plot.unknown:
-                for cmd in plot.unknown:
-                    print(
-                        f"[tcptrace-ng debug] unknown xpl command in {xpl.name}: {cmd}",
-                        file=sys.stderr,
-                    )
-            ui.plotly(to_plotly_figure(plot)).classes("w-full")
 
         def render_sidebar() -> None:
             conn_list_container.clear()
@@ -719,7 +1139,7 @@ def build_page() -> None:
                         n,
                         layout.conn_dir(n),
                         state.timeout,
-                        no_dns=state.no_dns,
+                        no_dns=not state.dns,
                         with_rtt=state.with_rtt,
                         with_warnings=state.with_warnings,
                         zero_x_axis=state.zero_x_axis,
@@ -783,14 +1203,32 @@ def build_page() -> None:
             state.decap_encaps = res.encaps
             return decap_path
 
+        async def _scan_for_warnings(pcap: Path) -> None:
+            """Populate `state.pcap_warnings` with pre-flight findings.
+
+            Currently: NIC offload (LSO/GSO/TSO/LRO/GRO) — TCP payloads
+            larger than 1500 B mean coalescing distorts the MSS field,
+            time-sequence staircases, and retransmit detection. Future
+            detectors append to the same list.
+            """
+            state.pcap_warnings = []
+            try:
+                offload = await run.io_bound(detect_offload, pcap)
+            except Exception:
+                return
+            state.pcap_warnings.extend(offload.warnings)
+
         async def _on_pcap_pick(e) -> None:
             value = e.value
             state.selected_pcap = Path(value) if value else None
             state.effective_pcap = state.selected_pcap
             state.decap_encaps = set()
+            state.pcap_warnings = []
+            refresh_warnings()
             state.selected_conn = None
             state.stats = []
             state.analyses = {}
+            state.figure_cache = {}
             state.conn_filter = ""
             filter_input.set_value("")
             _refresh_download_btn()
@@ -809,6 +1247,17 @@ def build_page() -> None:
                     f"decap'd outer {'/'.join(sorted(state.decap_encaps))}",
                     type="info",
                 )
+            await _scan_for_warnings(state.effective_pcap)
+            refresh_warnings()
+            # Independent per-packet TCP-checksum scan. Cheap on small pcaps
+            # and the only source of `bad_csum` anomalies; we never let
+            # tcptrace --checksum filter packets out of the analysis.
+            try:
+                state.bad_csum_events = await run.io_bound(
+                    scan_csums, state.effective_pcap
+                )
+            except Exception:
+                state.bad_csum_events = []
             cached = load_stats(layout, _cache_version())
             if cached is not None:
                 state.stats = cached
@@ -822,7 +1271,7 @@ def build_page() -> None:
                     analyze_all,
                     state.effective_pcap,
                     state.timeout,
-                    no_dns=state.no_dns,
+                    no_dns=not state.dns,
                     with_rtt=state.with_rtt,
                     with_warnings=state.with_warnings,
                 )
@@ -834,7 +1283,7 @@ def build_page() -> None:
                         list_connections,
                         state.effective_pcap,
                         state.timeout,
-                        no_dns=state.no_dns,
+                        no_dns=not state.dns,
                     )
                     fallback_ok = True
                 except RunnerError:
@@ -849,11 +1298,13 @@ def build_page() -> None:
                         state.effective_pcap = await _ensure_decapped(
                             state.selected_pcap, layout
                         )
+                        await _scan_for_warnings(state.effective_pcap)
+                        refresh_warnings()
                         state.stats = await run.io_bound(
                             list_connections,
                             state.effective_pcap,
                             state.timeout,
-                            no_dns=state.no_dns,
+                            no_dns=not state.dns,
                         )
                         fallback_ok = True
                     except RunnerError as exc2:
@@ -886,6 +1337,7 @@ def build_page() -> None:
             if root.exists():
                 _sh.rmtree(root)
             state.analyses.clear()
+            state.figure_cache.clear()
             state.selected_conn = None
             refresh_cache_label()
             _refresh_download_btn()
@@ -903,6 +1355,7 @@ def build_page() -> None:
                 return
             clear_pcap_cache(state.selected_pcap)
             state.analyses.clear()
+            state.figure_cache.clear()
             state.selected_conn = None
             refresh_cache_label()
             _refresh_download_btn()
@@ -927,10 +1380,11 @@ def build_page() -> None:
         # ---------- wire events ----------
         clear_btn.on_click(_clear_all)
         reanalyze_btn.on_click(_reanalyze)
+        warning_chip.on_click(warning_dialog.open)
         download_btn.on_click(_download_zip)
         filter_input.on_value_change(_on_filter_change)
         pcap_select.on_value_change(_on_pcap_pick)
-        no_dns_check.on_value_change(lambda e: _on_flag_change("no_dns", e.value))
+        dns_check.on_value_change(lambda e: _on_flag_change("dns", e.value))
         rtt_check.on_value_change(lambda e: _on_flag_change("with_rtt", e.value))
         warn_check.on_value_change(lambda e: _on_flag_change("with_warnings", e.value))
         zerox_check.on_value_change(lambda e: _on_flag_change("zero_x_axis", e.value))
@@ -938,6 +1392,7 @@ def build_page() -> None:
 
         # ---------- initial render ----------
         refresh_cache_label()
+        refresh_warnings()
         _refresh_download_btn()
         render_main()
         render_sidebar()

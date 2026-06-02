@@ -4,9 +4,12 @@ Pure module: input is text, output is a list of dataclasses. Designed to
 mirror xpl_parser.py — fixtures lifted verbatim from real tcptrace output,
 no imagined formats.
 
-tcptrace cycles its per-direction host labels (a/b, c/d, e/f, ...). The
-parser detects the pair from each block's header lines (`host X: ...` /
-`host Y: ...`) instead of hardcoding `a/b`.
+tcptrace cycles its per-direction host labels (a/b, c/d, e/f, ...). After
+the 26 lowercase letters are exhausted at conn 13's `y/z` pair, it rolls
+over to two-letter labels — `aa/ab` for conn 14, `ac/ad` for conn 15, and
+so on through `dg/dh` and beyond. The parser detects the pair from each
+block's `host X: ...` lines and accepts any run of lowercase letters so
+the host fields stay populated past conn 13.
 """
 
 from __future__ import annotations
@@ -17,11 +20,18 @@ from dataclasses import dataclass
 
 from .classifier import Class, classify
 
+# Bump when parse_stats output semantics change so the on-disk cache
+# (stats.json) gets invalidated automatically. v2 fixes empty host_a/host_b
+# fields for connections past 13 (two-letter host labels: aa/ab, …).
+# v3 adds per-direction RTT min/avg/max fields (from tcptrace -r output).
+# v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
+STATS_PARSER_VERSION = "4"
+
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",
     re.DOTALL | re.MULTILINE,
 )
-_HOST_RE = re.compile(r"^\s*host\s+([a-z]):\s+(\S+)\s*$", re.MULTILINE)
+_HOST_RE = re.compile(r"^\s*host\s+([a-z]+):\s+(\S+)\s*$", re.MULTILINE)
 _TOTAL_PKTS_RE = re.compile(r"^\s*total packets:\s+(\d+)\s+total packets:\s+(\d+)", re.MULTILINE)
 _UNIQUE_BYTES_RE = re.compile(
     r"^\s*unique bytes sent:\s+(\d+)\s+unique bytes sent:\s+(\d+)", re.MULTILINE
@@ -33,6 +43,19 @@ _COMPLETE_RE = re.compile(r"^\s*complete conn:\s+yes\b", re.MULTILINE)
 _SYNFIN_RE = re.compile(r"^\s*SYN/FIN pkts sent:\s+1/1\s+SYN/FIN pkts sent:\s+1/1", re.MULTILINE)
 _SYNFIN_PAIR_RE = re.compile(
     r"^\s*SYN/FIN pkts sent:\s+(\d+)/\d+\s+SYN/FIN pkts sent:\s+(\d+)/\d+",
+    re.MULTILINE,
+)
+
+_RTT_MIN_RE = re.compile(
+    r"^\s*RTT min:\s+(\d+\.\d+)\s+ms\s+RTT min:\s+(\d+\.\d+)\s+ms",
+    re.MULTILINE,
+)
+_RTT_MAX_RE = re.compile(
+    r"^\s*RTT max:\s+(\d+\.\d+)\s+ms\s+RTT max:\s+(\d+\.\d+)\s+ms",
+    re.MULTILINE,
+)
+_RTT_AVG_RE = re.compile(
+    r"^\s*RTT avg:\s+(\d+\.\d+)\s+ms\s+RTT avg:\s+(\d+\.\d+)\s+ms",
     re.MULTILINE,
 )
 
@@ -75,6 +98,20 @@ def _sum_pair(pattern: re.Pattern[str], body: str) -> int:
     if not m:
         return 0
     return int(m.group(1)) + int(m.group(2))
+
+
+def _pair_floats(pattern: re.Pattern[str], body: str) -> tuple[float | None, float | None]:
+    m = pattern.search(body)
+    if not m:
+        return None, None
+    return float(m.group(1)), float(m.group(2))
+
+
+def _pair_ints(pattern: re.Pattern[str], body: str) -> tuple[int | None, int | None]:
+    m = pattern.search(body)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
 
 
 def _has_rst(body: str) -> bool:
@@ -137,6 +174,16 @@ class ConnStats:
     verdict: Class
     fwd_ctx: str
     bwd_ctx: str
+    rtt_min_a: float | None = None
+    rtt_max_a: float | None = None
+    rtt_avg_a: float | None = None
+    rtt_min_b: float | None = None
+    rtt_max_b: float | None = None
+    rtt_avg_b: float | None = None
+    mss_a: int | None = None
+    mss_b: int | None = None
+    wscale_a: int | None = None
+    wscale_b: int | None = None
 
 
 def build_context_lines(body: str) -> tuple[str, str]:
@@ -173,6 +220,11 @@ def _parse_block(n: int, body: str) -> ConnStats:
     host_a = host_matches[0].group(2) if len(host_matches) >= 1 else ""
     host_b = host_matches[1].group(2) if len(host_matches) >= 2 else ""
     fwd_ctx, bwd_ctx = build_context_lines(body)
+    rtt_min_a, rtt_min_b = _pair_floats(_RTT_MIN_RE, body)
+    rtt_max_a, rtt_max_b = _pair_floats(_RTT_MAX_RE, body)
+    rtt_avg_a, rtt_avg_b = _pair_floats(_RTT_AVG_RE, body)
+    mss_a, mss_b = _pair_ints(_MSS_RE, body)
+    wscale_a, wscale_b = _pair_ints(_WS_RE, body)
     return ConnStats(
         n=n,
         host_a=host_a,
@@ -187,4 +239,14 @@ def _parse_block(n: int, body: str) -> ConnStats:
         verdict=_verdict(body),
         fwd_ctx=fwd_ctx,
         bwd_ctx=bwd_ctx,
+        rtt_min_a=rtt_min_a,
+        rtt_max_a=rtt_max_a,
+        rtt_avg_a=rtt_avg_a,
+        rtt_min_b=rtt_min_b,
+        rtt_max_b=rtt_max_b,
+        rtt_avg_b=rtt_avg_b,
+        mss_a=mss_a,
+        mss_b=mss_b,
+        wscale_a=wscale_a,
+        wscale_b=wscale_b,
     )

@@ -252,6 +252,61 @@ def test_analyze_connection_passes_all_flags_including_zx(tmp_path):
     assert cmd[-1] == str(pcap)
 
 
+def test_analyze_all_passes_checksum_flags(tmp_path):
+    """with_checksum bundles --checksum + --warn_printbadcsum: verification
+    plus the warning that actually surfaces bad ones."""
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = fixture
+        mock_run.return_value.returncode = 0
+        analyze_all(pcap, with_checksum=True)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--checksum" in cmd
+    assert "--warn_printbadcsum" in cmd
+    assert cmd[-1] == str(pcap)
+
+
+def test_analyze_connection_passes_checksum_flags(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.returncode = 0
+        analyze_connection(pcap, conn_n=1, output_dir=out_dir, with_checksum=True)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--checksum" in cmd
+    assert "--warn_printbadcsum" in cmd
+
+
+def test_analyze_all_omits_checksum_flags_by_default(tmp_path):
+    pcap = tmp_path / "x.pcap"
+    pcap.write_bytes(b"")
+    fixture = (Path(__file__).parent / "fixtures" / "tcptrace_l_two_conns.txt").read_text()
+    with (
+        patch("tcptrace_ng.runner._resolve_tcptrace", return_value="tcptrace"),
+        patch("tcptrace_ng.runner.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value.stdout = fixture
+        mock_run.return_value.returncode = 0
+        analyze_all(pcap)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--checksum" not in cmd
+    assert "--warn_printbadcsum" not in cmd
+
+
 def test_resolve_tcptrace_prefers_env_var(monkeypatch):
     monkeypatch.setenv("TCPTRACE_BIN", "/custom/path/tcptrace")
     assert _resolve_tcptrace() == "/custom/path/tcptrace"
