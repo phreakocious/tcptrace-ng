@@ -12,17 +12,26 @@ from tcptrace_ng.offload import detect_offload
 def _tcp_frame(payload_len: int) -> bytes:
     """An Ethernet/IPv4/TCP frame whose TCP payload is exactly `payload_len`."""
     tcp = dpkt.tcp.TCP(
-        sport=12345, dport=80, seq=1, ack=0, off_x2=0x50, flags=0x10,
+        sport=12345,
+        dport=80,
+        seq=1,
+        ack=0,
+        off_x2=0x50,
+        flags=0x10,
         data=b"\x00" * payload_len,
     )
     ip = dpkt.ip.IP(
-        src=b"\x0a\x00\x00\x01", dst=b"\x0a\x00\x00\x02",
-        p=dpkt.ip.IP_PROTO_TCP, data=bytes(tcp),
+        src=b"\x0a\x00\x00\x01",
+        dst=b"\x0a\x00\x00\x02",
+        p=dpkt.ip.IP_PROTO_TCP,
+        data=bytes(tcp),
     )
     ip.len = 20 + 20 + payload_len
     eth = dpkt.ethernet.Ethernet(
-        src=b"\x00\x11\x22\x33\x44\x55", dst=b"\xaa\xbb\xcc\xdd\xee\xff",
-        type=0x0800, data=bytes(ip),
+        src=b"\x00\x11\x22\x33\x44\x55",
+        dst=b"\xaa\xbb\xcc\xdd\xee\xff",
+        type=0x0800,
+        data=bytes(ip),
     )
     return bytes(eth)
 
@@ -32,13 +41,17 @@ def _udp_frame() -> bytes:
     udp = dpkt.udp.UDP(sport=12345, dport=53, data=b"\x00" * 32)
     udp.ulen = 8 + 32
     ip = dpkt.ip.IP(
-        src=b"\x0a\x00\x00\x01", dst=b"\x0a\x00\x00\x02",
-        p=dpkt.ip.IP_PROTO_UDP, data=bytes(udp),
+        src=b"\x0a\x00\x00\x01",
+        dst=b"\x0a\x00\x00\x02",
+        p=dpkt.ip.IP_PROTO_UDP,
+        data=bytes(udp),
     )
     ip.len = 20 + 8 + 32
     eth = dpkt.ethernet.Ethernet(
-        src=b"\x00\x11\x22\x33\x44\x55", dst=b"\xaa\xbb\xcc\xdd\xee\xff",
-        type=0x0800, data=bytes(ip),
+        src=b"\x00\x11\x22\x33\x44\x55",
+        dst=b"\xaa\xbb\xcc\xdd\xee\xff",
+        type=0x0800,
+        data=bytes(ip),
     )
     return bytes(eth)
 
@@ -116,7 +129,12 @@ def test_detect_offload_handles_truncated_pcap(tmp_path):
 def test_detect_offload_handles_ipv6(tmp_path):
     """IPv6+TCP payloads must trigger the same threshold logic as v4."""
     tcp = dpkt.tcp.TCP(
-        sport=12345, dport=80, seq=1, ack=0, off_x2=0x50, flags=0x10,
+        sport=12345,
+        dport=80,
+        seq=1,
+        ack=0,
+        off_x2=0x50,
+        flags=0x10,
         data=b"\x00" * 16384,
     )
     ip6 = dpkt.ip6.IP6(
@@ -127,8 +145,10 @@ def test_detect_offload_handles_ipv6(tmp_path):
     )
     ip6.plen = 20 + 16384
     eth = dpkt.ethernet.Ethernet(
-        src=b"\x00\x11\x22\x33\x44\x55", dst=b"\xaa\xbb\xcc\xdd\xee\xff",
-        type=0x86dd, data=bytes(ip6),
+        src=b"\x00\x11\x22\x33\x44\x55",
+        dst=b"\xaa\xbb\xcc\xdd\xee\xff",
+        type=0x86DD,
+        data=bytes(ip6),
     )
     pcap = _write_pcap(tmp_path, [bytes(eth)])
     rep = detect_offload(pcap)

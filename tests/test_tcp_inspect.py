@@ -18,7 +18,7 @@ from tcptrace_ng.tcp_inspect import (
     WindowStats,
     synthesize,
 )
-from tcptrace_ng.xpl_parser import XplPlot
+from tcptrace_ng.xpl_parser import XplPlot, parse_xpl
 
 
 def test_segment_is_frozen_dataclass():
@@ -118,8 +118,6 @@ def test_synthesize_header_only_xpl_returns_empty_model():
     assert pair.fwd.acks == []
     assert pair.bwd is None
 
-
-from tcptrace_ng.xpl_parser import parse_xpl
 
 # Real tsg.xpl excerpt — three white data segments straddling a SYN.
 # Lifted verbatim from .tcptrace/firmware_flash.pcapng/conn-12/conn-12--w2x_tsg.xpl
@@ -611,7 +609,7 @@ FIN
     assert fins[0].time == 5.0
 
 
-def test_anomaly_fin_retx_emitted_from_R_FIN_label():
+def test_anomaly_fin_retx_emitted_from_r_fin_label():
     # Red color + "R FIN" atext: a FIN retransmit. We want it classified as
     # fin_retx (more descriptive), not as a generic rto/spurious.
     xpl_text = """\
@@ -1020,10 +1018,8 @@ def test_win_shrink_promoted_to_large_when_shrink_meets_mss():
     from tcptrace_ng.tcp_inspect import _detect_anomalies
 
     acks_large_shrink = [
-        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
-        Ack(time=1.0, ack_seq=1000, rwin=8_500, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
+        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        Ack(time=1.0, ack_seq=1000, rwin=8_500, rwin_scaled=None, sack_blocks=(), dup_count=0),
     ]
     out = _detect_anomalies([], acks_large_shrink, mss=1460)
     kinds = [a.kind for a in out]
@@ -1031,10 +1027,8 @@ def test_win_shrink_promoted_to_large_when_shrink_meets_mss():
     assert "win_shrink" not in kinds
 
     acks_small_shrink = [
-        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
-        Ack(time=1.0, ack_seq=1000, rwin=9_900, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
+        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        Ack(time=1.0, ack_seq=1000, rwin=9_900, rwin_scaled=None, sack_blocks=(), dup_count=0),
     ]
     out = _detect_anomalies([], acks_small_shrink, mss=1460)
     kinds = [a.kind for a in out]
@@ -1047,10 +1041,8 @@ def test_win_shrink_without_mss_stays_info():
     from tcptrace_ng.tcp_inspect import _detect_anomalies
 
     acks = [
-        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
-        Ack(time=1.0, ack_seq=1000, rwin=5_000, rwin_scaled=None,
-            sack_blocks=(), dup_count=0),
+        Ack(time=0.0, ack_seq=1000, rwin=10_000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        Ack(time=1.0, ack_seq=1000, rwin=5_000, rwin_scaled=None, sack_blocks=(), dup_count=0),
     ]
     out = _detect_anomalies([], acks, mss=None)
     kinds = [a.kind for a in out]
@@ -1065,18 +1057,15 @@ def test_dup_ack_escalates_when_cumack_matches_fast_retx_seq():
 
     model = TsgModel(
         anomalies=[
-            Anomaly(time=1.0, kind="dup_ack", one_liner="dup at 1000",
-                    seq_lo=1000, seq_hi=1000),
-            Anomaly(time=1.5, kind="fast", one_liner="fast retx",
-                    seq_lo=1000, seq_hi=1100),
-            Anomaly(time=2.0, kind="dup_ack", one_liner="dup at 2000",
-                    seq_lo=2000, seq_hi=2000),
+            Anomaly(time=1.0, kind="dup_ack", one_liner="dup at 1000", seq_lo=1000, seq_hi=1000),
+            Anomaly(time=1.5, kind="fast", one_liner="fast retx", seq_lo=1000, seq_hi=1100),
+            Anomaly(time=2.0, kind="dup_ack", one_liner="dup at 2000", seq_lo=2000, seq_hi=2000),
         ],
     )
     _escalate_dup_acks(model)
     kinds = [a.kind for a in model.anomalies]
     assert "dup_ack_drove_retx" in kinds  # matched cumack=1000
-    assert "dup_ack" in kinds              # unmatched cumack=2000 stays
+    assert "dup_ack" in kinds  # unmatched cumack=2000 stays
 
 
 def test_handshake_ack_emitted_after_bwd_syn_ack():
@@ -1085,16 +1074,13 @@ def test_handshake_ack_emitted_after_bwd_syn_ack():
 
     fwd = TsgModel(
         acks=[
-            Ack(time=2.0, ack_seq=5001, rwin=1024, rwin_scaled=None,
-                sack_blocks=(), dup_count=0),
-            Ack(time=3.0, ack_seq=6001, rwin=1024, rwin_scaled=None,
-                sack_blocks=(), dup_count=0),
+            Ack(time=2.0, ack_seq=5001, rwin=1024, rwin_scaled=None, sack_blocks=(), dup_count=0),
+            Ack(time=3.0, ack_seq=6001, rwin=1024, rwin_scaled=None, sack_blocks=(), dup_count=0),
         ],
     )
     bwd = TsgModel(
         anomalies=[
-            Anomaly(time=1.5, kind="syn_ack", one_liner="syn_ack",
-                    seq_lo=5000, seq_hi=5000),
+            Anomaly(time=1.5, kind="syn_ack", one_liner="syn_ack", seq_lo=5000, seq_hi=5000),
         ],
     )
     _emit_handshake_ack(fwd, bwd)
@@ -1111,6 +1097,7 @@ def test_handshake_ack_emitted_after_bwd_syn_ack():
 # ---------------------------------------------------------------------------
 # TsgModel.window_stats() tests
 # ---------------------------------------------------------------------------
+
 
 def _model_with_segments_and_acks() -> TsgModel:
     xpl_text = """\

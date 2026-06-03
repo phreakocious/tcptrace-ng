@@ -42,3 +42,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["E501"]
+# Intentional display glyphs, not confusable typos: `×` (e.g. "scale ×128") and
+# `›` (the header brand separator).
+allowed-confusables = ["×", "›"]
+
+[tool.ruff.lint.pep8-naming]
+# `Bps` = bytes/sec, a deliberate unit (vs `bps` = bits/sec). Keep the capital B
+# in identifiers like `v_Bps`, `throughput_eff_Bps`, `rate_before_Bps`.
+extend-ignore-names = ["*Bps*"]

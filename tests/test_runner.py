@@ -307,9 +307,18 @@ def test_analyze_all_omits_checksum_flags_by_default(tmp_path):
     assert "--warn_printbadcsum" not in cmd
 
 
-def test_resolve_tcptrace_prefers_env_var(monkeypatch):
-    monkeypatch.setenv("TCPTRACE_BIN", "/custom/path/tcptrace")
-    assert _resolve_tcptrace() == "/custom/path/tcptrace"
+def test_resolve_tcptrace_prefers_env_var(tmp_path, monkeypatch):
+    custom = tmp_path / "tcptrace"
+    custom.write_text("#!/bin/sh\n")
+    custom.chmod(0o755)
+    monkeypatch.setenv("TCPTRACE_BIN", str(custom))
+    assert _resolve_tcptrace() == str(custom)
+
+
+def test_resolve_tcptrace_raises_when_env_var_not_executable(tmp_path, monkeypatch):
+    monkeypatch.setenv("TCPTRACE_BIN", str(tmp_path / "nope"))
+    with pytest.raises(RunnerError, match="TCPTRACE_BIN"):
+        _resolve_tcptrace()
 
 
 def test_resolve_tcptrace_uses_vendored_when_present(tmp_path, monkeypatch):

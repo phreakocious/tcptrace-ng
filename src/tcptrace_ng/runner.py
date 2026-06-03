@@ -20,9 +20,7 @@ class RunnerError(RuntimeError):
     """Raised when an external tool fails or is missing."""
 
 
-_VENDORED_TCPTRACE = (
-    Path(__file__).resolve().parents[2] / "vendor" / "tcptrace" / "tcptrace"
-)
+_VENDORED_TCPTRACE = Path(__file__).resolve().parents[2] / "vendor" / "tcptrace" / "tcptrace"
 
 
 def _resolve_tcptrace() -> str:
@@ -34,6 +32,8 @@ def _resolve_tcptrace() -> str:
     to PATH.
     """
     if env := os.environ.get("TCPTRACE_BIN"):
+        if not (Path(env).is_file() and os.access(env, os.X_OK)):
+            raise RunnerError(f"TCPTRACE_BIN={env!r} is not an executable file")
         return env
     if _VENDORED_TCPTRACE.is_file() and os.access(_VENDORED_TCPTRACE, os.X_OK):
         return str(_VENDORED_TCPTRACE)

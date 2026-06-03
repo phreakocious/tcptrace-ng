@@ -191,6 +191,18 @@ def _stats() -> list[ConnStats]:
             verdict=Class.LOOK,
             fwd_ctx="MSS 1460 · ws 5",
             bwd_ctx="MSS 1440 · ws 3",
+            rtt_min_a=10.5,
+            rtt_max_a=20.5,
+            rtt_avg_a=15.0,
+            rtt_min_b=11.0,
+            rtt_max_b=22.0,
+            rtt_avg_b=16.0,
+            mss_a=1460,
+            mss_b=1440,
+            wscale_a=7,
+            wscale_b=8,
+            rtt_3whs_a=12.3,
+            rtt_3whs_b=45.6,
         ),
     ]
 

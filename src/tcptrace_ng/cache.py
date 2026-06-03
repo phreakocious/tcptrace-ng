@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from .classifier import Class
 from .stats_parser import ConnStats
+
+# All ConnStats field names — used to filter loaded JSON so the round-trip stays
+# robust to schema drift (extra keys ignored, new optional fields default).
+_STATS_FIELDS = frozenset(f.name for f in fields(ConnStats))
 
 
 def pcap_cache_dir(pcap: Path) -> Path:
@@ -130,26 +134,20 @@ def total_cache_size(cwd: Path) -> int:
 
 
 def save_stats(layout: CacheLayout, rows: list[ConnStats]) -> None:
-    """Persist ConnStats list as JSON. Only the fields the UI needs at page-load."""
+    """Persist the full ConnStats list as JSON (lossless).
+
+    Every field is serialized so a warm-cache load is indistinguishable from a
+    fresh parse. The typed RTT/MSS/wscale fields feed diagnose() (capture_vantage
+    reads rtt_3whs) and the throughput/tcp_inspect models, so dropping them
+    silently changed results between cold and warm cache. `verdict` (a Class enum)
+    is the only field that isn't natively JSON-serializable.
+    """
     layout.ensure_root()
-    payload = [
-        {
-            "n": r.n,
-            "host_a": r.host_a,
-            "host_b": r.host_b,
-            "client_is_a": r.client_is_a,
-            "total_bytes": r.total_bytes,
-            "total_packets": r.total_packets,
-            "duration_s": r.duration_s,
-            "rexmt_packets": r.rexmt_packets,
-            "has_rst": r.has_rst,
-            "complete_handshake": r.complete_handshake,
-            "verdict": r.verdict.value,
-            "fwd_ctx": r.fwd_ctx,
-            "bwd_ctx": r.bwd_ctx,
-        }
-        for r in rows
-    ]
+    payload = []
+    for r in rows:
+        d = asdict(r)
+        d["verdict"] = r.verdict.value
+        payload.append(d)
     layout.stats_json.write_text(json.dumps(payload))
 
 
@@ -158,21 +156,9 @@ def load_stats(layout: CacheLayout, version: str) -> list[ConnStats] | None:
     if not is_fresh(layout.stats_json, layout.pcap, version, layout.version_file):
         return None
     rows = json.loads(layout.stats_json.read_text())
-    return [
-        ConnStats(
-            n=r["n"],
-            host_a=r["host_a"],
-            host_b=r["host_b"],
-            client_is_a=r["client_is_a"],
-            total_bytes=r["total_bytes"],
-            total_packets=r["total_packets"],
-            duration_s=r["duration_s"],
-            rexmt_packets=r["rexmt_packets"],
-            has_rst=r["has_rst"],
-            complete_handshake=r["complete_handshake"],
-            verdict=Class(r["verdict"]),
-            fwd_ctx=r["fwd_ctx"],
-            bwd_ctx=r["bwd_ctx"],
-        )
-        for r in rows
-    ]
+    out: list[ConnStats] = []
+    for r in rows:
+        kw = {k: v for k, v in r.items() if k in _STATS_FIELDS}
+        kw["verdict"] = Class(kw["verdict"])
+        out.append(ConnStats(**kw))
+    return out

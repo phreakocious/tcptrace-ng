@@ -1,10 +1,19 @@
 import pytest
 
 from tcptrace_ng.plotly_adapter import (
+    _epoch_to_iso,
     _humanize_title,
     to_paired_plotly_figure,
     to_plotly_figure,
     to_throughput_figure,
+    to_tsg_figure,
+)
+from tcptrace_ng.tcp_inspect import (
+    Ack,
+    Anomaly,
+    Segment,
+    TsgModel,
+    TsgModelPair,
 )
 from tcptrace_ng.theme import LINE_DIM_COLOR
 from tcptrace_ng.throughput import (
@@ -68,8 +77,10 @@ def test_text_becomes_hover_marker_not_inline_annotation():
     assert fig["layout"].get("annotations", []) == []
     # Labels live in scatter traces with hovertext (one trace per color).
     label_traces = [
-        t for t in fig["data"] if t.get("hovertext") and "ACK" in t["hovertext"] or
-        t.get("hovertext") and "rwin" in t["hovertext"]
+        t
+        for t in fig["data"]
+        if (t.get("hovertext") and "ACK" in t["hovertext"])
+        or (t.get("hovertext") and "rwin" in t["hovertext"])
     ]
     assert label_traces, "expected hover-marker traces for labels"
     all_hover_text: list[str] = []
@@ -241,12 +252,22 @@ def test_markers_preserve_event_color():
 
 def test_paired_figure_stacks_forward_and_backward_with_matched_xaxis():
     """Both directions share one figure; x-axes are linked so zoom/pan syncs."""
-    fwd = XplPlot(title="fwd", xlabel="time", ylabel="seq", commands=[
-        Line(color="green", x1=0, y1=0, x2=1, y2=1),
-    ])
-    bwd = XplPlot(title="bwd", xlabel="time", ylabel="ack", commands=[
-        Line(color="yellow", x1=0, y1=10, x2=1, y2=11),
-    ])
+    fwd = XplPlot(
+        title="fwd",
+        xlabel="time",
+        ylabel="seq",
+        commands=[
+            Line(color="green", x1=0, y1=0, x2=1, y2=1),
+        ],
+    )
+    bwd = XplPlot(
+        title="bwd",
+        xlabel="time",
+        ylabel="ack",
+        commands=[
+            Line(color="yellow", x1=0, y1=10, x2=1, y2=11),
+        ],
+    )
     fig = to_paired_plotly_figure(fwd, bwd, "client → server", "server → client")
     # Two subplots: forward traces on (x, y), backward on (x2, y2).
     fwd_traces = [t for t in fig["data"] if t.get("xaxis", "x") == "x"]
@@ -332,13 +353,12 @@ def test_paired_figure_falls_back_to_single_when_only_forward_present():
     assert all(t.get("xaxis", "x") == "x" for t in fig["data"])
 
 
-
 def test_unhinted_orphan_color_stays_out_of_legend():
     """No fallback to the color name — "orange" or "white" alone doesn't tell
     the user anything the marker's color hasn't already shown. Only colors
     with a semantic hint earn a legend entry."""
     plot = XplPlot(commands=[Dot(color="orange", x=1.0, y=2.0)])
-    fig = to_plotly_figure(plot, metric="some_unknown_metric")
+    fig = to_plotly_figure(plot)
     assert not any(t.get("showlegend") for t in fig["data"])
     # The trace is still rendered — the user can still see the marker; it
     # just doesn't earn a meaningless legend entry.
@@ -414,10 +434,6 @@ def test_humanize_backward_arrow():
     assert _humanize_title("a_<==_b (x)") == "a ← b"
 
 
-from tcptrace_ng.plotly_adapter import _epoch_to_iso, to_tsg_figure
-from tcptrace_ng.tcp_inspect import Segment, TsgModel, TsgModelPair
-
-
 def test_to_tsg_figure_empty_pair_returns_dark_layout():
     fig = to_tsg_figure(TsgModelPair())
     assert fig["layout"]["template"] == "plotly_dark"
@@ -487,6 +503,24 @@ def test_data_segment_trace_has_numeric_customdata_and_hovertemplate():
     assert "customdata" in t["hovertemplate"]
 
 
+def test_tsg_figure_rel_seq_mode_subtracts_constant_baseline():
+    """The UI defaults to seq_mode='rel'; the abs path is what's asserted above.
+    rel must subtract one constant baseline from every plotted sequence number."""
+    pair = TsgModelPair(fwd=_model_with_segments())
+    abs_y = next(t for t in to_tsg_figure(pair, seq_mode="abs")["data"] if t.get("name") == "data")[
+        "y"
+    ]
+    rel_y = next(t for t in to_tsg_figure(pair, seq_mode="rel")["data"] if t.get("name") == "data")[
+        "y"
+    ]
+    deltas = {a - r for a, r in zip(abs_y, rel_y, strict=True) if a is not None}
+    assert len(deltas) == 1  # one constant baseline subtracted from every point
+    (baseline,) = deltas
+    assert baseline > 1_000_000  # the large absolute ISN was removed
+    assert all((a is None) == (r is None) for a, r in zip(abs_y, rel_y, strict=True))
+    assert max(r for r in rel_y if r is not None) < 100_000
+
+
 def test_retx_segment_trace_separate_from_data_with_rtx_kind_in_customdata():
     model = TsgModel(
         src="1.1.1.1:1",
@@ -523,9 +557,6 @@ def test_retx_segment_trace_separate_from_data_with_rtx_kind_in_customdata():
     codes = [row[-1] for row in t["customdata"]]
     assert codes == [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
     assert "Retransmit" in t["hovertemplate"]
-
-
-from tcptrace_ng.tcp_inspect import Ack
 
 
 def test_ack_trace_has_step_geometry_and_dup_count_in_customdata():
@@ -579,9 +610,6 @@ def test_rwin_trace_tooltip_includes_window_value():
     fig = to_tsg_figure(TsgModelPair(fwd=model))
     rwin_traces = [t for t in fig["data"] if t.get("name") == "rwin"]
     assert "rwnd" in rwin_traces[0]["hovertemplate"]
-
-
-from tcptrace_ng.tcp_inspect import Anomaly
 
 
 def test_annotations_emitted_for_each_anomaly_kind():
@@ -768,7 +796,7 @@ def test_tsg_figure_includes_rwin_when_close_to_data():
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
     yaxis = fig["layout"]["yaxis"]
-    lo, hi = yaxis["range"]
+    _lo, hi = yaxis["range"]
     # rwin top at 1500 + 200 = 1700; should be within the range (plus margin).
     assert hi >= 1700
 
@@ -780,12 +808,18 @@ def test_tsg_figure_capping_applies_per_direction_in_stacked_subplots():
         dst="2.2.2.2:2",
         direction="a2b",
         segments=[
-            Segment(time=1.0, seq_start=100, seq_end=200, rtx=None,
-                    paired_ack_time=None, paired_rtt_ms=None, in_flight_after=100)
+            Segment(
+                time=1.0,
+                seq_start=100,
+                seq_end=200,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=100,
+            )
         ],
         acks=[
-            Ack(time=1.5, ack_seq=200, rwin=50_000, rwin_scaled=None,
-                sack_blocks=(), dup_count=0)
+            Ack(time=1.5, ack_seq=200, rwin=50_000, rwin_scaled=None, sack_blocks=(), dup_count=0)
         ],
     )
     bwd = TsgModel(
@@ -793,13 +827,25 @@ def test_tsg_figure_capping_applies_per_direction_in_stacked_subplots():
         dst="1.1.1.1:1",
         direction="b2a",
         segments=[
-            Segment(time=1.0, seq_start=3_000_000_000, seq_end=3_000_000_100,
-                    rtx=None, paired_ack_time=None, paired_rtt_ms=None,
-                    in_flight_after=100)
+            Segment(
+                time=1.0,
+                seq_start=3_000_000_000,
+                seq_end=3_000_000_100,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=100,
+            )
         ],
         acks=[
-            Ack(time=1.5, ack_seq=3_000_000_100, rwin=10_000,
-                rwin_scaled=None, sack_blocks=(), dup_count=0)
+            Ack(
+                time=1.5,
+                ack_seq=3_000_000_100,
+                rwin=10_000,
+                rwin_scaled=None,
+                sack_blocks=(),
+                dup_count=0,
+            )
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=fwd, bwd=bwd))
@@ -882,10 +928,46 @@ def test_in_flight_overlay_trace_present_when_in_flight_nonempty():
     overlays = [t for t in fig["data"] if t.get("name") == "in-flight"]
     assert len(overlays) == 1
     o = overlays[0]
-    # Filled area trace.
-    assert o.get("fill") in {"tozeroy", "tonexty", "toself"}
+    # Self-closed band (order-independent), not a neighbor-anchored fill.
+    assert o["fill"] == "toself"
     # Toggleable via legend.
     assert o.get("showlegend") is True
+    # Band spans the cumack staircase (1000) up to cumack + peak in-flight
+    # (1000 + 200) — outstanding bytes, not the rwin headroom.
+    assert min(o["y"]) == 1000
+    assert max(o["y"]) == 1200
+    # Closed polygon: top edge + cumack floor for each of the 3 in-flight points.
+    assert len(o["y"]) == 6
+
+
+def test_in_flight_overlay_self_contained_without_acks():
+    """With no ACKs the band still renders against the segment-seq floor; the
+    old tonexty fill had no preceding trace to anchor against here."""
+    model = TsgModel(
+        src="1.1.1.1:1",
+        dst="2.2.2.2:2",
+        direction="a2b",
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=500,
+                seq_end=600,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=100,
+            )
+        ],
+        in_flight=[(1.0, 100), (2.0, 50)],
+    )
+    fig = to_tsg_figure(TsgModelPair(fwd=model))
+    overlays = [t for t in fig["data"] if t.get("name") == "in-flight"]
+    assert len(overlays) == 1
+    o = overlays[0]
+    assert o["fill"] == "toself"
+    # No acks -> cumack floor is the first segment's seq_start (500).
+    assert min(o["y"]) == 500
+    assert max(o["y"]) == 600  # 500 + peak in-flight 100
 
 
 def test_info_tier_annotations_hidden_by_default():
@@ -897,17 +979,13 @@ def test_info_tier_annotations_hidden_by_default():
         direction="a2b",
         anomalies=[
             Anomaly(time=1.0, kind="rto", one_liner="r", seq_lo=100, seq_hi=200),
-            Anomaly(time=2.0, kind="partial_ack", one_liner="p",
-                    seq_lo=300, seq_hi=300),
-            Anomaly(time=3.0, kind="coalesced", one_liner="c",
-                    seq_lo=400, seq_hi=500),
+            Anomaly(time=2.0, kind="partial_ack", one_liner="p", seq_lo=300, seq_hi=300),
+            Anomaly(time=3.0, kind="coalesced", one_liner="c", seq_lo=400, seq_hi=500),
         ],
     )
     fig_hidden = to_tsg_figure(TsgModelPair(fwd=model))
     inline_kinds = [
-        a["text"]
-        for a in fig_hidden["layout"]["annotations"]
-        if a.get("yref") != "paper"
+        a["text"] for a in fig_hidden["layout"]["annotations"] if a.get("yref") != "paper"
     ]
     assert any("RTO" in t for t in inline_kinds)
     assert not any("PA" in t for t in inline_kinds)
@@ -915,9 +993,7 @@ def test_info_tier_annotations_hidden_by_default():
 
     fig_shown = to_tsg_figure(TsgModelPair(fwd=model), show_info=True)
     inline_kinds = [
-        a["text"]
-        for a in fig_shown["layout"]["annotations"]
-        if a.get("yref") != "paper"
+        a["text"] for a in fig_shown["layout"]["annotations"] if a.get("yref") != "paper"
     ]
     assert any("PA" in t for t in inline_kinds)
     assert any("LRO" in t for t in inline_kinds)
@@ -931,18 +1007,13 @@ def test_info_strip_summarizes_hidden_kinds_above_subplot():
         dst="2.2.2.2:2",
         direction="a2b",
         anomalies=[
-            Anomaly(time=1.0, kind="partial_ack", one_liner="p",
-                    seq_lo=100, seq_hi=100),
-            Anomaly(time=2.0, kind="partial_ack", one_liner="p",
-                    seq_lo=200, seq_hi=200),
-            Anomaly(time=3.0, kind="coalesced", one_liner="c",
-                    seq_lo=300, seq_hi=400),
+            Anomaly(time=1.0, kind="partial_ack", one_liner="p", seq_lo=100, seq_hi=100),
+            Anomaly(time=2.0, kind="partial_ack", one_liner="p", seq_lo=200, seq_hi=200),
+            Anomaly(time=3.0, kind="coalesced", one_liner="c", seq_lo=300, seq_hi=400),
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    paper_anns = [
-        a for a in fig["layout"]["annotations"] if a.get("yref") == "paper"
-    ]
+    paper_anns = [a for a in fig["layout"]["annotations"] if a.get("yref") == "paper"]
     assert len(paper_anns) == 1
     text = paper_anns[0]["text"]
     assert "2 PA" in text
@@ -959,30 +1030,40 @@ def test_syn_segment_excluded_from_data_trace_to_avoid_orphan_hover():
         dst="2.2.2.2:2",
         direction="a2b",
         segments=[
-            Segment(time=1.0, seq_start=1000, seq_end=1001, rtx=None,
-                    paired_ack_time=1.5, paired_rtt_ms=500.0,
-                    in_flight_after=0),  # SYN (1-byte)
-            Segment(time=2.0, seq_start=1001, seq_end=2001, rtx=None,
-                    paired_ack_time=None, paired_rtt_ms=None,
-                    in_flight_after=1000),  # real data
+            Segment(
+                time=1.0,
+                seq_start=1000,
+                seq_end=1001,
+                rtx=None,
+                paired_ack_time=1.5,
+                paired_rtt_ms=500.0,
+                in_flight_after=0,
+            ),  # SYN (1-byte)
+            Segment(
+                time=2.0,
+                seq_start=1001,
+                seq_end=2001,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=1000,
+            ),  # real data
         ],
         anomalies=[
-            Anomaly(time=1.0, kind="syn", one_liner="SYN (initiator)",
-                    seq_lo=1001, seq_hi=1001),
+            Anomaly(time=1.0, kind="syn", one_liner="SYN (initiator)", seq_lo=1001, seq_hi=1001),
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
     data_traces = [
-        t for t in fig["data"]
-        if t.get("name", "").endswith("data") and t.get("mode") == "lines"
+        t for t in fig["data"] if t.get("name", "").endswith("data") and t.get("mode") == "lines"
     ]
     assert data_traces, "expected at least one data trace"
     seq_starts = set()
     for t in data_traces:
         for cd in t.get("customdata", []):
             seq_starts.add(int(cd[2]))
-    assert 1001 in seq_starts            # the real data segment passes through
-    assert 1000 not in seq_starts        # the SYN segment is filtered out
+    assert 1001 in seq_starts  # the real data segment passes through
+    assert 1000 not in seq_starts  # the SYN segment is filtered out
 
 
 def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
@@ -994,19 +1075,22 @@ def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
         dst="2.2.2.2:2",
         direction="a2b",
         segments=[
-            Segment(time=1.0, seq_start=12345, seq_end=12346, rtx=None,
-                    paired_ack_time=1.5, paired_rtt_ms=23.4,
-                    in_flight_after=0),
+            Segment(
+                time=1.0,
+                seq_start=12345,
+                seq_end=12346,
+                rtx=None,
+                paired_ack_time=1.5,
+                paired_rtt_ms=23.4,
+                in_flight_after=0,
+            ),
         ],
         anomalies=[
-            Anomaly(time=1.0, kind="syn", one_liner="SYN (initiator)",
-                    seq_lo=12346, seq_hi=12346),
+            Anomaly(time=1.0, kind="syn", one_liner="SYN (initiator)", seq_lo=12346, seq_hi=12346),
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    anns = [
-        a for a in fig["layout"]["annotations"] if a.get("text") == "S"
-    ]
+    anns = [a for a in fig["layout"]["annotations"] if a.get("text") == "S"]
     assert len(anns) == 1
     tip = anns[0]["hovertext"]
     assert "SYN (initiator)" in tip
@@ -1031,19 +1115,13 @@ def test_anomaly_annotation_border_color_matches_severity():
         dst="2.2.2.2:2",
         direction="a2b",
         anomalies=[
-            Anomaly(time=1.0, kind="syn", one_liner="s",
-                    seq_lo=1000, seq_hi=1000),
-            Anomaly(time=2.0, kind="rto", one_liner="r",
-                    seq_lo=2000, seq_hi=2100),
-            Anomaly(time=3.0, kind="ooo", one_liner="o",
-                    seq_lo=2200, seq_hi=2200),
+            Anomaly(time=1.0, kind="syn", one_liner="s", seq_lo=1000, seq_hi=1000),
+            Anomaly(time=2.0, kind="rto", one_liner="r", seq_lo=2000, seq_hi=2100),
+            Anomaly(time=3.0, kind="ooo", one_liner="o", seq_lo=2200, seq_hi=2200),
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    glyph_anns = [
-        a for a in fig["layout"]["annotations"]
-        if a.get("text") in {"S", "⚠ RTO", "ooo"}
-    ]
+    glyph_anns = [a for a in fig["layout"]["annotations"] if a.get("text") in {"S", "⚠ RTO", "ooo"}]
     borders = [a["hoverlabel"]["bordercolor"] for a in glyph_anns]
     assert borders == [
         _SEVERITY_COLOR["handshake"],
@@ -1062,8 +1140,7 @@ def test_anomaly_annotations_exclude_info_when_hidden():
         direction="a2b",
         anomalies=[
             Anomaly(time=1.0, kind="rto", one_liner="r", seq_lo=100, seq_hi=200),
-            Anomaly(time=2.0, kind="partial_ack", one_liner="p",
-                    seq_lo=300, seq_hi=300),
+            Anomaly(time=2.0, kind="partial_ack", one_liner="p", seq_lo=300, seq_hi=300),
         ],
     )
 
@@ -1086,12 +1163,9 @@ def test_handshake_kinds_render_in_handshake_color():
         dst="2.2.2.2:2",
         direction="a2b",
         anomalies=[
-            Anomaly(time=1.0, kind="syn", one_liner="s",
-                    seq_lo=1000, seq_hi=1000),
-            Anomaly(time=2.0, kind="handshake_ack", one_liner="a",
-                    seq_lo=1001, seq_hi=1001),
-            Anomaly(time=3.0, kind="fin", one_liner="f",
-                    seq_lo=2000, seq_hi=2000),
+            Anomaly(time=1.0, kind="syn", one_liner="s", seq_lo=1000, seq_hi=1000),
+            Anomaly(time=2.0, kind="handshake_ack", one_liner="a", seq_lo=1001, seq_hi=1001),
+            Anomaly(time=3.0, kind="fin", one_liner="f", seq_lo=2000, seq_hi=2000),
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
@@ -1109,6 +1183,7 @@ def test_handshake_kinds_render_in_handshake_color():
 # TestThroughputFigure
 # ---------------------------------------------------------------------------
 
+
 def _dummy_summary() -> DirectionSummary:
     return DirectionSummary(
         total_payload_bytes=0,
@@ -1125,7 +1200,9 @@ def _dummy_summary() -> DirectionSummary:
     )
 
 
-def _sample(t: float, goodput: float = 1000.0, wire: float = 1100.0, max_bps: float | None = 10000.0) -> RateSample:
+def _sample(
+    t: float, goodput: float = 1000.0, wire: float = 1100.0, max_bps: float | None = 10000.0
+) -> RateSample:
     return RateSample(t=t, goodput_Bps=goodput, wire_Bps=wire, max_Bps=max_bps, window_s=0.1)
 
 
@@ -1199,6 +1276,28 @@ class TestThroughputFigure:
         assert fig["layout"]["yaxis2"]["tickformat"] == ".3s"
         assert fig["layout"]["yaxis2"]["ticksuffix"] == "B/s"
 
+    def test_bits_unit_scales_rates_by_8_and_switches_suffix(self):
+        """The UI defaults to rate_unit='bits' (bytes is tested above). bits mode
+        scales every rate by 8 and labels the axis bps."""
+        model = _tput_model(
+            samples=(
+                _sample(1.0, goodput=1000.0, wire=1100.0),
+                _sample(1.1, goodput=2000.0, wire=2200.0),
+            )
+        )
+        pair = ThroughputModelPair(fwd=model)
+        bytes_fig = to_throughput_figure(pair, rate_unit="bytes")
+        bits_fig = to_throughput_figure(pair, rate_unit="bits")
+
+        def _y(fig, name):
+            t = next(tr for tr in fig["data"] if tr.get("name") == name)
+            return [v for v in t["y"] if v is not None]
+
+        assert _y(bits_fig, "goodput") == [v * 8.0 for v in _y(bytes_fig, "goodput")]
+        assert _y(bits_fig, "wire") == [v * 8.0 for v in _y(bytes_fig, "wire")]
+        assert bytes_fig["layout"]["yaxis"]["ticksuffix"] == "B/s"
+        assert bits_fig["layout"]["yaxis"]["ticksuffix"] == "bps"
+
     def test_trace_order_per_direction(self):
         """Traces must appear in order: stalls, envelope, wire, goodput."""
         model = _tput_model(
@@ -1264,7 +1363,8 @@ class TestThroughputFigure:
         )
         fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=False)
         non_paper = [
-            a for a in fig["layout"]["annotations"]
+            a
+            for a in fig["layout"]["annotations"]
             if a.get("yref") != "paper" and "cliff" in a.get("text", "")
         ]
         assert len(non_paper) == 1
@@ -1280,7 +1380,8 @@ class TestThroughputFigure:
         )
         fig = to_throughput_figure(ThroughputModelPair(fwd=model), show_info=True)
         non_paper = [
-            a for a in fig["layout"]["annotations"]
+            a
+            for a in fig["layout"]["annotations"]
             if a.get("yref") != "paper" and "cliff" in a.get("text", "")
         ]
         assert len(non_paper) == 2
@@ -1291,10 +1392,7 @@ class TestThroughputFigure:
             cliffs=(_cliff(severity="warn", t=1.05, drop_frac=0.75, cause_hint="rwin-shrink"),),
         )
         fig = to_throughput_figure(ThroughputModelPair(fwd=model))
-        cliff_anns = [
-            a for a in fig["layout"]["annotations"]
-            if "cliff" in a.get("text", "")
-        ]
+        cliff_anns = [a for a in fig["layout"]["annotations"] if "cliff" in a.get("text", "")]
         assert len(cliff_anns) == 1
         assert cliff_anns[0]["text"] == "cliff -75% (rwin-shrink)"
 
@@ -1307,10 +1405,7 @@ class TestThroughputFigure:
             ),
         )
         fig = to_throughput_figure(ThroughputModelPair(fwd=model))
-        cliff_anns = [
-            a for a in fig["layout"]["annotations"]
-            if "cliff" in a.get("text", "")
-        ]
+        cliff_anns = [a for a in fig["layout"]["annotations"] if "cliff" in a.get("text", "")]
         colors = {a["font"]["color"] for a in cliff_anns}
         assert "#ff5555" in colors  # severe
         assert "#ffaa00" in colors  # warn — unified with _SEVERITY_COLOR
@@ -1333,7 +1428,9 @@ class TestThroughputFigure:
         legend_traces = [t for t in fig["data"] if t.get("showlegend")]
         legend_names = [t["name"] for t in legend_traces]
         for name in ("ceiling", "wire", "goodput", "stall"):
-            assert legend_names.count(name) == 1, f"'{name}' should appear once, got {legend_names.count(name)}"
+            assert legend_names.count(name) == 1, (
+                f"'{name}' should appear once, got {legend_names.count(name)}"
+            )
 
     def test_no_rtt_drops_envelope(self):
         samples = tuple(_sample(float(i), max_bps=None) for i in range(5))

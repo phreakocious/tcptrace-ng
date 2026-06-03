@@ -70,7 +70,6 @@ _TICK_SYMBOL = {
     "r": "triangle-right",
     "h": "line-ew",
     "v": "line-ns",
-    "": "circle-open",
 }
 
 _SUBPLOT_LABEL_FONT = {"color": "#888888", "size": 11, "family": "Menlo, monospace"}
@@ -82,9 +81,6 @@ _SUBPLOT_LABEL_FONT = {"color": "#888888", "size": 11, "family": "Menlo, monospa
 # and would otherwise spawn thousands of single-point traces — Plotly chokes
 # building that many WebGL contexts long before render starts.
 _LABEL_LEGEND_THRESHOLD = 32
-
-# Synthetic legend hints for unlabeled marker colors in generic XPL plots, keyed by metric.
-_MARKER_LEGEND_HINTS: dict[str, dict[str, str]] = {}
 
 
 def _is_epoch_time_axis(plot: XplPlot) -> bool:
@@ -105,17 +101,14 @@ def _build_traces(
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
     legend_seen: set[str] | None = None,
-    marker_hints: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate trace dicts for `plot`. Per-trace axis refs let callers stack
     multiple plots in subplots by passing different (xaxis_ref, yaxis_ref).
 
     Text-derived traces always show up in the legend — those carry semantic
-    names (`ltext` in the xpl). Marker traces whose color has no matching
-    Text label also earn a synthetic legend entry (named from `marker_hints`
-    if provided, else by color) so the user knows what otherwise-mystery dots
-    represent. Box/line traces stay hidden from the legend — their (color,
-    dash) tuples carry no user-facing meaning.
+    names (`ltext` in the xpl). Marker and box/line traces stay hidden from the
+    legend — their (color, kind/dash) tuples carry no user-facing meaning beyond
+    the marker's own appearance.
 
     `legend_seen`, when passed, dedupes legend entries across the two
     directions of a paired figure — the second direction skips entries whose
@@ -124,8 +117,6 @@ def _build_traces(
 
     if legend_seen is None:
         legend_seen = set()
-    if marker_hints is None:
-        marker_hints = {}
 
     lines: dict[tuple[str, str], list[tuple[float, float, float, float]]] = defaultdict(list)
     boxes: dict[tuple[str, str], list[tuple[float, float, float, float]]] = defaultdict(list)
@@ -204,29 +195,11 @@ def _build_traces(
             }
         )
 
-    # Marker colors that don't have a matching Text label AND have a known
-    # semantic name in `marker_hints` get a synthetic legend entry on the
-    # first emitted trace; subsequent traces of the same color stay hidden
-    # but share the legendgroup so toggling collapses them all. Colors
-    # without a hint stay out of the legend — "yellow" or "white" tells the
-    # user nothing more than the marker's own color already does.
-    text_colors_present = {color for (color, _label) in labels}
-    orphan_legend_emitted: set[str] = set()
-
+    # Marker traces stay out of the legend — a (color, kind) tuple carries no
+    # user-facing meaning beyond the marker's own appearance. Semantic names
+    # come from the Text-derived traces above.
     for (kind, color), pts in markers.items():
         symbol = _marker_symbol(kind)
-        show_in_legend = False
-        legend_name = f"{color} {kind}"
-        if (
-            color not in text_colors_present
-            and color not in orphan_legend_emitted
-            and color in marker_hints
-            and marker_hints[color] not in legend_seen
-        ):
-            legend_name = marker_hints[color]
-            show_in_legend = True
-            orphan_legend_emitted.add(color)
-            legend_seen.add(legend_name)
         traces.append(
             {
                 "type": "scattergl",
@@ -235,9 +208,9 @@ def _build_traces(
                 "y": [p[1] for p in pts],
                 "marker": {"color": _color(color), "symbol": symbol, "size": 6},
                 "legendgroup": color,
-                "name": legend_name,
+                "name": f"{color} {kind}",
                 "hoverinfo": "x+y",
-                "showlegend": show_in_legend,
+                "showlegend": False,
                 "xaxis": xaxis_ref,
                 "yaxis": yaxis_ref,
             }
@@ -397,18 +370,13 @@ def _base_layout(
     return layout
 
 
-def to_plotly_figure(plot: XplPlot, metric: str | None = None) -> dict[str, Any]:
-    """Render an XplPlot as a Plotly figure dict.
-
-    `metric` (when provided) selects per-metric semantic hints used to label
-    otherwise-unlabeled marker colors in the legend — see _MARKER_LEGEND_HINTS.
-    """
+def to_plotly_figure(plot: XplPlot) -> dict[str, Any]:
+    """Render an XplPlot as a Plotly figure dict."""
 
     time_axis = _is_epoch_time_axis(plot)
     xfmt = _epoch_to_iso if time_axis else (lambda v: v)
-    marker_hints = _MARKER_LEGEND_HINTS.get(metric or "", {})
 
-    traces = _build_traces(plot, xfmt, marker_hints=marker_hints)
+    traces = _build_traces(plot, xfmt)
 
     layout = _base_layout(plot.title, showlegend=_has_legend_content(plot))
     layout["xaxis"] = _xaxis_config(plot, time_axis)
@@ -428,27 +396,23 @@ def to_paired_plotly_figure(
     backward: XplPlot | None,
     forward_label: str,
     backward_label: str,
-    metric: str | None = None,
 ) -> dict[str, Any]:
     """Stack two XplPlots vertically with a synced x-axis.
 
     Zoom/pan on either subplot drives both. When only one direction is
     populated, falls back to a single-figure layout (no subplot scaffolding).
-    `metric` (when provided) selects per-metric semantic hints for the
-    legend — see _MARKER_LEGEND_HINTS.
     """
     if forward is not None and backward is None:
-        return to_plotly_figure(forward, metric=metric)
+        return to_plotly_figure(forward)
     if backward is not None and forward is None:
-        return to_plotly_figure(backward, metric=metric)
+        return to_plotly_figure(backward)
     if forward is None and backward is None:
-        return to_plotly_figure(XplPlot(), metric=metric)
+        return to_plotly_figure(XplPlot())
 
     # Both plots present. Prefer epoch formatting if either side uses it; the
     # two should match in practice (same conn, same metric).
     time_axis = _is_epoch_time_axis(forward) or _is_epoch_time_axis(backward)
     xfmt = _epoch_to_iso if time_axis else (lambda v: v)
-    marker_hints = _MARKER_LEGEND_HINTS.get(metric or "", {})
 
     # Share a `seen` set across the two _build_traces calls so each (color,
     # label) appears in the legend exactly once — the second direction
@@ -460,7 +424,6 @@ def to_paired_plotly_figure(
         xaxis_ref="x",
         yaxis_ref="y",
         legend_seen=legend_seen,
-        marker_hints=marker_hints,
     )
     bwd_traces = _build_traces(
         backward,
@@ -468,7 +431,6 @@ def to_paired_plotly_figure(
         xaxis_ref="x2",
         yaxis_ref="y2",
         legend_seen=legend_seen,
-        marker_hints=marker_hints,
     )
 
     fwd_xaxis = _xaxis_config(forward, time_axis)
@@ -571,14 +533,16 @@ def _seg_customdata(segments: list[Segment], baseline: int = 0) -> list[list[flo
     prev_time: float | None = None
     for i, s in enumerate(segments, start=1):
         dt_ms = (s.time - prev_time) * 1000.0 if prev_time is not None else _NAN
-        out.append([
-            float(i),
-            dt_ms,
-            float(s.seq_start - baseline),
-            float(s.seq_end - s.seq_start),
-            float(s.in_flight_after),
-            float(s.paired_rtt_ms) if s.paired_rtt_ms is not None else _NAN,
-        ])
+        out.append(
+            [
+                float(i),
+                dt_ms,
+                float(s.seq_start - baseline),
+                float(s.seq_end - s.seq_start),
+                float(s.in_flight_after),
+                float(s.paired_rtt_ms) if s.paired_rtt_ms is not None else _NAN,
+            ]
+        )
         prev_time = s.time
     return out
 
@@ -619,7 +583,7 @@ def _data_segment_trace(
     ys: list[float | None] = []
     cd: list[list[float]] = []
     per_seg = _seg_customdata(segs, baseline=baseline)
-    for s, row in zip(segs, per_seg):
+    for s, row in zip(segs, per_seg, strict=True):
         t_iso = _epoch_to_iso(s.time)
         xs.extend([t_iso, t_iso, None])
         ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
@@ -645,19 +609,21 @@ _RTX_CODE = {None: 0.0, "rto": 1.0, "fast": 2.0, "spurious": 3.0}
 
 def _retx_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float]]:
     """Index layout:
-      0: seq_start  (relative to baseline when baseline != 0)
-      1: length
-      2: in_flight_after
-      3: rtx_code (1=rto, 2=fast, 3=spurious)
+    0: seq_start  (relative to baseline when baseline != 0)
+    1: length
+    2: in_flight_after
+    3: rtx_code (1=rto, 2=fast, 3=spurious)
     """
     out: list[list[float]] = []
     for s in segments:
-        out.append([
-            float(s.seq_start - baseline),
-            float(s.seq_end - s.seq_start),
-            float(s.in_flight_after),
-            _RTX_CODE.get(s.rtx, 0.0),
-        ])
+        out.append(
+            [
+                float(s.seq_start - baseline),
+                float(s.seq_end - s.seq_start),
+                float(s.in_flight_after),
+                _RTX_CODE.get(s.rtx, 0.0),
+            ]
+        )
     return out
 
 
@@ -686,7 +652,7 @@ def _retx_segment_trace(
     xs: list[Any] = []
     ys: list[float | None] = []
     cd: list[list[float]] = []
-    for s, row in zip(segs, _retx_customdata(segs, baseline=baseline)):
+    for s, row in zip(segs, _retx_customdata(segs, baseline=baseline), strict=True):
         t_iso = _epoch_to_iso(s.time)
         xs.extend([t_iso, t_iso, None])
         ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
@@ -709,10 +675,10 @@ def _retx_segment_trace(
 
 def _ack_customdata(acks: list[Ack], baseline: int = 0) -> list[list[float]]:
     """Index layout:
-      0: ack_seq  (relative to baseline when baseline != 0)
-      1: rwin (scaled if known, else raw) — a length, never baselined
-      2: rwin_scale_known (0/1)
-      3: dup_count
+    0: ack_seq  (relative to baseline when baseline != 0)
+    1: rwin (scaled if known, else raw) — a length, never baselined
+    2: rwin_scale_known (0/1)
+    3: dup_count
     """
     out: list[list[float]] = []
     for a in acks:
@@ -731,9 +697,7 @@ _TSG_ACK_TEMPLATE = (
 
 
 _TSG_RWIN_TEMPLATE = (
-    "<b>rwnd %{customdata[1]:,.0f}</b><br>"
-    "(scale known: %{customdata[2]:.0f})"
-    "<extra></extra>"
+    "<b>rwnd %{customdata[1]:,.0f}</b><br>(scale known: %{customdata[2]:.0f})<extra></extra>"
 )
 
 
@@ -755,7 +719,7 @@ def _ack_trace(
     prev_seq: int | None = None
     prev_time: float | None = None
     rows = _ack_customdata(model.acks, baseline=baseline)
-    for a, row in zip(model.acks, rows):
+    for a, row in zip(model.acks, rows, strict=True):
         ack_seq_disp = a.ack_seq - baseline
         if prev_seq is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
@@ -800,7 +764,7 @@ def _rwin_trace(
     prev_top: int | None = None
     prev_time: float | None = None
     rows = _ack_customdata(model.acks, baseline=baseline)
-    for a, row in zip(model.acks, rows):
+    for a, row in zip(model.acks, rows, strict=True):
         top = a.ack_seq + a.rwin - baseline
         if prev_top is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
@@ -854,10 +818,10 @@ _ANOMALY_GLYPH = {
 # Color per severity tier. Drives chart annotation color; kind→severity lives
 # in tcp_inspect.SEVERITY_BY_KIND so the data model is the source of truth.
 _SEVERITY_COLOR = {
-    "severe": "#ff5555",   # red — alarms (rto, fast, spurious, zero_win, …)
-    "warn": "#ffaa00",     # amber — symptoms worth attention
+    "severe": "#ff5555",  # red — alarms (rto, fast, spurious, zero_win, …)
+    "warn": "#ffaa00",  # amber — symptoms worth attention
     "handshake": "#55ddff",  # cyan — protocol markers (SYN/SA/A/FA/R FA)
-    "info": "#888888",     # grey — diagnostic noise; hidden unless toggled
+    "info": "#888888",  # grey — diagnostic noise; hidden unless toggled
 }
 # Dim backgrounds for hover popovers — saturated severity tint at low alpha
 # so the popover identifies its tier without overpowering the label text.
@@ -955,9 +919,7 @@ def _anomaly_annotations(
     baseline: int = 0,
 ) -> list[dict[str, Any]]:
     visible = [
-        a
-        for a in model.anomalies
-        if show_info or SEVERITY_BY_KIND.get(a.kind, "info") != "info"
+        a for a in model.anomalies if show_info or SEVERITY_BY_KIND.get(a.kind, "info") != "info"
     ]
     clusters = _cluster_anomalies(visible)
     anns: list[dict[str, Any]] = []
@@ -966,7 +928,7 @@ def _anomaly_annotations(
     for a, count in clusters:
         text = _ANOMALY_GLYPH.get(a.kind, a.kind)
         if count > 1:
-            text = f"{text} ×{count}"  # noqa: RUF001 — intentional Unicode multiplication sign
+            text = f"{text} ×{count}"
         y = (a.seq_lo - baseline) if a.seq_lo is not None else 0
         yshift = _KIND_YSHIFT.get(a.kind, _DEFAULT_YSHIFT)
         if last_time is not None and (a.time - last_time) <= _ANOMALY_COLLISION_S:
@@ -1067,8 +1029,13 @@ def _in_flight_overlay(
     showlegend: bool = True,
     legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
-    """In-flight area: y = current cumack + in_flight bytes. The area between
-    this trace and the ACK staircase visualizes outstanding data.
+    """In-flight band: the bytes outstanding (sent but not yet acked).
+
+    Drawn as a self-closed polygon between the cumulative-ACK staircase (bottom
+    edge, y = cumack) and cumack + in_flight (top edge). `fill: toself` keeps the
+    shaded region correct regardless of trace order and even when the direction
+    has no ACKs — the old `fill: tonexty` anchored against whatever trace
+    happened to precede it (rwin in practice; nothing when ACKs were absent).
     """
     if not model.in_flight:
         return None
@@ -1087,14 +1054,19 @@ def _in_flight_overlay(
         i = bisect.bisect_right(ack_times, t)
         return ack_seqs[i - 1] if i > 0 else pre_first_baseline
 
-    xs = [_epoch_to_iso(t) for t, _ in model.in_flight]
-    ys = [_cumack_at(t) + ifl - baseline for t, ifl in model.in_flight]
+    times = [t for t, _ in model.in_flight]
+    cumack = [_cumack_at(t) - baseline for t in times]
+    top = [_cumack_at(t) + ifl - baseline for t, ifl in model.in_flight]
+    # Closed ribbon: top edge left->right, then the cumack floor right->left.
+    iso = [_epoch_to_iso(t) for t in times]
+    xs = iso + iso[::-1]
+    ys = top + cumack[::-1]
     return {
         "type": "scattergl",
         "mode": "lines",
         "x": xs,
         "y": ys,
-        "fill": "tonexty",
+        "fill": "toself",
         "fillcolor": "rgba(85, 255, 255, 0.10)",
         "line": {"color": "rgba(85, 255, 255, 0.0)", "width": 0},
         "name": name,
@@ -1118,9 +1090,9 @@ def _build_direction_traces(
 
     Order matters: Plotly draws lower-index traces first, so later traces sit
     on top. We want data sticks visible above the ack staircase (they share
-    the same y-range), and retx visible above data. In-flight keeps its
-    relative position after rwin so its `tonexty` fill anchors against rwin
-    the same way it did before.
+    the same y-range), and retx visible above data. The in-flight band is a
+    self-closed polygon (`fill: toself`), so its position here only affects
+    layering, not which traces it fills between.
 
     Names are unprefixed ("data"/"ack"/...) and `legend_seen` dedupes across
     directions: the second direction's traces use `showlegend=False` while
@@ -1138,20 +1110,35 @@ def _build_direction_traces(
         return True
 
     ack_tr = _ack_trace(
-        model, name="ack", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
-        showlegend=_show("ack"), legendgroup="ack",
+        model,
+        name="ack",
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+        showlegend=_show("ack"),
+        legendgroup="ack",
     )
     if ack_tr is not None:
         out.append(ack_tr)
     rwin_tr = _rwin_trace(
-        model, name="rwin", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
-        showlegend=_show("rwin"), legendgroup="rwin",
+        model,
+        name="rwin",
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+        showlegend=_show("rwin"),
+        legendgroup="rwin",
     )
     if rwin_tr is not None:
         out.append(rwin_tr)
     ifl_tr = _in_flight_overlay(
-        model, name="in-flight", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
-        showlegend=_show("in-flight"), legendgroup="in-flight",
+        model,
+        name="in-flight",
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+        showlegend=_show("in-flight"),
+        legendgroup="in-flight",
     )
     if ifl_tr is not None:
         out.append(ifl_tr)
@@ -1168,8 +1155,13 @@ def _build_direction_traces(
     if seg_tr is not None:
         out.append(seg_tr)
     rtx_tr = _retx_segment_trace(
-        model, name="retx", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
-        showlegend=_show("retx"), legendgroup="retx",
+        model,
+        name="retx",
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+        showlegend=_show("retx"),
+        legendgroup="retx",
     )
     if rtx_tr is not None:
         out.append(rtx_tr)
@@ -1309,9 +1301,7 @@ def to_tsg_figure(
             yaxis["range"] = [only_range[0] - baseline, only_range[1] - baseline]
             yaxis["autorange"] = False
         layout["yaxis"] = yaxis
-        traces = _build_direction_traces(
-            only, xaxis_ref="x", yaxis_ref="y", baseline=baseline
-        )
+        traces = _build_direction_traces(only, xaxis_ref="x", yaxis_ref="y", baseline=baseline)
         annotations = _anomaly_annotations(
             only, xref="x", yref="y", show_info=show_info, baseline=baseline
         )
@@ -1349,20 +1339,15 @@ def to_tsg_figure(
     layout["yaxis2"] = bwd_yaxis
 
     legend_seen: set[str] = set()
-    traces = (
-        _build_direction_traces(
-            fwd, xaxis_ref="x", yaxis_ref="y", baseline=fwd_base, legend_seen=legend_seen
-        )
-        + _build_direction_traces(
-            bwd, xaxis_ref="x2", yaxis_ref="y2", baseline=bwd_base, legend_seen=legend_seen
-        )
+    traces = _build_direction_traces(
+        fwd, xaxis_ref="x", yaxis_ref="y", baseline=fwd_base, legend_seen=legend_seen
+    ) + _build_direction_traces(
+        bwd, xaxis_ref="x2", yaxis_ref="y2", baseline=bwd_base, legend_seen=legend_seen
     )
 
     annotations = _anomaly_annotations(
         fwd, xref="x", yref="y", show_info=show_info, baseline=fwd_base
-    ) + _anomaly_annotations(
-        bwd, xref="x2", yref="y2", show_info=show_info, baseline=bwd_base
-    )
+    ) + _anomaly_annotations(bwd, xref="x2", yref="y2", show_info=show_info, baseline=bwd_base)
     for strip in (
         _info_strip(fwd, xref="x", y_domain_top=_FWD_DOMAIN[1]),
         _info_strip(bwd, xref="x2", y_domain_top=_BWD_DOMAIN[1]),
@@ -1474,25 +1459,27 @@ def _stall_traces(
         if show:
             legend_seen.add("stall")
         dur_ms = stall.duration_s * 1000.0
-        text = f"stall {dur_ms:.0f}ms ({stall.rtt_multiple:.1f}×RTT)"  # noqa: RUF001 — intentional Unicode multiplication sign for RTT-multiple display
+        text = f"stall {dur_ms:.0f}ms ({stall.rtt_multiple:.1f}×RTT)"
         t0 = _epoch_to_iso(stall.t_start)
         t1 = _epoch_to_iso(stall.t_end)
-        out.append({
-            "type": "scatter",
-            "mode": "lines",
-            "x": [t0, t1, t1, t0, t0, None],
-            "y": [y0, y0, y1, y1, y0, None],
-            "fill": "toself",
-            "fillcolor": f"rgba(255,119,255,{alpha})",
-            "line": {"color": "rgba(0,0,0,0)", "width": 0},
-            "text": text,
-            "hoverinfo": "text",
-            "name": "stall",
-            "legendgroup": "stall",
-            "showlegend": show,
-            "xaxis": xaxis_ref,
-            "yaxis": yaxis_ref,
-        })
+        out.append(
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "x": [t0, t1, t1, t0, t0, None],
+                "y": [y0, y0, y1, y1, y0, None],
+                "fill": "toself",
+                "fillcolor": f"rgba(255,119,255,{alpha})",
+                "line": {"color": "rgba(0,0,0,0)", "width": 0},
+                "text": text,
+                "hoverinfo": "text",
+                "name": "stall",
+                "legendgroup": "stall",
+                "showlegend": show,
+                "xaxis": xaxis_ref,
+                "yaxis": yaxis_ref,
+            }
+        )
     return out
 
 
@@ -1632,19 +1619,21 @@ def _cliff_annotations(
         color = _SEVERITY_COLOR[cliff.severity]
         y_pos = y_top * stagger[visible_idx % len(stagger)]
         visible_idx += 1
-        anns.append({
-            "x": _epoch_to_iso(cliff.t),
-            "y": y_pos,
-            "xref": xref,
-            "yref": yref,
-            "text": f"cliff -{pct:.0f}% ({cliff.cause_hint})",
-            "showarrow": True,
-            "arrowhead": 2,
-            "arrowcolor": color,
-            "font": {"color": color, "size": 10},
-            "ax": 0,
-            "ay": -20,
-        })
+        anns.append(
+            {
+                "x": _epoch_to_iso(cliff.t),
+                "y": y_pos,
+                "xref": xref,
+                "yref": yref,
+                "text": f"cliff -{pct:.0f}% ({cliff.cause_hint})",
+                "showarrow": True,
+                "arrowhead": 2,
+                "arrowcolor": color,
+                "font": {"color": color, "size": 10},
+                "ax": 0,
+                "ay": -20,
+            }
+        )
     return anns
 
 
@@ -1684,41 +1673,71 @@ def _build_tput_direction(
     traces: list[dict[str, Any]] = []
     anns: list[dict[str, Any]] = []
 
-    traces.extend(_stall_traces(
-        model, y_range,
-        xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref,
-        show_info=show_info, legend_seen=legend_seen,
-    ))
+    traces.extend(
+        _stall_traces(
+            model,
+            y_range,
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            show_info=show_info,
+            legend_seen=legend_seen,
+        )
+    )
 
-    env = _envelope_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
+    env = _envelope_trace(
+        model,
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        legend_seen=legend_seen,
+        rate_unit=rate_unit,
+    )
     if env is not None:
         traces.append(env)
 
-    wire = _wire_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
+    wire = _wire_trace(
+        model,
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        legend_seen=legend_seen,
+        rate_unit=rate_unit,
+    )
     if wire is not None:
         traces.append(wire)
 
-    gput = _goodput_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
+    gput = _goodput_trace(
+        model,
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        legend_seen=legend_seen,
+        rate_unit=rate_unit,
+    )
     if gput is not None:
         traces.append(gput)
     elif all(s.goodput_Bps == 0.0 for s in model.samples):
-        anns.append({
-            "text": "goodput unavailable — no ACK data",
-            "xref": "paper",
-            "yref": yaxis_ref,
-            "x": 0.99,
-            "y": y_range[1] * 0.95,
-            "xanchor": "right",
-            "yanchor": "top",
-            "showarrow": False,
-            "font": {"color": "#555", "size": 10},
-        })
+        anns.append(
+            {
+                "text": "goodput unavailable — no ACK data",
+                "xref": "paper",
+                "yref": yaxis_ref,
+                "x": 0.99,
+                "y": y_range[1] * 0.95,
+                "xanchor": "right",
+                "yanchor": "top",
+                "showarrow": False,
+                "font": {"color": "#555", "size": 10},
+            }
+        )
 
-    anns.extend(_cliff_annotations(
-        model, y_range,
-        xref=xaxis_ref, yref=yaxis_ref,
-        show_info=show_info, legend_seen=legend_seen,
-    ))
+    anns.extend(
+        _cliff_annotations(
+            model,
+            y_range,
+            xref=xaxis_ref,
+            yref=yaxis_ref,
+            show_info=show_info,
+            legend_seen=legend_seen,
+        )
+    )
 
     return traces, anns
 
@@ -1771,8 +1790,11 @@ def to_throughput_figure(
         layout["xaxis"] = _tput_xaxis(show_ticks=True)
         layout["yaxis"] = yax
         traces, anns = _build_tput_direction(
-            only, xaxis_ref="x", yaxis_ref="y",
-            show_info=show_info, legend_seen=legend_seen,
+            only,
+            xaxis_ref="x",
+            yaxis_ref="y",
+            show_info=show_info,
+            legend_seen=legend_seen,
             rate_unit=rate_unit,
         )
         layout["annotations"] = anns
@@ -1805,14 +1827,20 @@ def to_throughput_figure(
     layout["yaxis2"] = bwd_yax
 
     fwd_traces, fwd_anns = _build_tput_direction(
-        fwd, xaxis_ref="x", yaxis_ref="y",
-        show_info=show_info, legend_seen=legend_seen,
+        fwd,
+        xaxis_ref="x",
+        yaxis_ref="y",
+        show_info=show_info,
+        legend_seen=legend_seen,
         y_paper=(_FWD_DOMAIN[0] + _FWD_DOMAIN[1]) / 2,
         rate_unit=rate_unit,
     )
     bwd_traces, bwd_anns = _build_tput_direction(
-        bwd, xaxis_ref="x2", yaxis_ref="y2",
-        show_info=show_info, legend_seen=legend_seen,
+        bwd,
+        xaxis_ref="x2",
+        yaxis_ref="y2",
+        show_info=show_info,
+        legend_seen=legend_seen,
         y_paper=(_BWD_DOMAIN[0] + _BWD_DOMAIN[1]) / 2,
         rate_unit=rate_unit,
     )
@@ -1824,13 +1852,18 @@ def to_throughput_figure(
     ):
         if not text:
             continue
-        annotations.append({
-            "text": text,
-            "xref": "paper", "yref": "paper",
-            "x": 0, "y": y,
-            "xanchor": "left", "yanchor": "bottom",
-            "showarrow": False,
-            "font": _SUBPLOT_LABEL_FONT,
-        })
+        annotations.append(
+            {
+                "text": text,
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0,
+                "y": y,
+                "xanchor": "left",
+                "yanchor": "bottom",
+                "showarrow": False,
+                "font": _SUBPLOT_LABEL_FONT,
+            }
+        )
     layout["annotations"] = annotations
     return {"data": fwd_traces + bwd_traces, "layout": layout}

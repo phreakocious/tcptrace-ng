@@ -74,6 +74,22 @@ def test_vantage_midpoint_when_both_halves_substantial():
     assert out and out[0].evidence["vantage"] == "midpoint"
 
 
+def test_vantage_midpoint_fires_at_3x_boundary():
+    # far == 3*near is inclusive in the midpoint region (near >= 2, far <= 3*near).
+    from tcptrace_ng.diagnose import _capture_vantage
+
+    out = _capture_vantage(_stats(rtt_3whs_a=2.0, rtt_3whs_b=6.0))
+    assert out and out[0].evidence["vantage"] == "midpoint"
+
+
+def test_vantage_silent_just_past_3x_boundary():
+    # far just past 3*near with near > 1 ms falls into the conservative gap
+    # between the adjacent (far >= 5*near) and midpoint (far <= 3*near) branches.
+    from tcptrace_ng.diagnose import _capture_vantage
+
+    assert _capture_vantage(_stats(rtt_3whs_a=2.0, rtt_3whs_b=6.1)) == []
+
+
 def test_vantage_none_when_rtt_absent():
     from tcptrace_ng.diagnose import _capture_vantage
 

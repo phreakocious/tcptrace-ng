@@ -3,7 +3,6 @@
 Pure module — no IO, no subprocess, no plotly. Inputs and outputs are frozen
 dataclasses. Consumers are plotly_adapter and app.py's viewport stats panel.
 """
-# ruff: noqa: N815 — *_Bps (bytes/sec) vs *_bps (bits/sec) distinction is load-bearing
 
 from __future__ import annotations
 
@@ -82,9 +81,14 @@ def _make_summary(
     retx_frac = 1.0 - total_payload_bytes / total_wire_bytes if total_wire_bytes > 0 else 0.0
     gps = [s.goodput_Bps for s in samples]
     peak = max(gps) if gps else 0.0
-    mean = sum(gps) / len(gps) if gps else 0.0
-    p50 = _percentile(gps, 50)
-    p95 = _percentile(gps, 95)
+    # Central tendency over *active* windows only. The sampler pads +/- half a
+    # window past the first and last event, and slides in stride steps, so the
+    # edges produce zero-wire (idle) windows. Counting those in mean/median/p95
+    # drags them toward zero and badly understates short-transfer goodput.
+    active = [s.goodput_Bps for s in samples if s.wire_Bps > 0]
+    mean = sum(active) / len(active) if active else 0.0
+    p50 = _percentile(active, 50)
+    p95 = _percentile(active, 95)
     # Clip per-sample ratio to [0, 1]. Goodput can briefly exceed the
     # per-window rwin/RTT ceiling when paired-RTT samples in that window are
     # near-zero outliers; clipping avoids reporting >100% BDP utilization.
@@ -131,24 +135,34 @@ class ThroughputModel:
         sliced_samples = list(self.samples[i0:i1])
 
         sliced_stalls = [
-            st for st in self.stalls
+            st
+            for st in self.stalls
             if (t0 is None or st.t_end >= t0) and (t1 is None or st.t_start <= t1)
         ]
         sliced_cliffs = [
-            c for c in self.cliffs
-            if (t0 is None or c.t >= t0) and (t1 is None or c.t <= t1)
+            c for c in self.cliffs if (t0 is None or c.t >= t0) and (t1 is None or c.t <= t1)
         ]
 
         # Exact byte counts via bisect into the per-segment time series.
         p_lo = bisect.bisect_left(self._payload_seg_times, t0) if t0 is not None else 0
-        p_hi = bisect.bisect_right(self._payload_seg_times, t1) if t1 is not None else len(self._payload_seg_times)
+        p_hi = (
+            bisect.bisect_right(self._payload_seg_times, t1)
+            if t1 is not None
+            else len(self._payload_seg_times)
+        )
         payload_bytes = sum(self._payload_seg_bytes[p_lo:p_hi])
 
         w_lo = bisect.bisect_left(self._wire_seg_times, t0) if t0 is not None else 0
-        w_hi = bisect.bisect_right(self._wire_seg_times, t1) if t1 is not None else len(self._wire_seg_times)
+        w_hi = (
+            bisect.bisect_right(self._wire_seg_times, t1)
+            if t1 is not None
+            else len(self._wire_seg_times)
+        )
         wire_bytes = sum(self._wire_seg_bytes[w_lo:w_hi])
 
-        return _make_summary(sliced_samples, sliced_stalls, sliced_cliffs, payload_bytes, wire_bytes)
+        return _make_summary(
+            sliced_samples, sliced_stalls, sliced_cliffs, payload_bytes, wire_bytes
+        )
 
 
 @dataclass(frozen=True)
@@ -220,11 +234,14 @@ def _emit_samples(
         segs_in = tsg.segments[si_lo:si_hi]
 
         wire = sum(s.seq_end - s.seq_start for s in segs_in) / window_s
-        goodput = sum(
-            s.seq_end - s.seq_start
-            for s in segs_in
-            if s.rtx is None and s.paired_ack_time is not None
-        ) / window_s
+        goodput = (
+            sum(
+                s.seq_end - s.seq_start
+                for s in segs_in
+                if s.rtx is None and s.paired_ack_time is not None
+            )
+            / window_s
+        )
 
         ai_lo = bisect.bisect_left(ack_times, lo)
         ai_hi = bisect.bisect_left(ack_times, hi)
@@ -243,7 +260,9 @@ def _emit_samples(
         else:
             max_bps = None
 
-        samples.append(RateSample(t=t, goodput_Bps=goodput, wire_Bps=wire, max_Bps=max_bps, window_s=window_s))
+        samples.append(
+            RateSample(t=t, goodput_Bps=goodput, wire_Bps=wire, max_Bps=max_bps, window_s=window_s)
+        )
         t += stride_s
 
     return samples
@@ -289,7 +308,7 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
         # If so, the sender wasn't blocked, just idle.
         if tsg.in_flight:
             inf_times = [t for t, _ in tsg.in_flight]
-            mid = seg_b.time - min(0.001, gap_s / 2.0)
+            mid = seg_b.time - 0.001  # 1 ms before seg_b; gap_s >= 0.2 s here, fixed offset is safe
             idx_inf = bisect.bisect_right(inf_times, mid) - 1
             if idx_inf >= 0 and tsg.in_flight[idx_inf][1] == 0:
                 continue
@@ -300,8 +319,7 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
             rwin_ceiling = a.rwin_scaled if a.rwin_scaled is not None else a.rwin
         else:
             rwin_ceiling = max(
-                (a.rwin_scaled if a.rwin_scaled is not None else a.rwin)
-                for a in tsg.acks
+                (a.rwin_scaled if a.rwin_scaled is not None else a.rwin) for a in tsg.acks
             )
 
         if pending >= 0.95 * rwin_ceiling:
@@ -315,14 +333,16 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
         else:
             severity = "severe"
 
-        stalls.append(Stall(
-            t_start=seg_a.time,
-            t_end=seg_b.time,
-            duration_s=gap_s,
-            pending_bytes=pending,
-            rtt_multiple=rtt_multiple,
-            severity=severity,
-        ))
+        stalls.append(
+            Stall(
+                t_start=seg_a.time,
+                t_end=seg_b.time,
+                duration_s=gap_s,
+                pending_bytes=pending,
+                rtt_multiple=rtt_multiple,
+                severity=severity,
+            )
+        )
 
     return stalls
 
@@ -370,18 +390,25 @@ def _detect_cliffs(
             else:
                 cause = "rwin-shrink"
             sev = _severity_of(best.kind)
+            # A confirmed cliff (>=50% drop) is at least a warning regardless of
+            # the attributed anomaly's presentation tier; attribution must not
+            # demote it below what an unexplained cliff (below) would get.
+            if _SEVERITY_RANK[sev] < _SEVERITY_RANK["warn"]:
+                sev = "warn"
         else:
             cause = "unknown"
             sev = "warn"
 
-        raw_cliffs.append(Cliff(
-            t=t_c,
-            goodput_before_Bps=before,
-            goodput_after_Bps=after,
-            drop_frac=drop_frac,
-            cause_hint=cause,
-            severity=sev,
-        ))
+        raw_cliffs.append(
+            Cliff(
+                t=t_c,
+                goodput_before_Bps=before,
+                goodput_after_Bps=after,
+                drop_frac=drop_frac,
+                cause_hint=cause,
+                severity=sev,
+            )
+        )
 
     # Dedup: within window_s, keep deeper drop
     cliffs: list[Cliff] = []
@@ -462,14 +489,6 @@ def synthesize_throughput(
             return stats.rtt_min_a
         return stats.rtt_min_b
 
-    fwd = (
-        _build_direction(tsg_pair.fwd, _rtt_fallback("a2b"))
-        if tsg_pair.fwd is not None
-        else None
-    )
-    bwd = (
-        _build_direction(tsg_pair.bwd, _rtt_fallback("b2a"))
-        if tsg_pair.bwd is not None
-        else None
-    )
+    fwd = _build_direction(tsg_pair.fwd, _rtt_fallback("a2b")) if tsg_pair.fwd is not None else None
+    bwd = _build_direction(tsg_pair.bwd, _rtt_fallback("b2a")) if tsg_pair.bwd is not None else None
     return ThroughputModelPair(fwd=fwd, bwd=bwd)

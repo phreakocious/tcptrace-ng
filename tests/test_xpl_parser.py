@@ -107,6 +107,18 @@ def test_parses_box():
     assert plot.commands == [Box(color="blue", x1=0.0, y1=0.0, x2=10.0, y2=20.0)]
 
 
+def test_failed_text_verb_skips_its_label_line():
+    # A text verb spans two lines (verb + label). When the coords don't parse,
+    # both lines must be consumed; otherwise the label leaks as a spurious token
+    # and parsing desyncs by one line.
+    src = "go\ngreen\natext bad 150\nSYNLABEL\ndot 1 1\n"
+    plot = parse_xpl(src)
+    assert "atext bad 150" in plot.unknown
+    assert "SYNLABEL" not in plot.unknown
+    # Parsing resyncs after skipping both lines: the trailing dot is recognized.
+    assert Dot(color="green", x=1.0, y=1.0) in plot.commands
+
+
 def test_parses_dbox():
     src = "go\nyellow\ndbox 1 2 3 4\n"
     plot = parse_xpl(src)

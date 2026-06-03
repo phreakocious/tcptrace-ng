@@ -25,7 +25,8 @@ from .classifier import Class, classify
 # fields for connections past 13 (two-letter host labels: aa/ab, …).
 # v3 adds per-direction RTT min/avg/max fields (from tcptrace -r output).
 # v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
-STATS_PARSER_VERSION = "5"  # v5 adds rtt_3whs_a/b
+# v5 adds rtt_3whs_a/b.
+STATS_PARSER_VERSION = "6"  # v6: cache now persists all typed fields (save/load was lossy)
 
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",

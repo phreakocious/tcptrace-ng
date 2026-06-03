@@ -262,9 +262,7 @@ async def test_toggling_dns_reanalyzes_without_n_flag(user: User, tmp_path, monk
         assert calls == [True]  # default: DNS off → no_dns=True (-n added)
 
         # Find the "DNS" checkbox via its label and flip it on.
-        dns = next(
-            c for c in user.find(kind=_ui.checkbox).elements if c.text == "DNS"
-        )
+        dns = next(c for c in user.find(kind=_ui.checkbox).elements if c.text == "DNS")
         dns.set_value(True)
         # Allow the async analyze handler (scheduled off the value-change event)
         # to flush before asserting.
@@ -404,6 +402,7 @@ def test_build_metric_figure_routes_tsg_through_to_tsg_figure(monkeypatch):
     fwd = cache / "conn-12--w2x_tsg.xpl"
     if not fwd.exists():
         import pytest
+
         pytest.skip("cached tsg.xpl not present")
 
     fig = _build_metric_figure(
@@ -417,9 +416,7 @@ def test_build_metric_figure_routes_tsg_through_to_tsg_figure(monkeypatch):
     )
     assert fig is not None
     # Some trace carries a hovertemplate that references customdata indices.
-    assert any(
-        "customdata" in (t.get("hovertemplate") or "") for t in fig["data"]
-    )
+    assert any("customdata" in (t.get("hovertemplate") or "") for t in fig["data"])
 
 
 def test_build_metric_figure_routes_tput_through_throughput_synthesis(monkeypatch):
@@ -505,7 +502,9 @@ def test_render_throughput_stats_panel_updates_on_relayout():
         for i in range(6)
     )
     samples_high = tuple(
-        RateSample(t=float(i), goodput_Bps=100_000.0, wire_Bps=110_000.0, max_Bps=None, window_s=1.0)
+        RateSample(
+            t=float(i), goodput_Bps=100_000.0, wire_Bps=110_000.0, max_Bps=None, window_s=1.0
+        )
         for i in range(6, 11)
     )
     all_samples = samples_low + samples_high
@@ -602,25 +601,33 @@ async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypa
     # Geneve(TEB) + inner Ethernet + IPv4 + TCP.
     inner_tcp = dpkt.tcp.TCP(sport=12345, dport=80, seq=1, ack=0, off_x2=0x50, flags=0x02)
     inner_ip = dpkt.ip.IP(
-        src=b"\x0a\x00\x00\x01", dst=b"\x0a\x00\x00\x02",
-        p=dpkt.ip.IP_PROTO_TCP, data=bytes(inner_tcp),
+        src=b"\x0a\x00\x00\x01",
+        dst=b"\x0a\x00\x00\x02",
+        p=dpkt.ip.IP_PROTO_TCP,
+        data=bytes(inner_tcp),
     )
     inner_ip.len = 40
     inner_eth = dpkt.ethernet.Ethernet(
-        src=b"\x00\x11\x22\x33\x44\x55", dst=b"\xaa\xbb\xcc\xdd\xee\xff",
-        type=0x0800, data=bytes(inner_ip),
+        src=b"\x00\x11\x22\x33\x44\x55",
+        dst=b"\xaa\xbb\xcc\xdd\xee\xff",
+        type=0x0800,
+        data=bytes(inner_ip),
     )
     geneve = struct.pack("!BBH", 0x00, 0x00, 0x6558) + b"\x00\x00\x00\x00"
     outer_udp = dpkt.udp.UDP(sport=33333, dport=6081, data=geneve + bytes(inner_eth))
     outer_udp.ulen = 8 + len(outer_udp.data)
     outer_ip = dpkt.ip.IP(
-        src=b"\xc0\xa8\x01\x01", dst=b"\xc0\xa8\x01\x02",
-        p=dpkt.ip.IP_PROTO_UDP, data=bytes(outer_udp),
+        src=b"\xc0\xa8\x01\x01",
+        dst=b"\xc0\xa8\x01\x02",
+        p=dpkt.ip.IP_PROTO_UDP,
+        data=bytes(outer_udp),
     )
     outer_ip.len = 20 + 8 + len(outer_udp.data)
     outer_eth = dpkt.ethernet.Ethernet(
-        src=b"\x00\x00\x00\x00\x00\x01", dst=b"\x00\x00\x00\x00\x00\x02",
-        type=0x0800, data=bytes(outer_ip),
+        src=b"\x00\x00\x00\x00\x00\x01",
+        dst=b"\x00\x00\x00\x00\x00\x02",
+        type=0x0800,
+        data=bytes(outer_ip),
     )
     with pcap.open("wb") as f:
         w = dpkt.pcap.Writer(f, linktype=1)
@@ -667,15 +674,31 @@ async def test_conn_click_renders_findings_panel(user: User, tmp_path, monkeypat
     from tcptrace_ng.diagnose import Finding
     from tcptrace_ng.stats_parser import ConnStats
 
-    rows = [ConnStats(
-        n=1, host_a="10.0.0.1:50000", host_b="10.0.0.2:443", client_is_a=True,
-        total_bytes=4000, total_packets=14, duration_s=0.2, rexmt_packets=2,
-        has_rst=False, complete_handshake=True, verdict=Class.NORMAL,
-        fwd_ctx="", bwd_ctx="",
-    )]
+    rows = [
+        ConnStats(
+            n=1,
+            host_a="10.0.0.1:50000",
+            host_b="10.0.0.2:443",
+            client_is_a=True,
+            total_bytes=4000,
+            total_packets=14,
+            duration_s=0.2,
+            rexmt_packets=2,
+            has_rst=False,
+            complete_handshake=True,
+            verdict=Class.NORMAL,
+            fwd_ctx="",
+            bwd_ctx="",
+        )
+    ]
     fake_result = AnalyzeResult(details_text="", xpl_files=[])
-    finding = Finding(code="loss_storm", severity="bad", scope="a2b",
-                      headline="High retransmission rate", detail="18 of 120 segs retransmitted")
+    finding = Finding(
+        code="loss_storm",
+        severity="bad",
+        scope="a2b",
+        headline="High retransmission rate",
+        detail="18 of 120 segs retransmitted",
+    )
 
     class _InlineRun:
         @staticmethod

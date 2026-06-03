@@ -11,7 +11,6 @@ from tcptrace_ng.throughput import (
     synthesize_throughput,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -160,8 +159,12 @@ def test_window_size_at_200ms_rtt():
 def test_retx_segment_advances_wire_not_goodput():
     # window large enough to contain both segments at t=1.0
     segs = [
-        _seg(1.0, 0, 1000, rtx=None, paired_ack_time=1.05, paired_rtt_ms=50.0, in_flight_after=1000),
-        _seg(1.01, 0, 1000, rtx="rto", paired_ack_time=None, paired_rtt_ms=None, in_flight_after=1000),
+        _seg(
+            1.0, 0, 1000, rtx=None, paired_ack_time=1.05, paired_rtt_ms=50.0, in_flight_after=1000
+        ),
+        _seg(
+            1.01, 0, 1000, rtx="rto", paired_ack_time=None, paired_rtt_ms=None, in_flight_after=1000
+        ),
     ]
     tsg = _tsg(segs, [_ack(1.05, 1000)])
     result = synthesize_throughput(_pair(fwd=tsg))
@@ -175,7 +178,9 @@ def test_retx_segment_advances_wire_not_goodput():
 def test_unacked_first_tx_not_in_goodput():
     # paired_ack_time=None → excluded from goodput
     segs = [
-        _seg(1.0, 0, 1000, rtx=None, paired_ack_time=None, paired_rtt_ms=50.0, in_flight_after=1000),
+        _seg(
+            1.0, 0, 1000, rtx=None, paired_ack_time=None, paired_rtt_ms=50.0, in_flight_after=1000
+        ),
     ]
     tsg = _tsg(segs, [_ack(1.5, 1000)])
     result = synthesize_throughput(_pair(fwd=tsg))
@@ -186,7 +191,9 @@ def test_unacked_first_tx_not_in_goodput():
 
 def test_acked_first_tx_in_both():
     segs = [
-        _seg(1.0, 0, 1000, rtx=None, paired_ack_time=1.050, paired_rtt_ms=50.0, in_flight_after=1000),
+        _seg(
+            1.0, 0, 1000, rtx=None, paired_ack_time=1.050, paired_rtt_ms=50.0, in_flight_after=1000
+        ),
     ]
     tsg = _tsg(segs, [_ack(1.050, 1000)])
     result = synthesize_throughput(_pair(fwd=tsg))
@@ -199,12 +206,48 @@ def test_acked_first_tx_in_both():
 def test_goodput_never_exceeds_wire_invariant():
     # Mixed segments: first-tx acked, retx, unacked first-tx
     segs = [
-        _seg(0.10, 0, 1000, rtx=None, paired_ack_time=0.16, paired_rtt_ms=50.0, in_flight_after=1000),
-        _seg(0.15, 1000, 2000, rtx=None, paired_ack_time=0.21, paired_rtt_ms=50.0, in_flight_after=2000),
-        _seg(0.20, 2000, 3000, rtx=None, paired_ack_time=0.26, paired_rtt_ms=50.0, in_flight_after=3000),
-        _seg(0.21, 0, 1000, rtx="rto", paired_ack_time=None, paired_rtt_ms=None, in_flight_after=2000),
-        _seg(0.25, 3000, 4000, rtx=None, paired_ack_time=None, paired_rtt_ms=None, in_flight_after=3000),
-        _seg(0.30, 4000, 5000, rtx=None, paired_ack_time=0.36, paired_rtt_ms=50.0, in_flight_after=3000),
+        _seg(
+            0.10, 0, 1000, rtx=None, paired_ack_time=0.16, paired_rtt_ms=50.0, in_flight_after=1000
+        ),
+        _seg(
+            0.15,
+            1000,
+            2000,
+            rtx=None,
+            paired_ack_time=0.21,
+            paired_rtt_ms=50.0,
+            in_flight_after=2000,
+        ),
+        _seg(
+            0.20,
+            2000,
+            3000,
+            rtx=None,
+            paired_ack_time=0.26,
+            paired_rtt_ms=50.0,
+            in_flight_after=3000,
+        ),
+        _seg(
+            0.21, 0, 1000, rtx="rto", paired_ack_time=None, paired_rtt_ms=None, in_flight_after=2000
+        ),
+        _seg(
+            0.25,
+            3000,
+            4000,
+            rtx=None,
+            paired_ack_time=None,
+            paired_rtt_ms=None,
+            in_flight_after=3000,
+        ),
+        _seg(
+            0.30,
+            4000,
+            5000,
+            rtx=None,
+            paired_ack_time=0.36,
+            paired_rtt_ms=50.0,
+            in_flight_after=3000,
+        ),
     ]
     acks = [
         _ack(0.16, 1000),
@@ -225,11 +268,20 @@ def test_goodput_never_exceeds_wire_invariant():
 # ---------------------------------------------------------------------------
 
 
-def _build_stall_tsg(gap_s: float, rtt_ms: float = 50.0, pending: int = 500, rwin: int = 65535) -> TsgModel:
+def _build_stall_tsg(
+    gap_s: float, rtt_ms: float = 50.0, pending: int = 500, rwin: int = 65535
+) -> TsgModel:
     """Two segments with a gap between them; pending < 0.95*rwin unless told otherwise."""
     segs = [
         _seg(1.0, 0, 1000, paired_ack_time=1.05, paired_rtt_ms=rtt_ms, in_flight_after=pending),
-        _seg(1.0 + gap_s, 1000, 2000, paired_ack_time=None, paired_rtt_ms=None, in_flight_after=pending),
+        _seg(
+            1.0 + gap_s,
+            1000,
+            2000,
+            paired_ack_time=None,
+            paired_rtt_ms=None,
+            in_flight_after=pending,
+        ),
     ]
     acks = [_ack(0.5, 0, rwin=rwin)]
     return _tsg(segs, acks)
@@ -356,9 +408,18 @@ def _build_cliff_tsg(
     bytes_per_seg_before = int(rate_before_Bps * window_s / 4)  # 4 segs per window
     bytes_per_seg_after = int(rate_after_Bps * window_s / 4)
 
-    for i in range(n_before):
+    for _i in range(n_before):
         seg_end = seq + bytes_per_seg_before
-        segs.append(_seg(t, seq, seg_end, paired_ack_time=t + rtt_ms / 1000, paired_rtt_ms=rtt_ms, in_flight_after=bytes_per_seg_before))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                seg_end,
+                paired_ack_time=t + rtt_ms / 1000,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_per_seg_before,
+            )
+        )
         acks.append(_ack(t + rtt_ms / 1000, seg_end))
         seq = seg_end
         t += 0.050
@@ -366,9 +427,18 @@ def _build_cliff_tsg(
     # Gap between before/after so cliff is sharp
     t += 0.300
 
-    for i in range(n_after):
+    for _i in range(n_after):
         seg_end = seq + bytes_per_seg_after
-        segs.append(_seg(t, seq, seg_end, paired_ack_time=t + rtt_ms / 1000, paired_rtt_ms=rtt_ms, in_flight_after=bytes_per_seg_after))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                seg_end,
+                paired_ack_time=t + rtt_ms / 1000,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_per_seg_after,
+            )
+        )
         acks.append(_ack(t + rtt_ms / 1000, seg_end))
         seq = seg_end
         t += 0.050
@@ -436,7 +506,28 @@ def test_cliff_cause_hint_rwin_shrink():
     tsg = _build_cliff_tsg(rate_before_Bps=10240, rate_after_Bps=512, anomalies=[anom])
     result = synthesize_throughput(_pair(fwd=tsg))
     assert result.fwd.cliffs
-    assert any(c.cause_hint == "rwin-shrink" for c in result.fwd.cliffs)
+    rwin_cliffs = [c for c in result.fwd.cliffs if c.cause_hint == "rwin-shrink"]
+    assert rwin_cliffs
+    # A confirmed cliff is at least 'warn' even when attributed to a low-tier
+    # (info) anomaly like win_shrink — attribution must not demote it below the
+    # severity an unexplained cliff would get.
+    assert all(c.severity == "warn" for c in rwin_cliffs)
+
+
+def test_summary_excludes_idle_windows_from_central_tendency():
+    from tcptrace_ng.throughput import RateSample, _make_summary
+
+    def s(t, g, w):
+        return RateSample(t=t, goodput_Bps=g, wire_Bps=w, max_Bps=None, window_s=0.1)
+
+    # Two active windows at 1000 Bps bracketed by idle (zero-wire) padding.
+    samples = [s(0.0, 0.0, 0.0), s(0.1, 1000.0, 1100.0), s(0.2, 1000.0, 1100.0), s(0.3, 0.0, 0.0)]
+    summ = _make_summary(samples, [], [], total_payload_bytes=200, total_wire_bytes=220)
+    # Idle windows excluded -> mean reflects the active rate, not half of it.
+    assert summ.mean_goodput_Bps == 1000.0
+    assert summ.p50_goodput_Bps == 1000.0
+    assert summ.p95_goodput_Bps == 1000.0
+    assert summ.peak_goodput_Bps == 1000.0
 
 
 def test_cliff_dedup_keeps_deeper_drop():
@@ -454,13 +545,22 @@ def test_cliff_dedup_keeps_deeper_drop():
     t = 1.0
     seq = 0
     bytes_high = int(10240 * window_s / 4)
-    bytes_mid = int(3000 * window_s / 4)   # ~70% drop from high
-    bytes_deep = int(200 * window_s / 4)   # ~98% drop from high (deeper)
+    bytes_mid = int(3000 * window_s / 4)  # ~70% drop from high
+    bytes_deep = int(200 * window_s / 4)  # ~98% drop from high (deeper)
 
     # 10 high-rate segments
     for _ in range(10):
         end = seq + bytes_high
-        segs.append(_seg(t, seq, end, paired_ack_time=t + 0.05, paired_rtt_ms=rtt_ms, in_flight_after=bytes_high))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                end,
+                paired_ack_time=t + 0.05,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_high,
+            )
+        )
         acks.append(_ack(t + 0.05, end))
         seq = end
         t += 0.050
@@ -468,7 +568,16 @@ def test_cliff_dedup_keeps_deeper_drop():
     # 3 medium-rate segments (shallow cliff candidate)
     for _ in range(3):
         end = seq + bytes_mid
-        segs.append(_seg(t, seq, end, paired_ack_time=t + 0.05, paired_rtt_ms=rtt_ms, in_flight_after=bytes_mid))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                end,
+                paired_ack_time=t + 0.05,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_mid,
+            )
+        )
         acks.append(_ack(t + 0.05, end))
         seq = end
         t += 0.050
@@ -476,7 +585,16 @@ def test_cliff_dedup_keeps_deeper_drop():
     # 4 very-low-rate segments (deep cliff candidate, within window_s of shallow one)
     for _ in range(4):
         end = seq + bytes_deep
-        segs.append(_seg(t, seq, end, paired_ack_time=t + 0.05, paired_rtt_ms=rtt_ms, in_flight_after=bytes_deep))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                end,
+                paired_ack_time=t + 0.05,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_deep,
+            )
+        )
         acks.append(_ack(t + 0.05, end))
         seq = end
         t += 0.050
@@ -490,7 +608,9 @@ def test_cliff_dedup_keeps_deeper_drop():
     # The surviving cliff must be the deeper one.  The windowed rate blurs exact
     # fractions, but it must be deeper than the shallow candidate (~0.70) and
     # definitely exceed the 0.5 emission threshold.
-    assert cliffs[0].drop_frac > 0.70, f"expected deep cliff (drop_frac>0.70), got {cliffs[0].drop_frac}"
+    assert cliffs[0].drop_frac > 0.70, (
+        f"expected deep cliff (drop_frac>0.70), got {cliffs[0].drop_frac}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +656,19 @@ def test_summary_stall_and_cliff_counts():
 def _rich_tsg() -> TsgModel:
     rtt_ms = 50.0
     segs = [
-        _seg(t, t * 1000, t * 1000 + 1000, paired_ack_time=t + 0.05, paired_rtt_ms=rtt_ms, in_flight_after=1000)
+        _seg(
+            t,
+            t * 1000,
+            t * 1000 + 1000,
+            paired_ack_time=t + 0.05,
+            paired_rtt_ms=rtt_ms,
+            in_flight_after=1000,
+        )
         for t in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     ]
-    acks = [_ack(t + 0.05, t * 1000 + 1000) for t in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]]
+    acks = [
+        _ack(t + 0.05, t * 1000 + 1000) for t in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    ]
     return _tsg(segs, acks)
 
 
@@ -602,11 +731,31 @@ def test_window_stats_exact_byte_counts():
     #   t=0.5  seq 3000..4500 first-tx acked  → payload+wire (1500 bytes)
     #   t=0.9  seq 4500..5000 first-tx NOT acked (paired_ack_time=None) → wire only
     segs = [
-        _seg(0.1, 0, 1000, rtx=None, paired_ack_time=0.15, paired_rtt_ms=50.0, in_flight_after=1000),
-        _seg(0.2, 1000, 3000, rtx=None, paired_ack_time=0.25, paired_rtt_ms=50.0, in_flight_after=2000),
+        _seg(
+            0.1, 0, 1000, rtx=None, paired_ack_time=0.15, paired_rtt_ms=50.0, in_flight_after=1000
+        ),
+        _seg(
+            0.2,
+            1000,
+            3000,
+            rtx=None,
+            paired_ack_time=0.25,
+            paired_rtt_ms=50.0,
+            in_flight_after=2000,
+        ),
         _seg(0.3, 0, 500, rtx="rto", paired_ack_time=None, paired_rtt_ms=None, in_flight_after=500),
-        _seg(0.5, 3000, 4500, rtx=None, paired_ack_time=0.55, paired_rtt_ms=50.0, in_flight_after=1500),
-        _seg(0.9, 4500, 5000, rtx=None, paired_ack_time=None, paired_rtt_ms=None, in_flight_after=500),
+        _seg(
+            0.5,
+            3000,
+            4500,
+            rtx=None,
+            paired_ack_time=0.55,
+            paired_rtt_ms=50.0,
+            in_flight_after=1500,
+        ),
+        _seg(
+            0.9, 4500, 5000, rtx=None, paired_ack_time=None, paired_rtt_ms=None, in_flight_after=500
+        ),
     ]
     acks = [_ack(0.15, 1000), _ack(0.25, 3000), _ack(0.55, 4500)]
     tsg = _tsg(segs, acks)
@@ -655,7 +804,9 @@ def test_throughput_model_pair_is_constructible():
 
 def test_rate_sample_is_frozen():
     from dataclasses import FrozenInstanceError
+
     from tcptrace_ng.throughput import RateSample
+
     s = RateSample(t=1.0, goodput_Bps=0.0, wire_Bps=0.0, max_Bps=None, window_s=0.2)
     with pytest.raises(FrozenInstanceError):
         s.t = 2.0  # type: ignore[misc]
@@ -663,17 +814,29 @@ def test_rate_sample_is_frozen():
 
 def test_stall_is_frozen():
     from dataclasses import FrozenInstanceError
+
     from tcptrace_ng.throughput import Stall
-    st = Stall(t_start=1.0, t_end=1.5, duration_s=0.5, pending_bytes=100, rtt_multiple=5.0, severity="warn")
+
+    st = Stall(
+        t_start=1.0, t_end=1.5, duration_s=0.5, pending_bytes=100, rtt_multiple=5.0, severity="warn"
+    )
     with pytest.raises(FrozenInstanceError):
         st.t_start = 2.0  # type: ignore[misc]
 
 
 def test_cliff_is_frozen():
     from dataclasses import FrozenInstanceError
+
     from tcptrace_ng.throughput import Cliff
-    c = Cliff(t=1.0, goodput_before_Bps=1000.0, goodput_after_Bps=100.0, drop_frac=0.9,
-              cause_hint="unknown", severity="warn")
+
+    c = Cliff(
+        t=1.0,
+        goodput_before_Bps=1000.0,
+        goodput_after_Bps=100.0,
+        drop_frac=0.9,
+        cause_hint="unknown",
+        severity="warn",
+    )
     with pytest.raises(FrozenInstanceError):
         c.t = 2.0  # type: ignore[misc]
 
@@ -714,7 +877,9 @@ def test_ceiling_floors_subms_rtt_at_1ms():
     rwin = 60000
     segs = [
         _seg(1.0, 0, 1500, paired_ack_time=1.0000042, paired_rtt_ms=0.042, in_flight_after=1500),
-        _seg(1.001, 1500, 3000, paired_ack_time=1.001005, paired_rtt_ms=0.005, in_flight_after=1500),
+        _seg(
+            1.001, 1500, 3000, paired_ack_time=1.001005, paired_rtt_ms=0.005, in_flight_after=1500
+        ),
     ]
     acks = [_ack(1.0001, 1500, rwin=rwin), _ack(1.0011, 3000, rwin=rwin)]
     tsg = _tsg(segs, acks)
@@ -780,7 +945,16 @@ def test_bdp_utilization_clipped_at_100_percent():
     seq = 0
     for _ in range(5):
         end = seq + bytes_per_seg
-        segs.append(_seg(t, seq, end, paired_ack_time=t + 0.05, paired_rtt_ms=rtt_ms, in_flight_after=bytes_per_seg))
+        segs.append(
+            _seg(
+                t,
+                seq,
+                end,
+                paired_ack_time=t + 0.05,
+                paired_rtt_ms=rtt_ms,
+                in_flight_after=bytes_per_seg,
+            )
+        )
         acks.append(_ack(t + 0.05, end, rwin=rwin_small))
         seq = end
         t += 0.050

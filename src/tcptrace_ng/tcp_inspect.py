@@ -109,7 +109,7 @@ def _percentile(values: list[float], pct: float) -> float | None:
     if not values:
         return None
     s = sorted(values)
-    k = max(0, min(len(s) - 1, int(round((pct / 100.0) * (len(s) - 1)))))
+    k = max(0, min(len(s) - 1, round((pct / 100.0) * (len(s) - 1))))
     return s[k]
 
 
@@ -157,16 +157,12 @@ class TsgModel:
         n_rto = sum(1 for s in segs if s.rtx == "rto")
         n_fast = sum(1 for s in segs if s.rtx == "fast")
         n_retx = sum(1 for s in segs if s.rtx is not None)
-        n_dup_ack = sum(
-            1 for a in anomalies if a.kind in ("dup_ack", "dup_ack_drove_retx")
-        )
+        n_dup_ack = sum(1 for a in anomalies if a.kind in ("dup_ack", "dup_ack_drove_retx"))
         n_partial_ack = sum(1 for a in anomalies if a.kind == "partial_ack")
         n_coalesced = sum(1 for a in anomalies if a.kind == "coalesced")
         n_ooo = sum(1 for a in anomalies if a.kind == "ooo")
         n_sack_regions = sum(len(a.sack_blocks) for a in acks)
-        n_win_shrink = sum(
-            1 for a in anomalies if a.kind in ("win_shrink", "win_shrink_large")
-        )
+        n_win_shrink = sum(1 for a in anomalies if a.kind in ("win_shrink", "win_shrink_large"))
         n_zero_win = sum(1 for a in anomalies if a.kind == "zero_win")
         n_bad_csum = sum(1 for a in anomalies if a.kind.startswith("bad_csum"))
         n_bad_csum_acked = sum(1 for a in anomalies if a.kind == "bad_csum_acked")
@@ -180,19 +176,14 @@ class TsgModel:
         jitter: float | None
         if len(rtts) >= 2:
             mean = sum(rtts) / len(rtts)
-            jitter = (sum(abs(r - mean) for r in rtts) / len(rtts))
+            jitter = sum(abs(r - mean) for r in rtts) / len(rtts)
         else:
             jitter = None
 
-        if segs:
-            duration = max(0.0, segs[-1].time - segs[0].time)
-        else:
-            duration = 0.0
+        duration = max(0.0, segs[-1].time - segs[0].time) if segs else 0.0
         throughput = bytes_sent / duration if duration > 0 else 0.0
 
-        rwin_peak = (
-            max((a.rwin_scaled or a.rwin) for a in acks) if acks else None
-        )
+        rwin_peak = max((a.rwin_scaled or a.rwin) for a in acks) if acks else None
 
         return WindowStats(
             n_segs=len(segs),
@@ -254,9 +245,7 @@ class WindowStats:
     n_coalesced: int = 0
 
 
-_TITLE_ENDPOINTS_RE = re.compile(
-    r"^\s*(\S+?)\s*(?:_==>_|==>|_<==_|<==)\s*(\S+?)\s*(?:\(|$)"
-)
+_TITLE_ENDPOINTS_RE = re.compile(r"^\s*(\S+?)\s*(?:_==>_|==>|_<==_|<==)\s*(\S+?)\s*(?:\(|$)")
 
 
 def _parse_endpoints(title: str) -> tuple[str, str]:
@@ -322,8 +311,8 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     the time of the SACK report — attach to the ack at that time.
     """
     green_steps: list[tuple[float, int]] = []  # (time, new_ack_seq)
-    green_zero: list[tuple[float, int]] = []   # zero-len verticals — kept for dup-ACK matching
-    yellow_at_time: dict[float, int] = {}      # time -> rwin top seq
+    green_zero: list[tuple[float, int]] = []  # zero-len verticals — kept for dup-ACK matching
+    yellow_at_time: dict[float, int] = {}  # time -> rwin top seq
     dup_labels: dict[tuple[float, int], int] = {}  # (time, seq) -> N from atext
     sack_by_time: dict[float, list[tuple[int, int]]] = {}  # time -> [(lo, hi), ...]
 
@@ -489,11 +478,7 @@ def _classify_retx(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
             new_rtx: str = "spurious"
         else:
             # Fast: ≥3 dup-ACKs in (s.time - rtt_window, s.time).
-            dup_sum = sum(
-                a.dup_count
-                for a in acks
-                if s.time - rtt_window < a.time < s.time
-            )
+            dup_sum = sum(a.dup_count for a in acks if s.time - rtt_window < a.time < s.time)
             new_rtx = "fast" if dup_sum >= 3 else "rto"
 
         out.append(
@@ -568,9 +553,7 @@ def _detect_anomalies(
                 rwin_top = a.ack_seq + a.rwin
                 shrink_bytes = prev_rwin - delta_acked - a.rwin
                 kind = (
-                    "win_shrink_large"
-                    if mss is not None and shrink_bytes >= mss
-                    else "win_shrink"
+                    "win_shrink_large" if mss is not None and shrink_bytes >= mss else "win_shrink"
                 )
                 out.append(
                     Anomaly(
@@ -588,9 +571,7 @@ def _detect_anomalies(
                     Anomaly(
                         time=a.time,
                         kind="sack_gap",
-                        one_liner=(
-                            f"SACK {lo:,}..{hi:,}; gap {a.ack_seq:,}..{lo:,} unacked"
-                        ),
+                        one_liner=(f"SACK {lo:,}..{hi:,}; gap {a.ack_seq:,}..{lo:,} unacked"),
                         seq_lo=lo,
                         seq_hi=hi,
                     )
@@ -761,9 +742,7 @@ def _extract_pure_ack_times(xpl: XplPlot) -> list[float]:
     return times
 
 
-def _classify_pure_acks(
-    pure_ack_times: list[float], opp: TsgModel
-) -> list[Anomaly]:
+def _classify_pure_acks(pure_ack_times: list[float], opp: TsgModel) -> list[Anomaly]:
     """Classify each pure-ACK marker time against the opposite direction's
     cumack staircase + data flow.
 
@@ -832,9 +811,7 @@ def _classify_pure_acks(
                 Anomaly(
                     time=t,
                     kind="partial_ack",
-                    one_liner=(
-                        f"partial ACK at seq {cumack:,} (max sent {max_sent:,})"
-                    ),
+                    one_liner=(f"partial ACK at seq {cumack:,} (max sent {max_sent:,})"),
                     seq_lo=cumack,
                     seq_hi=cumack,
                 )
@@ -1080,15 +1057,11 @@ def synthesize(
         # b's pure-ACKs (in bwd) ack a's data (in fwd) → annotate fwd.
         b_pure_anoms = _classify_pure_acks(bwd.pure_ack_times, fwd)
         if b_pure_anoms:
-            fwd.anomalies = sorted(
-                fwd.anomalies + b_pure_anoms, key=lambda a: a.time
-            )
+            fwd.anomalies = sorted(fwd.anomalies + b_pure_anoms, key=lambda a: a.time)
         # a's pure-ACKs (in fwd) ack b's data (in bwd) → annotate bwd.
         a_pure_anoms = _classify_pure_acks(fwd.pure_ack_times, bwd)
         if a_pure_anoms:
-            bwd.anomalies = sorted(
-                bwd.anomalies + a_pure_anoms, key=lambda a: a.time
-            )
+            bwd.anomalies = sorted(bwd.anomalies + a_pure_anoms, key=lambda a: a.time)
         _escalate_dup_acks(fwd)
         _escalate_dup_acks(bwd)
         _emit_handshake_ack(fwd, bwd)
@@ -1110,9 +1083,7 @@ def _escalate_dup_acks(model: TsgModel) -> None:
     distinction here: matching seq locates the dup as causally upstream.
     """
     fast_retx_seqs = {
-        a.seq_lo
-        for a in model.anomalies
-        if a.kind == "fast" and a.seq_lo is not None
+        a.seq_lo for a in model.anomalies if a.kind == "fast" and a.seq_lo is not None
     }
     if not fast_retx_seqs:
         return
@@ -1153,8 +1124,8 @@ def _emit_handshake_ack(fwd: TsgModel, bwd: TsgModel) -> None:
             continue
         delta_ms = (ack.time - t_sa) * 1000.0
         fwd.anomalies = sorted(
-            fwd.anomalies
-            + [
+            [
+                *fwd.anomalies,
                 Anomaly(
                     time=ack.time,
                     kind="handshake_ack",
@@ -1164,7 +1135,7 @@ def _emit_handshake_ack(fwd: TsgModel, bwd: TsgModel) -> None:
                     ),
                     seq_lo=ack.ack_seq,
                     seq_hi=ack.ack_seq,
-                )
+                ),
             ],
             key=lambda a: a.time,
         )

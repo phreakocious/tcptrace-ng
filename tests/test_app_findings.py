@@ -49,8 +49,13 @@ def test_findings_panel_html_blank_when_empty():
 
 
 def test_findings_panel_html_renders_headline_detail_scope_and_dot():
-    f = _f("bad", code="loss_storm", scope="a2b",
-           headline="High retransmission rate", detail="18 of 120 segs")
+    f = _f(
+        "bad",
+        code="loss_storm",
+        scope="a2b",
+        headline="High retransmission rate",
+        detail="18 of 120 segs",
+    )
     html = _findings_panel_html([f], "client→server", "server→client")
     assert "tcptrace-findings" in html
     assert "High retransmission rate" in html
@@ -82,22 +87,31 @@ def test_state_initializes_findings_dict():
 
 
 def _connstats(n=1, **kw):
-    base = dict(
-        n=n, host_a="10.0.0.1:50000", host_b="10.0.0.2:443", client_is_a=True,
-        total_bytes=4000, total_packets=14, duration_s=0.2, rexmt_packets=0,
-        has_rst=False, complete_handshake=True, verdict=Class.NORMAL,
-        fwd_ctx="", bwd_ctx="",
-    )
+    base = {
+        "n": n,
+        "host_a": "10.0.0.1:50000",
+        "host_b": "10.0.0.2:443",
+        "client_is_a": True,
+        "total_bytes": 4000,
+        "total_packets": 14,
+        "duration_s": 0.2,
+        "rexmt_packets": 0,
+        "has_rst": False,
+        "complete_handshake": True,
+        "verdict": Class.NORMAL,
+        "fwd_ctx": "",
+        "bwd_ctx": "",
+    }
     base.update(kw)
     return ConnStats(**base)
 
 
 def test_compute_findings_capture_vantage_from_stats_when_no_xpl(monkeypatch):
     # No xpl -> tsg is None -> only stats-based detectors run (capture_vantage).
-    monkeypatch.setattr(app_mod.state, "stats",
-                        [_connstats(rtt_3whs_a=80.0, rtt_3whs_b=0.1)])
-    monkeypatch.setattr(app_mod.state, "analyses",
-                        {1: AnalyzeResult(details_text="", xpl_files=[])})
+    monkeypatch.setattr(app_mod.state, "stats", [_connstats(rtt_3whs_a=80.0, rtt_3whs_b=0.1)])
+    monkeypatch.setattr(
+        app_mod.state, "analyses", {1: AnalyzeResult(details_text="", xpl_files=[])}
+    )
     out = app_mod._compute_findings(1)
     assert [f.code for f in out] == ["capture_vantage"]
 
@@ -111,8 +125,12 @@ def test_compute_findings_empty_when_conn_not_analyzed(monkeypatch):
 def test_compute_findings_none_stats_for_connrow(monkeypatch):
     # A stats-less ConnRow (basic listing) -> stats=None; with no xpl -> tsg=None
     # -> diagnose(None, None, None) returns [] without crashing.
-    monkeypatch.setattr(app_mod.state, "stats",
-                        [ConnRow(n=1, host_a="a:1", host_b="b:2", raw_line="  1: a:1 - b:2 (a2b)")])
-    monkeypatch.setattr(app_mod.state, "analyses",
-                        {1: AnalyzeResult(details_text="", xpl_files=[])})
+    monkeypatch.setattr(
+        app_mod.state,
+        "stats",
+        [ConnRow(n=1, host_a="a:1", host_b="b:2", raw_line="  1: a:1 - b:2 (a2b)")],
+    )
+    monkeypatch.setattr(
+        app_mod.state, "analyses", {1: AnalyzeResult(details_text="", xpl_files=[])}
+    )
     assert app_mod._compute_findings(1) == []

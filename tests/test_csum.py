@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 import struct
 from pathlib import Path
 
@@ -40,7 +39,13 @@ def _tcp_frame(sport: int, dport: int, payload: bytes, checksum: int) -> bytes:
 def _correct_checksum(src: bytes, dst: bytes, payload: bytes) -> int:
     """Honest RFC 793 TCP checksum so we can write a known-good frame."""
     tcp = dpkt.tcp.TCP(
-        sport=12345, dport=80, seq=1, ack=0, off_x2=0x50, flags=0x18, data=payload,
+        sport=12345,
+        dport=80,
+        seq=1,
+        ack=0,
+        off_x2=0x50,
+        flags=0x18,
+        data=payload,
     )
     tcp_bytes = bytes(tcp)  # cksum starts at 0; we recompute and patch in.
     zeroed = tcp_bytes[:16] + b"\x00\x00" + tcp_bytes[18:]

@@ -230,8 +230,10 @@ def parse_xpl(source: str | bytes | Path) -> XplPlot:
                 text_parts = text_parts[:-1]
             cmd = _parse_text(text_parts, text_color, lines, i, n)
             if cmd is None:
+                # Text verbs span two lines (verb + label); skip both so the
+                # label line isn't re-parsed as a spurious token on failure.
                 plot.unknown.append(stripped)
-                i += 1
+                i += 2
                 continue
             plot.commands.append(cmd)
             i += 2

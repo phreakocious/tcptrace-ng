@@ -35,13 +35,17 @@ from .cache import (
     write_version,
 )
 from .classifier import Class, classify
-from .csum import CsumEvent, scan_pcap as scan_csums
+from .csum import CsumEvent
+from .csum import scan_pcap as scan_csums
 from .decap import DECAP_VERSION, decap_pcap, detect_encaps
 from .diagnose import Finding, diagnose, severity_to_class
 from .offload import detect_offload
-from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure, to_throughput_figure, to_tsg_figure
-from .tcp_inspect import synthesize as synthesize_tsg
-from .throughput import DirectionSummary, ThroughputModelPair, synthesize_throughput
+from .plotly_adapter import (
+    to_paired_plotly_figure,
+    to_plotly_figure,
+    to_throughput_figure,
+    to_tsg_figure,
+)
 from .runner import (
     AnalyzeResult,
     ConnRow,
@@ -52,7 +56,9 @@ from .runner import (
     try_convert_to_pcap,
 )
 from .stats_parser import STATS_PARSER_VERSION, ConnStats
+from .tcp_inspect import synthesize as synthesize_tsg
 from .theme import DARK_CSS
+from .throughput import DirectionSummary, ThroughputModelPair, synthesize_throughput
 from .xpl_grouper import GroupedXpl, group_xpls
 from .xpl_parser import XplPlot, parse_xpl
 
@@ -461,7 +467,7 @@ def _build_metric_figure(
         plot, _err = _safe_parse_xpl(combined)
         if plot is None or not plot.commands:
             return None
-        return to_plotly_figure(plot, metric=metric)
+        return to_plotly_figure(plot)
 
     fwd_plot = None
     bwd_plot = None
@@ -475,9 +481,7 @@ def _build_metric_figure(
             bwd_plot = plot
     if fwd_plot is None and bwd_plot is None:
         return None
-    return to_paired_plotly_figure(
-        fwd_plot, bwd_plot, fwd_label, bwd_label, metric=metric
-    )
+    return to_paired_plotly_figure(fwd_plot, bwd_plot, fwd_label, bwd_label)
 
 
 def _safe_parse_xpl(xpl: Path) -> tuple[XplPlot | None, str | None]:
@@ -539,8 +543,10 @@ def _build_tput_model(
         bad_csum_times_bwd=bwd_csum,
     )
     stats = (
-        tsg_pair.fwd.summary if tsg_pair.fwd is not None
-        else tsg_pair.bwd.summary if tsg_pair.bwd is not None
+        tsg_pair.fwd.summary
+        if tsg_pair.fwd is not None
+        else tsg_pair.bwd.summary
+        if tsg_pair.bwd is not None
         else None
     )
     return synthesize_throughput(tsg_pair, stats)
@@ -566,15 +572,13 @@ def _has_lro_anomaly(pair) -> bool:
     return False
 
 
-def _sync_lro_warning(state: "_State") -> None:
+def _sync_lro_warning(state: _State) -> None:
     """Add/refresh the LRO warning string in state.pcap_warnings.
 
     Drops any stale LRO entry first, then appends a fresh one reflecting
     the current `state.conns_with_lro` count. n=0 just drops.
     """
-    state.pcap_warnings = [
-        w for w in state.pcap_warnings if not w.startswith(_LRO_WARNING_PREFIX)
-    ]
+    state.pcap_warnings = [w for w in state.pcap_warnings if not w.startswith(_LRO_WARNING_PREFIX)]
     n = len(state.conns_with_lro)
     if n == 0:
         return
@@ -661,7 +665,7 @@ def _format_count(v: int | None) -> str:
     return f"{v:,}"
 
 
-def _format_throughput_Bps(v: float | None) -> str:  # noqa: N802 — `B` vs `b` is load-bearing; Bps ≠ bps
+def _format_throughput_Bps(v: float | None) -> str:
     if v is None:
         return "—"
     if v < 1024:
@@ -673,7 +677,7 @@ def _format_throughput_Bps(v: float | None) -> str:  # noqa: N802 — `B` vs `b`
     return f"{v / (1024 * 1024 * 1024):.2f} GB/s"
 
 
-def _format_rate_bps(v_Bps: float | None) -> str:  # noqa: N802
+def _format_rate_bps(v_Bps: float | None) -> str:
     """Same shape as `_format_throughput_Bps` but bits-per-second, SI (1000s).
 
     Network engineers conventionally read line rates in decimal bits; matching
@@ -720,10 +724,7 @@ def _format_bad_csum(ws) -> str:
     """
     total = ws.n_bad_csum
     if ws.n_bad_csum_lost > 0 and ws.n_bad_csum_acked > 0:
-        return (
-            f"{total} bad csum ({ws.n_bad_csum_lost} lost, "
-            f"{ws.n_bad_csum_acked} acked)"
-        )
+        return f"{total} bad csum ({ws.n_bad_csum_lost} lost, {ws.n_bad_csum_acked} acked)"
     if ws.n_bad_csum_lost > 0:
         return f"{total} bad csum ({ws.n_bad_csum_lost} lost)"
     if ws.n_bad_csum_acked > 0:
@@ -758,36 +759,41 @@ def _stats_grid_html(label: str, ws, rate_unit: str = "bytes") -> str:
 
     csum_text = _format_bad_csum(ws)
     other_anom = (
-        f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
-        f"{ws.n_coalesced} coal · {ws.n_ooo} OOO"
+        f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · {ws.n_coalesced} coal · {ws.n_ooo} OOO"
     )
     reliability_extras = (
-        f"{other_anom} · {_sev(csum_text, csum_sev)}"
-        if ws.n_bad_csum > 0
-        else other_anom
+        f"{other_anom} · {_sev(csum_text, csum_sev)}" if ws.n_bad_csum > 0 else other_anom
     )
 
     rows = [
-        ("Volume",
-         f"{_format_count(ws.n_segs)} segs",
-         f"{_format_bytes(ws.bytes_sent)} sent",
-         f"{_format_rate(ws.throughput_eff_Bps, rate_unit)} eff",
-         f"{_format_count(ws.n_sack_regions)} SACK"),
-        ("Reliability",
-         _sev(f"{ws.n_retx} retx ({pct:.1f}%)", retx_sev),
-         f" · {_sev(f'{ws.n_rto} RTO', rto_sev)}",
-         f" · {_sev(f'{ws.n_fast} fast', fast_sev)}",
-         reliability_extras),
-        ("Latency",
-         f"p50 {_format_ms(ws.rtt_p50_ms)}",
-         f"p95 {_format_ms(ws.rtt_p95_ms)}",
-         f"min/max {_format_ms(ws.rtt_min_ms)}/{_format_ms(ws.rtt_max_ms)}",
-         f"jitter {_format_ms(ws.jitter_ms)}"),
-        ("Receiver",
-         f"rwnd peak {_format_bytes(ws.rwin_peak)}",
-         f"scale ×{ws.rwin_scale}" if ws.rwin_scale is not None else "scale unknown",
-         _sev(f"shrinks: {ws.n_win_shrink}", shrink_sev),
-         _sev(f"0-win: {ws.n_zero_win}", zerow_sev)),
+        (
+            "Volume",
+            f"{_format_count(ws.n_segs)} segs",
+            f"{_format_bytes(ws.bytes_sent)} sent",
+            f"{_format_rate(ws.throughput_eff_Bps, rate_unit)} eff",
+            f"{_format_count(ws.n_sack_regions)} SACK",
+        ),
+        (
+            "Reliability",
+            _sev(f"{ws.n_retx} retx ({pct:.1f}%)", retx_sev),
+            f" · {_sev(f'{ws.n_rto} RTO', rto_sev)}",
+            f" · {_sev(f'{ws.n_fast} fast', fast_sev)}",
+            reliability_extras,
+        ),
+        (
+            "Latency",
+            f"p50 {_format_ms(ws.rtt_p50_ms)}",
+            f"p95 {_format_ms(ws.rtt_p95_ms)}",
+            f"min/max {_format_ms(ws.rtt_min_ms)}/{_format_ms(ws.rtt_max_ms)}",
+            f"jitter {_format_ms(ws.jitter_ms)}",
+        ),
+        (
+            "Receiver",
+            f"rwnd peak {_format_bytes(ws.rwin_peak)}",
+            f"scale ×{ws.rwin_scale}" if ws.rwin_scale is not None else "scale unknown",
+            _sev(f"shrinks: {ws.n_win_shrink}", shrink_sev),
+            _sev(f"0-win: {ws.n_zero_win}", zerow_sev),
+        ),
     ]
     parts = [f'<div class="dir-label">{label}</div>']
     # Render as four columns; each column is one category.
@@ -801,26 +807,33 @@ def _stats_grid_html(label: str, ws, rate_unit: str = "bytes") -> str:
     return "".join(parts)
 
 
-def _throughput_stats_grid_html(label: str, summary: DirectionSummary, rate_unit: str = "bytes") -> str:
+def _throughput_stats_grid_html(
+    label: str, summary: DirectionSummary, rate_unit: str = "bytes"
+) -> str:
     bdp = (
         f"{summary.bdp_utilization_frac * 100:.1f}%"
         if summary.bdp_utilization_frac is not None
         else "—"
     )
     rows = [
-        ("Goodput",
-         f"avg {_format_rate(summary.mean_goodput_Bps, rate_unit)}",
-         f"p50 {_format_rate(summary.p50_goodput_Bps, rate_unit)}",
-         f"p95 {_format_rate(summary.p95_goodput_Bps, rate_unit)}",
-         f"peak {_format_rate(summary.peak_goodput_Bps, rate_unit)}"),
-        ("Wire",
-         f"{_format_bytes(summary.total_wire_bytes)} total",
-         f"{summary.retx_overhead_frac * 100:.1f}% retx overhead"),
-        ("BDP utilization",
-         bdp),
-        ("Anomalies",
-         f"{summary.stall_count} stalls ({summary.total_stall_s:.2f}s total)",
-         f"{summary.cliff_count} cliffs"),
+        (
+            "Goodput",
+            f"avg {_format_rate(summary.mean_goodput_Bps, rate_unit)}",
+            f"p50 {_format_rate(summary.p50_goodput_Bps, rate_unit)}",
+            f"p95 {_format_rate(summary.p95_goodput_Bps, rate_unit)}",
+            f"peak {_format_rate(summary.peak_goodput_Bps, rate_unit)}",
+        ),
+        (
+            "Wire",
+            f"{_format_bytes(summary.total_wire_bytes)} total",
+            f"{summary.retx_overhead_frac * 100:.1f}% retx overhead",
+        ),
+        ("BDP utilization", bdp),
+        (
+            "Anomalies",
+            f"{summary.stall_count} stalls ({summary.total_stall_s:.2f}s total)",
+            f"{summary.cliff_count} cliffs",
+        ),
     ]
     parts = [f'<div class="dir-label">{label}</div>']
     titles = [r[0] for r in rows]
@@ -845,9 +858,17 @@ def _render_throughput_stats_panel(
     with container:
         html_parts: list[str] = []
         if pair.fwd is not None:
-            html_parts.append(_throughput_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit))
+            html_parts.append(
+                _throughput_stats_grid_html(
+                    fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit
+                )
+            )
         if pair.bwd is not None:
-            html_parts.append(_throughput_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit))
+            html_parts.append(
+                _throughput_stats_grid_html(
+                    bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit
+                )
+            )
         ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
@@ -897,9 +918,13 @@ def _render_stats_panel(
     with container:
         html_parts: list[str] = []
         if pair.fwd is not None:
-            html_parts.append(_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit))
+            html_parts.append(
+                _stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit)
+            )
         if pair.bwd is not None:
-            html_parts.append(_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit))
+            html_parts.append(
+                _stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit)
+            )
         ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
@@ -917,7 +942,7 @@ def build_page() -> None:
         # =========== header ===========
         with ui.header(elevated=False).classes("tcptrace-header items-center gap-3 px-4"):
             ui.label("tcptrace-ng").classes("tcptrace-brand text-base")
-            ui.label("›").classes("tcptrace-sep")  # noqa: RUF001 — intentional brand separator (single right-pointing angle quotation mark)
+            ui.label("›").classes("tcptrace-sep")
             pcap_select = (
                 ui.select(
                     options=pcap_options or {"": "no pcaps in this directory"},
@@ -994,6 +1019,9 @@ def build_page() -> None:
             n = len(warnings)
             label = f"⚠ {n} warning" if n == 1 else f"⚠ {n} warnings"
             warning_chip.set_text(label)
+            # Drop the previous Tooltip child before adding a new one; otherwise
+            # each refresh (pcap pick, decap, LRO surfacing) leaks a stale tooltip.
+            warning_chip.clear()
             with warning_chip:
                 warning_chip.tooltip(warnings[0] if n == 1 else f"{warnings[0]}  (+{n - 1} more)")
             warning_chip.visible = True
@@ -1116,18 +1144,16 @@ def build_page() -> None:
                         fwd_ctx, bwd_ctx = row.fwd_ctx, row.bwd_ctx
                 groups, tabs, default_tab = [], None, ""
                 output_dialog = (
-                    _build_output_dialog(state.analyses[n])
-                    if n in state.analyses
-                    else None
+                    _build_output_dialog(state.analyses[n]) if n in state.analyses else None
                 )
                 with ui.column().classes("w-full gap-0 tcptrace-sticky-head"):
                     with ui.row().classes("w-full items-center no-wrap"):
                         ui.label(title_main).classes("tcptrace-title")
                         ui.space()
                         if output_dialog is not None:
-                            ui.button(
-                                "tcptrace output", on_click=output_dialog.open
-                            ).props("flat dense").classes("tcptrace-rawout-btn")
+                            ui.button("tcptrace output", on_click=output_dialog.open).props(
+                                "flat dense"
+                            ).classes("tcptrace-rawout-btn")
                     if subtitle:
                         ui.label(subtitle).classes("tcptrace-subtitle")
                     if fwd_ctx:
@@ -1218,13 +1244,9 @@ def build_page() -> None:
                         ).style("margin-top: 32px;")
                         return
                     if metric == "tsg":
-                        with ui.row().classes(
-                            "items-center gap-2 px-3 py-1 w-full justify-end"
-                        ):
+                        with ui.row().classes("items-center gap-2 px-3 py-1 w-full justify-end"):
                             info_switch = (
-                                ui.switch(
-                                    "Show info markers", value=state.show_info
-                                )
+                                ui.switch("Show info markers", value=state.show_info)
                                 .props("dense dark")
                                 .tooltip(
                                     "Partial-ACK, coalesced (LRO), benign dup-ACK,"
@@ -1233,8 +1255,10 @@ def build_page() -> None:
                                     " markers"
                                 )
                             )
-                    plotly_el = ui.plotly(fig).classes("w-full").style(
-                        "height: calc(100vh - 320px); min-height: 480px;"
+                    plotly_el = (
+                        ui.plotly(fig)
+                        .classes("w-full")
+                        .style("height: calc(100vh - 320px); min-height: 480px;")
                     )
                     if metric == "tsg":
                         model_pair = state.figure_cache.get((conn_n, metric, "model"))
@@ -1262,13 +1286,9 @@ def build_page() -> None:
 
                             info_switch.on_value_change(_on_info_toggle)
                     if metric == "tput":
-                        with ui.row().classes(
-                            "items-center gap-2 px-3 py-1 w-full justify-end"
-                        ):
+                        with ui.row().classes("items-center gap-2 px-3 py-1 w-full justify-end"):
                             tput_info_switch = (
-                                ui.switch(
-                                    "Show info anomalies", value=state.show_info
-                                )
+                                ui.switch("Show info anomalies", value=state.show_info)
                                 .props("dense dark")
                                 .tooltip(
                                     "Show info-tier stalls and cliffs — minor pauses"
@@ -1331,7 +1351,13 @@ def build_page() -> None:
                             details,
                         )
                         state.figure_cache[(conn_n, metric, "model")] = tput_pair
-                        fig = to_throughput_figure(tput_pair, show_info=state.show_info, rate_unit=state.rate_unit) if tput_pair is not None else None
+                        fig = (
+                            to_throughput_figure(
+                                tput_pair, show_info=state.show_info, rate_unit=state.rate_unit
+                            )
+                            if tput_pair is not None
+                            else None
+                        )
                     else:
                         fig = await run.io_bound(
                             _build_metric_figure,
@@ -1404,12 +1430,8 @@ def build_page() -> None:
                     if not state.debug:
                         continue
                     cls = Class.NORMAL
-                html_lines.append(
-                    f'<span class="{cls.value}">{_escape_html(line)}</span>'
-                )
-            pre_html = (
-                '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
-            )
+                html_lines.append(f'<span class="{cls.value}">{_escape_html(line)}</span>')
+            pre_html = '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
 
             dialog = ui.dialog()
             with dialog, ui.card().classes("tcptrace-output-card p-0"):
@@ -1523,9 +1545,13 @@ def build_page() -> None:
                     )
                 except Exception as exc:
                     ui.notify(f"conn {n} failed: {exc}", type="negative")
-                    state.selected_conn = None
-                    render_main()
-                    render_sidebar()
+                    # Only reset the view if the user is still looking at this
+                    # connection — they may have clicked another while it was
+                    # analyzing, and that newer selection must not be clobbered.
+                    if state.selected_conn == n:
+                        state.selected_conn = None
+                        render_main()
+                        render_sidebar()
                     return
                 details_path.write_text(result.details_text)
                 state.analyses[n] = result
@@ -1536,8 +1562,11 @@ def build_page() -> None:
                     state.findings[n] = await run.io_bound(_compute_findings, n)
                 except Exception:
                     state.findings[n] = []
-            render_main()
-            render_sidebar()
+            # Analysis + findings are cached above regardless; only repaint if
+            # this connection is still selected (same async-switch guard as above).
+            if state.selected_conn == n:
+                render_main()
+                render_sidebar()
 
         def _on_filter_change(e) -> None:
             state.conn_filter = e.value or ""
@@ -1637,9 +1666,7 @@ def build_page() -> None:
             # and the only source of `bad_csum` anomalies; we never let
             # tcptrace --checksum filter packets out of the analysis.
             try:
-                state.bad_csum_events = await run.io_bound(
-                    scan_csums, state.effective_pcap
-                )
+                state.bad_csum_events = await run.io_bound(scan_csums, state.effective_pcap)
             except Exception:
                 state.bad_csum_events = []
             cached = load_stats(layout, _cache_version())
@@ -1679,9 +1706,7 @@ def build_page() -> None:
                         layout = CacheLayout(state.selected_pcap)
                         # Re-run encap detection against the converted pcap; a
                         # pcapng with Geneve inside would otherwise slip past.
-                        state.effective_pcap = await _ensure_decapped(
-                            state.selected_pcap, layout
-                        )
+                        state.effective_pcap = await _ensure_decapped(state.selected_pcap, layout)
                         await _scan_for_warnings(state.effective_pcap)
                         refresh_warnings()
                         state.stats = await run.io_bound(
