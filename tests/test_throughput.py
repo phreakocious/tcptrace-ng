@@ -203,6 +203,34 @@ def test_acked_first_tx_in_both():
     assert s.goodput_Bps == pytest.approx(s.wire_Bps)
 
 
+def test_retx_overhead_excludes_unacked_tail():
+    """H4: retx overhead counts only retransmitted bytes. A zero-retransmit
+    transfer whose trailing segment is merely unacked at the capture edge has
+    0% overhead — not (1 - acked_payload/wire), which miscounts the unacked
+    first-transmission tail as retransmission and inflates short / cut flows."""
+    segs = [
+        _seg(1.0, 0, 1000, rtx=None, paired_ack_time=1.05, paired_rtt_ms=50.0),
+        _seg(1.1, 1000, 2000, rtx=None, paired_ack_time=1.15, paired_rtt_ms=50.0),
+        _seg(1.2, 2000, 3000, rtx=None, paired_ack_time=None),  # in flight at capture edge
+    ]
+    tsg = _tsg(segs, [_ack(1.05, 1000), _ack(1.15, 2000)])
+    result = synthesize_throughput(_pair(fwd=tsg))
+    assert result.fwd.summary.retx_overhead_frac == pytest.approx(0.0)
+
+
+def test_retx_overhead_counts_only_retransmits_not_unacked_tail():
+    """A real retransmit contributes its bytes; a coincident unacked tail does
+    not. overhead = retx_bytes / wire."""
+    segs = [
+        _seg(1.0, 0, 1000, rtx=None, paired_ack_time=1.05, paired_rtt_ms=50.0),
+        _seg(1.2, 0, 1000, rtx="rto", paired_ack_time=1.25, paired_rtt_ms=50.0),  # 1000 B overhead
+        _seg(1.3, 1000, 2000, rtx=None, paired_ack_time=None),  # unacked tail, NOT overhead
+    ]
+    tsg = _tsg(segs, [_ack(1.05, 1000)])
+    result = synthesize_throughput(_pair(fwd=tsg))
+    assert result.fwd.summary.retx_overhead_frac == pytest.approx(1000 / 3000)
+
+
 def test_goodput_never_exceeds_wire_invariant():
     # Mixed segments: first-tx acked, retx, unacked first-tx
     segs = [
@@ -377,6 +405,30 @@ def test_stall_not_detected_with_empty_acks():
     assert result.fwd.stalls == ()
 
 
+def test_stall_baseline_uses_rtt_min_not_gap_terminating_rtt():
+    """M9: when the pre-gap segment is unpaired, the baseline must be the
+    connection's rtt_min — NOT the RTT of the segment that ends the gap, which
+    is typically the first post-stall / RTO-backed-off probe with an inflated
+    RTT. Borrowing that 500 ms RTT pushes the threshold to 1.5 s and hides a
+    genuine 0.6 s (12x-rtt_min) network-blocked stall."""
+    from tcptrace_ng.throughput import _detect_stalls
+
+    seg_a = _seg(
+        1.0, 0, 1000, rtx=None, paired_ack_time=None, paired_rtt_ms=None, in_flight_after=5000
+    )
+    # Gap-terminating probe with an inflated RTT (RTO-backed-off).
+    seg_b = _seg(
+        1.6, 1000, 2000, rtx="rto", paired_ack_time=2.1, paired_rtt_ms=500.0, in_flight_after=5000
+    )
+    tsg = _tsg(
+        [seg_a, seg_b], [_ack(0.5, 0, rwin=65535)]
+    )  # no in_flight series -> drain check skipped
+    stalls = _detect_stalls(tsg, rtt_min_s=0.05)  # connection rtt_min = 50 ms
+    assert len(stalls) == 1
+    assert stalls[0].rtt_multiple == pytest.approx(12.0)  # 0.6 s / 0.05 s
+    assert stalls[0].severity == "severe"
+
+
 # ---------------------------------------------------------------------------
 # Cliff detection
 # ---------------------------------------------------------------------------
@@ -514,6 +566,31 @@ def test_cliff_cause_hint_rwin_shrink():
     assert all(c.severity == "warn" for c in rwin_cliffs)
 
 
+def test_cliff_cause_prefers_loss_over_cooccurring_window_shrink():
+    """M5: when a cliff's neighborhood holds BOTH a retransmit and a (severe)
+    window shrink, the cause must not flip on anomaly timestamp order. A
+    retransmit is the direct congestion-response cause; prefer 'post-loss' over
+    a co-occurring 'rwin-shrink' rather than breaking the severity-rank tie by
+    whichever anomaly happens to be earlier."""
+    t_cliff_center = 1.0 + 10 * 0.050 + 0.300 + 0.0
+    # Severe window shrink EARLIER than the retransmit — under max()-by-severity
+    # the earlier of two 'severe' anomalies wins the tie (-> wrong rwin-shrink).
+    shrink = Anomaly(
+        time=t_cliff_center + 0.010,
+        kind="win_shrink_large",
+        one_liner="window shrunk hard",
+        seq_lo=1000,
+        seq_hi=1000,
+    )
+    rto = Anomaly(
+        time=t_cliff_center + 0.060, kind="rto", one_liner="rto retransmit", seq_lo=0, seq_hi=100
+    )
+    tsg = _build_cliff_tsg(rate_before_Bps=10240, rate_after_Bps=512, anomalies=[shrink, rto])
+    result = synthesize_throughput(_pair(fwd=tsg))
+    assert result.fwd.cliffs
+    assert all(c.cause_hint == "post-loss" for c in result.fwd.cliffs)
+
+
 def test_summary_excludes_idle_windows_from_central_tendency():
     from tcptrace_ng.throughput import RateSample, _make_summary
 
@@ -522,7 +599,9 @@ def test_summary_excludes_idle_windows_from_central_tendency():
 
     # Two active windows at 1000 Bps bracketed by idle (zero-wire) padding.
     samples = [s(0.0, 0.0, 0.0), s(0.1, 1000.0, 1100.0), s(0.2, 1000.0, 1100.0), s(0.3, 0.0, 0.0)]
-    summ = _make_summary(samples, [], [], total_payload_bytes=200, total_wire_bytes=220)
+    summ = _make_summary(
+        samples, [], [], total_payload_bytes=200, total_wire_bytes=220, total_retx_bytes=0
+    )
     # Idle windows excluded -> mean reflects the active rate, not half of it.
     assert summ.mean_goodput_Bps == 1000.0
     assert summ.p50_goodput_Bps == 1000.0
@@ -893,6 +972,28 @@ def test_ceiling_floors_subms_rtt_at_1ms():
 # ---------------------------------------------------------------------------
 # App-limited skips for stalls and cliffs
 # ---------------------------------------------------------------------------
+
+
+def test_bdp_ceiling_uses_base_rtt_not_inflated_max():
+    """L1: the BDP ceiling (rwin/RTT) uses the connection's base (min) RTT, so an
+    inflated RTT (bufferbloat / queue growth) doesn't shrink the ceiling and
+    inflate BDP-utilization — which would misread queue growth as the receive
+    window limiting throughput."""
+    rwin = 100_000
+    segs = [
+        _seg(1.0, 0, 1000, paired_ack_time=1.01, paired_rtt_ms=10.0, in_flight_after=1000),
+        # Later segment sees a 10x-inflated RTT (queue growth).
+        _seg(1.05, 1000, 2000, paired_ack_time=1.06, paired_rtt_ms=100.0, in_flight_after=1000),
+    ]
+    # ACKs co-located with each segment so the inflated-RTT segment shares its
+    # window with an rwin (where the bug would shrink the ceiling).
+    acks = [_ack(1.0, 1000, rwin=rwin), _ack(1.05, 2000, rwin=rwin)]
+    result = synthesize_throughput(_pair(fwd=_tsg(segs, acks)))
+    ceilings = [s.max_Bps for s in result.fwd.samples if s.max_Bps is not None]
+    assert ceilings
+    # Every ceiling uses base RTT 10 ms (rwin/0.010); none collapses to the
+    # inflated 100 ms window (rwin/0.100 = 10x lower).
+    assert min(ceilings) == pytest.approx(rwin / 0.010)
 
 
 def test_stall_skipped_when_in_flight_zero():

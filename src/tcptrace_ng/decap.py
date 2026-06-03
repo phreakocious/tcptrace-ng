@@ -24,6 +24,8 @@ from pathlib import Path
 
 import dpkt
 
+from .pcap_io import open_reader
+
 # Schema version: bump when decap output semantics change so caches invalidate.
 DECAP_VERSION = "1"
 
@@ -56,7 +58,7 @@ def detect_encaps(pcap_path: Path, max_frames: int = DETECT_FRAMES) -> set[str]:
     found: set[str] = set()
     try:
         with pcap_path.open("rb") as f:
-            reader = dpkt.pcap.Reader(f)
+            reader = open_reader(f)
             if reader.datalink() != DLT_EN10MB:
                 return found
             for i, (_ts, buf) in enumerate(reader):
@@ -80,7 +82,7 @@ def decap_pcap(in_path: Path, out_path: Path) -> DecapResult:
     result = DecapResult()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with in_path.open("rb") as fin, out_path.open("wb") as fout:
-        reader = dpkt.pcap.Reader(fin)
+        reader = open_reader(fin)
         if reader.datalink() != DLT_EN10MB:
             # Just copy through; nothing to do for non-Ethernet linktypes.
             writer = dpkt.pcap.Writer(fout, linktype=reader.datalink())

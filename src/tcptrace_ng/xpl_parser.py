@@ -50,11 +50,11 @@ class DLine:
 
 @dataclass(frozen=True)
 class Box:
+    # tcptrace's `box` is a 2-coord point glyph (time, seq) — it marks the FIN
+    # on the TSG (plotter.c:491). NOT a rectangle; SACK blocks are purple lines.
     color: Color
-    x1: float
-    y1: float
-    x2: float
-    y2: float
+    x: float
+    y: float
 
 
 @dataclass(frozen=True)
@@ -136,8 +136,8 @@ _COLORS = {
     "black",
 }
 
-_LINE_LIKE: dict[str, type] = {"line": Line, "dline": DLine, "box": Box, "dbox": DBox}
-_POINT_LIKE: dict[str, type] = {"dot": Dot, "diamond": Diamond}
+_LINE_LIKE: dict[str, type] = {"line": Line, "dline": DLine, "dbox": DBox}
+_POINT_LIKE: dict[str, type] = {"dot": Dot, "diamond": Diamond, "box": Box}
 
 _ARROW_DIRECTIONS: dict[str, Direction] = {
     "uarrow": "up",

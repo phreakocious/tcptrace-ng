@@ -243,7 +243,10 @@ line 1538187584.832115 3493594312 1538187584.832115 3493594721
     assert acks[0].dup_count == 3
 
 
-def test_sack_blocks_attached_to_ack_at_box_right_edge():
+def test_sack_blocks_parsed_from_purple_lines():
+    # tcptrace draws each SACK block as a PURPLE vertical line from sack_left to
+    # sack_right (+ hticks), at the report time — NOT a box (the 2-coord FIN
+    # marker), and purple, not yellow (trace.c:127,2398-2412).
     xpl_text = """\
 timeval double
 title
@@ -258,15 +261,37 @@ line 200.0 1000 200.0 1200
 yellow
 line 100.0 5000 200.0 5000
 line 200.0 5000 200.0 6000
-box 150.0 2000 200.0 2500 yellow
-box 150.0 3000 200.0 3500 yellow
+purple
+line 200.0 2000 200.0 2500
+line 200.0 3000 200.0 3500
+htick 200.0 2000
+htick 200.0 2500
 """
     xpl = parse_xpl(xpl_text)
     pair = synthesize(xpl, None, "")
     acks = pair.fwd.acks
     assert len(acks) == 1
-    # Both SACK blocks attach to the ack at t=200 because that's the box right edge.
+    # Both SACK blocks attach to the ack at t=200 (the purple lines' time).
     assert sorted(acks[0].sack_blocks) == [(2000, 2500), (3000, 3500)]
+
+
+def test_syn_ack_promotion_respects_client_is_a():
+    """L4: the SYN/ACK is the responder's (server's) SYN. With client_is_a=False
+    (b is the client — e.g. a server-first / mid-stream capture) the server is a,
+    so a2b's SYN is the SYN/ACK and b2a's is the bare client SYN — the reverse of
+    the hardcoded 'b2a == SYN/ACK' assumption."""
+    from tcptrace_ng.tcp_inspect import _extract_flag_events
+
+    xpl = parse_xpl(
+        "timeval double\ntitle\n1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)\n"
+        "xlabel\ntime\nylabel\nsequence number\norange\natext 1.0 1000\nSYN\n"
+    )
+    # a is the server (client_is_a=False) -> a2b's SYN is the SYN/ACK.
+    assert [e.kind for e in _extract_flag_events(xpl, "a2b", client_is_a=False)] == ["syn_ack"]
+    # b2a carries the client's bare SYN.
+    assert [e.kind for e in _extract_flag_events(xpl, "b2a", client_is_a=False)] == ["syn"]
+    # Unknown client side falls back to the common assumption (a initiates).
+    assert [e.kind for e in _extract_flag_events(xpl, "b2a", client_is_a=None)] == ["syn_ack"]
 
 
 def test_in_flight_series_tracks_highest_sent_minus_highest_acked():
@@ -488,6 +513,28 @@ line 1.0 1000 1.0 1100
     assert "zero_win" in kinds
 
 
+def test_no_zero_win_when_rwin_unknown():
+    """L5: a green ACK step with no co-timed yellow rwin line means the window is
+    UNKNOWN, not zero. Defaulting rwin to 0 conflated the two and fired a false
+    severe zero_win (and could fire a false win_shrink)."""
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+green
+line 0.0 1000 1.0 1000
+line 1.0 1000 1.0 1100
+"""
+    pair = synthesize(parse_xpl(xpl_text), None, "")
+    assert pair.fwd.acks
+    assert pair.fwd.acks[0].rwin_known is False  # no co-timed yellow → unknown
+    assert "zero_win" not in [a.kind for a in pair.fwd.anomalies]
+
+
 def test_anomaly_ooo_when_seg_seq_below_max_seen():
     xpl_text = """\
 timeval double
@@ -524,9 +571,10 @@ line 1.0 1000 1.0 1100
 yellow
 line 0.0 5000 1.0 5000
 line 1.0 5000 1.0 5100
-box 0.5 2000 1.0 2500 yellow
+purple
+line 1.0 2000 1.0 2500
 """
-    # ACK is at 1100, SACK box covers 2000..2500 → gap below the SACK
+    # ACK is at 1100, SACK block (purple line) covers 2000..2500 → gap below it
     xpl = parse_xpl(xpl_text)
     pair = synthesize(xpl, None, "")
     kinds = [a.kind for a in pair.fwd.anomalies]
@@ -635,6 +683,12 @@ R FIN
     # the same time is suppressed — no double-labeling.
     assert "rto" not in kinds
     assert "spurious" not in kinds
+    # M1: the phantom RTO must not survive in the stats panel either. window_stats
+    # counts Segment.rtx, so suppression has to clear it — otherwise the chart
+    # shows fin_retx while the stats grid shows a bad-colored "1 RTO".
+    ws = pair.fwd.window_stats(None, None)
+    assert ws.n_rto == 0
+    assert ws.n_retx == 0
 
 
 def test_bad_csum_times_become_anomalies_anchored_to_cumack():
@@ -831,55 +885,94 @@ uarrow 3.0 1100
     assert len(pair.fwd.pure_ack_times) == 2
 
 
-def test_partial_ack_when_cumack_below_max_sent():
-    # b sends a coalesced segment of 4000 bytes (seq 1000..5000), then a's
-    # cumacks arrive in 1000-byte advances. Each early ack acknowledges only
-    # part of what's been sent → partial-ACK.
-    fwd_text = """\
-timeval double
-title
-1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
-xlabel
-time
-ylabel
-sequence number
-white
-line 1.0 1000 1.0 5000
-green
-line 0.0 1000 2.0 1000
-line 2.0 1000 2.0 2000
-line 2.0 2000 3.0 2000
-line 3.0 2000 3.0 3000
-line 3.0 3000 4.0 3000
-line 4.0 3000 4.0 5000
-yellow
-line 0.0 9000 4.0 9000
-"""
-    bwd_text = """\
-timeval double
-title
-2.2.2.2:2 ==> 1.1.1.1:1 (time sequence graph)
-xlabel
-time
-ylabel
-sequence number
-white
-darrow 2.0 5000
-uarrow 2.0 5000
-darrow 3.0 5000
-uarrow 3.0 5000
-darrow 4.0 5000
-uarrow 4.0 5000
-green
-line 0.0 5000 4.0 5000
-yellow
-line 0.0 8000 4.0 8000
-"""
-    pair = synthesize(parse_xpl(fwd_text), parse_xpl(bwd_text), "")
-    partials = [a for a in pair.fwd.anomalies if a.kind == "partial_ack"]
-    # Acks at t=2 (cumack=2000) and t=3 (cumack=3000) are partial; at t=4
-    # cumack reaches 5000 = max sent, so not partial.
-    assert len(partials) == 2
+def test_no_partial_ack_on_clean_pipelined_transfer():
+    """H3: cumack trailing max_sent is the NORMAL condition of any pipelined
+    transfer (the sender stays ahead of the ACKs). Without a loss-recovery
+    context — an outstanding retransmit or an open SACK gap — an advancing
+    cumulative ACK is not a partial ACK; Wireshark's tcp.analysis.partial_ack
+    only fires during recovery. A clean lossless transfer must yield zero."""
+    from tcptrace_ng.tcp_inspect import _classify_pure_acks
+
+    opp = TsgModel(
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=1,
+                seq_end=1001,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+            Segment(
+                time=1.0,
+                seq_start=1001,
+                seq_end=2001,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+            Segment(
+                time=1.0,
+                seq_start=2001,
+                seq_end=3001,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+        ],
+        acks=[
+            Ack(time=1.1, ack_seq=1001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+            Ack(time=1.2, ack_seq=2001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+            Ack(time=1.3, ack_seq=3001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        ],
+        non_advancing_ack_times=[],
+    )
+    # Pure ACKs that advance cumack but trail max_sent — normal pipelining.
+    anoms = _classify_pure_acks([1.1, 1.2], opp)
+    assert [a for a in anoms if a.kind == "partial_ack"] == []
+
+
+def test_partial_ack_fires_during_loss_recovery():
+    """The genuine case Wireshark flags: an advancing cumulative ACK that
+    leaves an outstanding *retransmitted* segment only partly acked is a real
+    partial ACK and must still be surfaced."""
+    from tcptrace_ng.tcp_inspect import _classify_pure_acks
+
+    opp = TsgModel(
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=1,
+                seq_end=1001,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+            # A lost 2000-byte segment, retransmitted (fast) at t=1.5.
+            Segment(
+                time=1.5,
+                seq_start=1001,
+                seq_end=3001,
+                rtx="fast",
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+        ],
+        acks=[
+            Ack(time=1.1, ack_seq=1001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+            # Advances into the retransmit but leaves it short of seq_end (3001).
+            Ack(time=1.6, ack_seq=2001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        ],
+        non_advancing_ack_times=[],
+    )
+    partials = [a for a in _classify_pure_acks([1.6], opp) if a.kind == "partial_ack"]
+    assert len(partials) == 1
+    assert partials[0].seq_lo == 2001
 
 
 def test_coalesced_segment_flagged_when_size_exceeds_mss():
@@ -1068,14 +1161,26 @@ def test_dup_ack_escalates_when_cumack_matches_fast_retx_seq():
     assert "dup_ack" in kinds  # unmatched cumack=2000 stays
 
 
-def test_handshake_ack_emitted_after_bwd_syn_ack():
-    """The 3rd packet of the handshake is fwd's first ACK after bwd's SYN/ACK."""
+def test_handshake_ack_is_bare_pure_ack_not_first_data_ack():
+    """H2: the 3rd handshake packet is fwd's bare ACK of the responder's ISN+1
+    — a zero-payload packet that does NOT advance fwd's cumack staircase, so it
+    is absent from fwd.acks. The first cumack-advancing ACK there is the first
+    *data* ACK, ~1 RTT + server think-time later; reporting it fabricates a
+    large handshake-completion delay. The completer comes from the pure-ACK
+    stream (the first zero-payload packet fwd sent after the SYN/ACK)."""
     from tcptrace_ng.tcp_inspect import _emit_handshake_ack
 
     fwd = TsgModel(
+        # First cumack-advancing ACK is the first DATA ACK, long after the
+        # handshake completes — must NOT be chosen as the completer.
         acks=[
             Ack(time=2.0, ack_seq=5001, rwin=1024, rwin_scaled=None, sack_blocks=(), dup_count=0),
-            Ack(time=3.0, ack_seq=6001, rwin=1024, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        ],
+        # Bare 3rd-handshake ACK: a zero-payload packet just after the SYN/ACK.
+        pure_ack_times=[1.51],
+        # Forward SYN marker fixes the a-side initial sequence for the glyph.
+        anomalies=[
+            Anomaly(time=1.0, kind="syn", one_liner="syn", seq_lo=1000, seq_hi=1000),
         ],
     )
     bwd = TsgModel(
@@ -1086,12 +1191,13 @@ def test_handshake_ack_emitted_after_bwd_syn_ack():
     _emit_handshake_ack(fwd, bwd)
     hs = [a for a in fwd.anomalies if a.kind == "handshake_ack"]
     assert len(hs) == 1
-    assert hs[0].time == 2.0
-    assert hs[0].seq_lo == 5001
-    # Tooltip carries cumack and the delta from SYN/ACK so the cyan A glyph
-    # owns the full handshake-leg context without a backing segment.
-    assert "cumack 5,001" in hs[0].one_liner
-    assert "500.0 ms" in hs[0].one_liner  # 2.0 - 1.5 = 0.5s = 500 ms
+    # The completer is the pure ACK at 1.51 (+10 ms), not the data ACK at 2.0.
+    assert hs[0].time == 1.51
+    assert "10.0 ms after SYN/ACK" in hs[0].one_liner
+    # Positioned at fwd's handshake sequence (the SYN label), not a data cumack.
+    assert hs[0].seq_lo == 1000
+    # Must not report the misleading first-data-ACK cumack (5001).
+    assert "5,001" not in hs[0].one_liner
 
 
 # ---------------------------------------------------------------------------

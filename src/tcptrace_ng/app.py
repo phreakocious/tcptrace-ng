@@ -156,11 +156,12 @@ class _State:
         # the analyses lifecycle (NOT figure_cache): display-only toggles don't
         # invalidate findings.
         self.findings: dict[int, list[Finding]] = {}
-        # Built plotly figure dicts keyed by (conn_n, metric). Populated lazily
-        # when a tab is activated; survives tab switches and re-clicks so
-        # already-built figures don't re-parse the xpl or rebuild the dict.
-        # Cleared when the pcap or flag set changes (i.e. cache version changes).
-        self.figure_cache: dict[tuple[int, str], dict | None] = {}
+        # Built plotly figure dicts keyed by (conn_n, metric, show_info) — see
+        # _figure_cache_key — plus model pairs under (conn_n, metric, "model").
+        # Populated lazily when a tab is activated; survives tab switches and
+        # re-clicks so already-built figures don't re-parse the xpl or rebuild
+        # the dict. Cleared when the pcap or flag set changes (cache version).
+        self.figure_cache: dict[tuple, object] = {}
         self.timeout: float = 60.0
         self.debug: bool = False
         # tcptrace command-line flag toggles. All default-off; we treat
@@ -318,6 +319,38 @@ def _issue_summary(findings: list[Finding]) -> tuple[int, Class] | None:
         return None
     worst = Class.BAD if any(f.severity == "bad" for f in issues) else Class.LOOK
     return (len(issues), worst)
+
+
+def _verdict_dot_class(findings: list[Finding] | None) -> Class | None:
+    """Verdict Class for the per-connection dot, driven by diagnose() findings.
+
+    Returns None when findings aren't computed yet (connection not opened) — the
+    caller renders a neutral 'pending' dot. We never fall back to the legacy
+    line-color classifier (`classify`/`ConnStats.verdict`): it flags BAD on
+    benign captures (a bare `rexmt` line, valid wscale; see L10) and contradicts
+    the findings panel. Mirrors the ⚠N badge's worst-severity logic so the dot
+    and badge always agree.
+    """
+    if findings is None:
+        return None  # pending: not yet analyzed
+    summary = _issue_summary(findings)
+    if summary is not None:
+        return summary[1]  # BAD or LOOK — worst of the interesting+bad issues
+    if any(f.severity == "good" for f in findings):
+        return Class.GOOD
+    return Class.NORMAL  # computed, nothing notable
+
+
+def _figure_cache_key(conn_n: int, metric: str, show_info: bool) -> tuple[int, str, bool]:
+    """Cache key for a built plotly figure.
+
+    Includes `show_info`: the info-marker toggle changes the figure, so the
+    markers-on and markers-off variants must cache separately. Without it,
+    switching connections re-shows a figure built for the other toggle state
+    while the switch reflects the new global value. The bool third element never
+    collides with the `(conn, metric, "model")` key used for cached model pairs.
+    """
+    return (conn_n, metric, show_info)
 
 
 # _issue_summary only ever returns BAD or LOOK (issues are interesting+bad).
@@ -666,15 +699,19 @@ def _format_count(v: int | None) -> str:
 
 
 def _format_throughput_Bps(v: float | None) -> str:
+    # SI (1000) prefixes — the convention for network rates, and what the chart
+    # renders (d3 ".3s" axis) and the bits-mode formatter use. Binary (1024) here
+    # made the same flow read "1.4 MB/s" in the grid vs "1.5 MB/s" on the chart
+    # (L8). Byte *counts* stay binary (sizes are conventionally IEC).
     if v is None:
         return "—"
-    if v < 1024:
+    if v < 1000:
         return f"{v:.0f} B/s"
-    if v < 1024 * 1024:
-        return f"{v / 1024:.1f} KB/s"
-    if v < 1024 * 1024 * 1024:
-        return f"{v / (1024 * 1024):.1f} MB/s"
-    return f"{v / (1024 * 1024 * 1024):.2f} GB/s"
+    if v < 1000 * 1000:
+        return f"{v / 1000:.1f} KB/s"
+    if v < 1000 * 1000 * 1000:
+        return f"{v / (1000 * 1000):.1f} MB/s"
+    return f"{v / (1000 * 1000 * 1000):.2f} GB/s"
 
 
 def _format_rate_bps(v_Bps: float | None) -> str:
@@ -1281,7 +1318,9 @@ def build_page() -> None:
                                 new_fig = to_tsg_figure(
                                     model_pair, show_info=state.show_info, seq_mode=state.seq_mode
                                 )
-                                state.figure_cache[(conn_n, metric)] = new_fig
+                                state.figure_cache[
+                                    _figure_cache_key(conn_n, metric, state.show_info)
+                                ] = new_fig
                                 plotly_el.update_figure(new_fig)
 
                             info_switch.on_value_change(_on_info_toggle)
@@ -1315,7 +1354,9 @@ def build_page() -> None:
                                 new_fig = to_throughput_figure(
                                     tput_pair, show_info=state.show_info, rate_unit=state.rate_unit
                                 )
-                                state.figure_cache[(conn_n, metric)] = new_fig
+                                state.figure_cache[
+                                    _figure_cache_key(conn_n, metric, state.show_info)
+                                ] = new_fig
                                 plotly_el.update_figure(new_fig)
 
                             tput_info_switch.on_value_change(_on_tput_info_toggle)
@@ -1327,7 +1368,7 @@ def build_page() -> None:
                 g = group_by_metric.get(metric)
                 if g is None:
                     return
-                cache_key = (conn_n, metric)
+                cache_key = _figure_cache_key(conn_n, metric, state.show_info)
                 if cache_key in state.figure_cache:
                     if state.selected_conn != conn_n:
                         return
@@ -1469,7 +1510,8 @@ def build_page() -> None:
                     item = ui.item(on_click=lambda r=row: _on_conn_click(r.n)).classes(cls)
                     with item, ui.item_section():
                         if isinstance(row, ConnStats):
-                            dot_cls = _VERDICT_CSS[row.verdict]
+                            _v = _verdict_dot_class(state.findings.get(row.n))
+                            dot_cls = "tcptrace-dot-pending" if _v is None else _VERDICT_CSS[_v]
                             badge_str = " ".join(_badges(row))
                             bytes_str = _format_size(row.total_bytes)
                             dur_str = _format_duration(row.duration_s)

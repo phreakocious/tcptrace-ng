@@ -107,6 +107,8 @@ body, .nicegui-content, .q-page, .q-layout {
 .tcptrace-dot-look   { background: #ffff00; }
 .tcptrace-dot-bad    { background: #ff5555; }
 .tcptrace-dot-normal { background: #555; }
+/* findings not computed yet (connection not opened): hollow neutral dot */
+.tcptrace-dot-pending { background: transparent; box-shadow: inset 0 0 0 1.5px #555; }
 
 /* ---- diagnosis findings ---- */
 .tcptrace-findings { display: flex; flex-direction: column; gap: 7px; margin: 8px 0 4px; }

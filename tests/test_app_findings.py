@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import tcptrace_ng.app as app_mod
-from tcptrace_ng.app import _findings_panel_html, _issue_summary, _warn_badge_html
+from tcptrace_ng.app import (
+    _figure_cache_key,
+    _findings_panel_html,
+    _issue_summary,
+    _verdict_dot_class,
+    _warn_badge_html,
+)
 from tcptrace_ng.classifier import Class
 from tcptrace_ng.diagnose import Finding
 from tcptrace_ng.runner import AnalyzeResult, ConnRow
@@ -12,6 +18,50 @@ from tcptrace_ng.stats_parser import ConnStats
 
 def _f(severity, code="x", scope="conn", headline="h", detail="d"):
     return Finding(code=code, severity=severity, scope=scope, headline=headline, detail=detail)
+
+
+def test_throughput_bytes_rate_uses_si_matching_chart():
+    """L8: byte-mode throughput rates use SI (1000) prefixes — matching the
+    chart's d3 '.3s' axis and the bits-mode formatter — not binary (1024), which
+    made the same flow read '1.5 MB/s' on the chart but '1.4 MB/s' in the grid."""
+    from tcptrace_ng.app import _format_throughput_Bps
+
+    assert _format_throughput_Bps(1_500_000) == "1.5 MB/s"  # SI; binary would be 1.4
+    assert _format_throughput_Bps(1_500_000_000) == "1.50 GB/s"  # SI; binary would be 1.40
+
+
+def test_figure_cache_key_is_show_info_sensitive():
+    """M8: the figure cache key must include show_info so the markers-on and
+    markers-off figures for the same (conn, metric) cache separately. Otherwise
+    switching connections re-shows a figure built for the other toggle state
+    while the info switch reflects the new one."""
+    assert _figure_cache_key(1, "tsg", True) != _figure_cache_key(1, "tsg", False)
+    # The 3rd element is a bool, so it never collides with the (conn, metric,
+    # "model") key used for cached model pairs.
+    assert _figure_cache_key(1, "tsg", False) != (1, "tsg", "model")
+
+
+def test_verdict_dot_class_pending_when_not_computed():
+    """H5: a connection whose findings aren't computed yet (lazy, on open) gets
+    a pending dot (None) — never the legacy line-color classifier, which flags
+    BAD on benign captures and contradicts the findings panel."""
+    assert _verdict_dot_class(None) is None
+
+
+def test_verdict_dot_class_clean_when_computed_no_findings():
+    assert _verdict_dot_class([]) == Class.NORMAL
+
+
+def test_verdict_dot_class_bad_from_findings():
+    assert _verdict_dot_class([_f("bad"), _f("interesting")]) == Class.BAD
+
+
+def test_verdict_dot_class_look_when_only_interesting():
+    assert _verdict_dot_class([_f("interesting")]) == Class.LOOK
+
+
+def test_verdict_dot_class_good_when_only_good_finding():
+    assert _verdict_dot_class([_f("good")]) == Class.GOOD
 
 
 def test_issue_summary_none_when_no_issues():

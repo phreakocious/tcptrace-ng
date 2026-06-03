@@ -226,6 +226,28 @@ def test_loss_storm_caps_severity_on_oversized_segment_without_anomaly():
     assert out[0].evidence["offload_capped"] is True
 
 
+def test_loss_storm_not_capped_on_jumbo_path_with_known_mss():
+    """M2: on a jumbo path (MSS ~8960) every normal segment exceeds 1500, so the
+    hardcoded MSS-free backstop wrongly reports the direction coalesced — capping
+    a real loss storm to 'interesting' and appending a fabricated offload note.
+    With a known MSS the precise `coalesced` anomaly (absent here) is the only
+    valid signal; the 1500 backstop must not run."""
+    from tcptrace_ng.diagnose import _loss_storm
+
+    segs = []
+    seq = 0
+    for i in range(40):
+        rtx = "rto" if i < 12 else None  # 30% loss -> 'bad' unless wrongly capped
+        segs.append(_data_seg(float(i), seq, seq + 8960, rtx=rtx))  # jumbo, > 1500, <= MSS
+        seq += 8960
+    fwd = TsgModel(direction="a2b", segments=segs, acks=[], mss=8960)
+    out = _loss_storm(TsgModelPair(fwd=fwd))
+    assert out and out[0].code == "loss_storm"
+    assert out[0].severity == "bad"  # NOT capped to 'interesting'
+    assert out[0].evidence["offload_capped"] is False
+    assert "offload" not in out[0].headline.lower()
+
+
 def test_loss_storm_excludes_spurious_retx():
     # Spurious retransmits (data that actually arrived, just re-sent) are NOT
     # loss — tcptrace flags them on reordered/offloaded captures. Only rto/fast

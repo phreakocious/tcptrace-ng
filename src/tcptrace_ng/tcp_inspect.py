@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import bisect
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from .stats_parser import ConnStats, parse_stats
-from .xpl_parser import Arrow, Box, Line, Text, XplPlot
+from .xpl_parser import Arrow, Line, Text, XplPlot
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,11 @@ class Ack:
     rwin_scaled: int | None
     sack_blocks: tuple[tuple[int, int], ...]
     dup_count: int
+    # Whether the advertised window is known — i.e. a yellow rwin line was
+    # co-timed with this ACK. When False, `rwin` is a placeholder (0), NOT a
+    # real zero window; rwin-derived anomalies (zero_win / win_shrink) must skip
+    # it rather than fire a false severe.
+    rwin_known: bool = True
 
 
 AnomalyKind = Literal[
@@ -135,6 +140,10 @@ class TsgModel:
     # data packet's ACK.
     non_advancing_ack_times: list[float] = field(default_factory=list)
     window_scale: int | None = None
+    # The MSS that limits this direction's sender (the peer's advertised MSS),
+    # or None when tcptrace -l gave no value. Used by diagnose's coalesced gate
+    # to know whether the precise `coalesced` anomaly was possible.
+    mss: int | None = None
     summary: ConnStats | None = None
 
     def window_stats(self, t0: float | None, t1: float | None) -> WindowStats:
@@ -307,8 +316,8 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     bare integer (e.g. "3") appears at the same (x, y) as the next ack step's
     *origin*, it's the dup count for that ack.
 
-    SACK blocks come from yellow Box commands. The block's right edge (x2) is
-    the time of the SACK report — attach to the ack at that time.
+    SACK blocks come from purple vertical lines (sack_left..sack_right at the
+    report time) — attach to the ack at that time.
     """
     green_steps: list[tuple[float, int]] = []  # (time, new_ack_seq)
     green_zero: list[tuple[float, int]] = []  # zero-len verticals — kept for dup-ACK matching
@@ -325,14 +334,17 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                     green_zero.append((cmd.x1, int(cmd.y1)))
             elif cmd.color == "yellow":
                 yellow_at_time[cmd.x1] = int(max(cmd.y1, cmd.y2))
+            elif cmd.color == "purple":
+                # Each SACK block is a purple vertical line spanning
+                # sack_left..sack_right at the report time (tcptrace draws it with
+                # plotter_line + hticks, NOT a box — the box glyph is the 2-coord
+                # FIN marker — and in purple, not yellow; trace.c:127,2398-2412).
+                lo, hi = sorted((int(cmd.y1), int(cmd.y2)))
+                sack_by_time.setdefault(cmd.x1, []).append((lo, hi))
         elif isinstance(cmd, Text) and cmd.color == "green":
             label = cmd.label.strip()
             if label.isdigit():
                 dup_labels[(cmd.x, int(cmd.y))] = int(label)
-        elif isinstance(cmd, Box) and cmd.color == "yellow":
-            # SACK block: (y1, y2) is the acked seq range; x2 is the report time.
-            lo, hi = sorted((int(cmd.y1), int(cmd.y2)))
-            sack_by_time.setdefault(cmd.x2, []).append((lo, hi))
 
     # Promote zero-length green verticals to ACK events when they carry a dup label.
     seen: set[tuple[float, int]] = set(green_steps)
@@ -344,7 +356,8 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     acks: list[Ack] = []
     for t, ack_seq in green_steps:
         rwin_top = yellow_at_time.get(t)
-        rwin = rwin_top - ack_seq if rwin_top is not None else 0
+        rwin_known = rwin_top is not None
+        rwin = rwin_top - ack_seq if rwin_known else 0
         dup = dup_labels.get((t, ack_seq), 0)
         acks.append(
             Ack(
@@ -354,6 +367,7 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                 rwin_scaled=None,
                 sack_blocks=tuple(sorted(sack_by_time.get(t, []))),
                 dup_count=dup,
+                rwin_known=rwin_known,
             )
         )
     acks.sort(key=lambda a: a.time)
@@ -534,37 +548,46 @@ def _detect_anomalies(
     prev_rwin: int | None = None
     prev_ack: int | None = None
     for a in acks:
-        if a.rwin == 0:
-            out.append(
-                Anomaly(
-                    time=a.time,
-                    kind="zero_win",
-                    one_liner="receiver advertised zero window",
-                    seq_lo=a.ack_seq,
-                    seq_hi=a.ack_seq,
-                )
-            )
-        if prev_rwin is not None and prev_ack is not None:
-            delta_acked = max(0, a.ack_seq - prev_ack)
-            if a.rwin < prev_rwin - delta_acked:
-                # Position the annotation on the new rwin top (yellow line) at
-                # this time so the y-axis doesn't autorange down to 0 — there's
-                # no data there, just empty space.
-                rwin_top = a.ack_seq + a.rwin
-                shrink_bytes = prev_rwin - delta_acked - a.rwin
-                kind = (
-                    "win_shrink_large" if mss is not None and shrink_bytes >= mss else "win_shrink"
-                )
+        # rwin-derived anomalies only when the window is known (a yellow rwin
+        # line was co-timed). An unknown window carries a placeholder rwin=0 —
+        # treating that as a real zero/shrink fires a false severe. Unknown acks
+        # also don't update the shrink baseline.
+        if a.rwin_known:
+            if a.rwin == 0:
                 out.append(
                     Anomaly(
                         time=a.time,
-                        kind=kind,
-                        one_liner=f"window shrunk by {shrink_bytes:,} B",
-                        seq_lo=rwin_top,
-                        seq_hi=rwin_top,
+                        kind="zero_win",
+                        one_liner="receiver advertised zero window",
+                        seq_lo=a.ack_seq,
+                        seq_hi=a.ack_seq,
                     )
                 )
-        # SACK gap: any sack block above the current cumack is by definition a gap.
+            if prev_rwin is not None and prev_ack is not None:
+                delta_acked = max(0, a.ack_seq - prev_ack)
+                if a.rwin < prev_rwin - delta_acked:
+                    # Position the annotation on the new rwin top (yellow line) at
+                    # this time so the y-axis doesn't autorange down to 0 — there's
+                    # no data there, just empty space.
+                    rwin_top = a.ack_seq + a.rwin
+                    shrink_bytes = prev_rwin - delta_acked - a.rwin
+                    kind = (
+                        "win_shrink_large"
+                        if mss is not None and shrink_bytes >= mss
+                        else "win_shrink"
+                    )
+                    out.append(
+                        Anomaly(
+                            time=a.time,
+                            kind=kind,
+                            one_liner=f"window shrunk by {shrink_bytes:,} B",
+                            seq_lo=rwin_top,
+                            seq_hi=rwin_top,
+                        )
+                    )
+            prev_rwin = a.rwin
+            prev_ack = a.ack_seq
+        # SACK gap is seq-derived (independent of the rwin line) — applies to any ack.
         for lo, hi in a.sack_blocks:
             if lo > a.ack_seq:
                 out.append(
@@ -576,8 +599,6 @@ def _detect_anomalies(
                         seq_hi=hi,
                     )
                 )
-        prev_rwin = a.rwin
-        prev_ack = a.ack_seq
 
     # OOO: walk segments in time order, track highest seq_end seen.
     max_seen = 0
@@ -633,7 +654,9 @@ _FLAG_ONE_LINER = {
 }
 
 
-def _extract_flag_events(xpl: XplPlot, direction: str) -> list[Anomaly]:
+def _extract_flag_events(
+    xpl: XplPlot, direction: str, client_is_a: bool | None = None
+) -> list[Anomaly]:
     """Pull SYN/FIN/R FIN events out of `atext`/`btext`/… labels.
 
     tcptrace marks every SYN-bearing segment with an anchored text "SYN"
@@ -641,10 +664,13 @@ def _extract_flag_events(xpl: XplPlot, direction: str) -> list[Anomaly]:
     with "R FIN" (red color). The seq at the text label is the segment top
     (seq + 1 for SYN/FIN, since both consume one byte of sequence space).
 
-    The "SYN" label in tcptrace's xpl is direction-agnostic; we promote the
-    backward-direction SYN to `syn_ack` since it's the responder's SYN/ACK
-    half of the handshake.
+    The "SYN" label in tcptrace's xpl is direction-agnostic; the SYN/ACK is the
+    responder's (server's) SYN. The server's direction is b2a when the client is
+    a, a2b when the client is b — so we promote the SYN to `syn_ack` on the
+    server's direction, falling back to the common a-initiates assumption (b2a is
+    the SYN/ACK) when the client side is unknown.
     """
+    server_dir = "a2b" if client_is_a is False else "b2a"
     out: list[Anomaly] = []
     for cmd in xpl.commands:
         if not isinstance(cmd, Text):
@@ -652,7 +678,7 @@ def _extract_flag_events(xpl: XplPlot, direction: str) -> list[Anomaly]:
         kind = _FLAG_LABELS.get(cmd.label.strip())
         if kind is None:
             continue
-        if kind == "syn" and direction == "b2a":
+        if kind == "syn" and direction == server_dir:
             kind = "syn_ack"
         seq = int(cmd.y)
         out.append(
@@ -806,7 +832,16 @@ def _classify_pure_acks(pure_ack_times: list[float], opp: TsgModel) -> list[Anom
         cumack = ack_seqs[i]
         j = bisect.bisect_right(seg_times, t) - 1
         max_sent = running_max[j] if j >= 0 else 0
-        if cumack < max_sent:
+        # cumack trailing max_sent is the normal state of any pipelined transfer
+        # (the sender stays ahead of the ACKs), so it is NOT on its own a
+        # partial ACK. Wireshark's tcp.analysis.partial_ack fires only during
+        # loss recovery; gate on a recovery context — an outstanding retransmit
+        # (a rtx segment whose bytes aren't yet cumulatively acked) or an open
+        # SACK gap at the governing ACK.
+        in_recovery = bool(opp.acks[i].sack_blocks) or any(
+            s.rtx is not None and s.time <= t and s.seq_end > cumack for s in opp.segments
+        )
+        if cumack < max_sent and in_recovery:
             out.append(
                 Anomaly(
                     time=t,
@@ -858,6 +893,24 @@ def _suppress_overlapping_retx(
         a
         for a in anomalies
         if not (a.kind in ("rto", "fast", "spurious") and a.time in fin_retx_times)
+    ]
+
+
+def _clear_suppressed_retx(segments: list[Segment], fin_retx_times: set[float]) -> list[Segment]:
+    """Clear the generic retx flag on segments reclassified as fin_retx.
+
+    A FIN retransmit is surfaced as a `fin_retx` anomaly, not an rto/fast. If we
+    leave Segment.rtx set, window_stats (n_rto/n_retx) and throughput's
+    retx-overhead still count it as a generic retransmit — so the stats panel
+    shows a bad-colored "1 RTO" that the chart's fin_retx marker contradicts.
+    """
+    if not fin_retx_times:
+        return segments
+    return [
+        replace(s, rtx=None)
+        if s.rtx in ("rto", "fast", "spurious") and s.time in fin_retx_times
+        else s
+        for s in segments
     ]
 
 
@@ -966,9 +1019,12 @@ def _build_model(
     segs = _pair_rtt(segs, acks)
     segs = _classify_retx(segs, acks)
     anomalies = _detect_anomalies(segs, acks, mss)
-    flag_events = _extract_flag_events(xpl, direction)
+    flag_events = _extract_flag_events(
+        xpl, direction, client_is_a=summary.client_is_a if summary else None
+    )
     fin_retx_times = {a.time for a in flag_events if a.kind == "fin_retx"}
     anomalies = _suppress_overlapping_retx(anomalies, fin_retx_times)
+    segs = _clear_suppressed_retx(segs, fin_retx_times)
     anomalies = sorted(
         anomalies
         + flag_events
@@ -987,6 +1043,7 @@ def _build_model(
         pure_ack_times=_extract_pure_ack_times(xpl),
         non_advancing_ack_times=_extract_non_advancing_ack_times(xpl),
         window_scale=window_scale,
+        mss=mss,
         summary=summary,
     )
 
@@ -1110,33 +1167,37 @@ def _escalate_dup_acks(model: TsgModel) -> None:
 def _emit_handshake_ack(fwd: TsgModel, bwd: TsgModel) -> None:
     """Mark the 3rd packet of the 3-way handshake on the forward model.
 
-    The handshake completer is fwd's first cumack-advancing ACK after bwd's
-    SYN/ACK arrived — it acks the responder's ISN+1. Surface it as its own
-    kind so the UI can color it as a protocol marker rather than ordinary
-    chatter.
+    The completer is fwd's bare ACK of the responder's ISN+1 — a zero-payload
+    packet that does NOT advance fwd's cumack staircase, so it is absent from
+    `fwd.acks` (which holds only cumack-advancing green steps). The first of
+    those after the SYN/ACK is the first *data* ACK, ~1 RTT + server
+    think-time later; reporting it fabricates a large handshake-completion
+    delay. Take the completer from the pure-ACK stream instead: the first
+    zero-payload packet fwd sent after the SYN/ACK arrived. Surface it as its
+    own kind so the UI can color it as a protocol marker.
     """
     syn_ack_times = [a.time for a in bwd.anomalies if a.kind == "syn_ack"]
     if not syn_ack_times:
         return
     t_sa = syn_ack_times[0]
-    for ack in fwd.acks:
-        if ack.time <= t_sa:
-            continue
-        delta_ms = (ack.time - t_sa) * 1000.0
-        fwd.anomalies = sorted(
-            [
-                *fwd.anomalies,
-                Anomaly(
-                    time=ack.time,
-                    kind="handshake_ack",
-                    one_liner=(
-                        f"ACK (handshake completion) · cumack {ack.ack_seq:,}"
-                        f" · {delta_ms:.1f} ms after SYN/ACK"
-                    ),
-                    seq_lo=ack.ack_seq,
-                    seq_hi=ack.ack_seq,
-                ),
-            ],
-            key=lambda a: a.time,
-        )
+    completer = next((t for t in fwd.pure_ack_times if t > t_sa), None)
+    if completer is None:
         return
+    delta_ms = (completer - t_sa) * 1000.0
+    # Position the glyph at fwd's handshake sequence (where the bare ACK sits on
+    # the a-side TSG): prefer the forward SYN label's seq, else the ISN floor.
+    syn_seqs = [a.seq_lo for a in fwd.anomalies if a.kind == "syn" and a.seq_lo is not None]
+    seq = syn_seqs[0] if syn_seqs else min((s.seq_start for s in fwd.segments), default=0)
+    fwd.anomalies = sorted(
+        [
+            *fwd.anomalies,
+            Anomaly(
+                time=completer,
+                kind="handshake_ack",
+                one_liner=f"ACK (handshake completion) · {delta_ms:.1f} ms after SYN/ACK",
+                seq_lo=seq,
+                seq_hi=seq,
+            ),
+        ],
+        key=lambda a: a.time,
+    )

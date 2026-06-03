@@ -23,14 +23,19 @@ from pathlib import Path
 
 import dpkt
 
+from .pcap_io import open_reader
+
 OFFLOAD_VERSION = "1"
 
-# Standard Ethernet MTU is 1500 B; TCP MSS lives just under that. A TCP
-# payload over 1500 B can't have travelled an ordinary link without
-# offload — either the kernel hadn't sliced it yet on TX, or the NIC
-# re-coalesced on RX. Jumbo-frame deployments (9000 MTU) still trip this
-# on the offload path, which is still the finding we care about.
-_OFFLOAD_PAYLOAD_THRESHOLD = 1500
+# A TCP payload larger than the on-wire MTU can't have crossed an ordinary link
+# un-sliced — the kernel hadn't segmented it yet on TX (LSO/GSO/TSO) or the NIC
+# re-coalesced on RX (LRO/GRO). The path MTU isn't recorded in the pcap, so the
+# oversized threshold adapts to the capture's own typical frame size (see
+# _oversized_threshold): floored at the standard 1500 B Ethernet MTU and capped
+# at the largest jumbo frame. Without this a jumbo path (9000 MTU) would read as
+# all-offloaded — false-flagging every capture in DC/storage environments.
+_STANDARD_MTU_PAYLOAD = 1500
+_MAX_JUMBO_PAYLOAD = 9216
 _SCAN_FRAMES = 1000
 _DLT_EN10MB = 1
 
@@ -51,9 +56,10 @@ def detect_offload(pcap_path: Path, max_frames: int = _SCAN_FRAMES) -> OffloadRe
     high enough that a single oversized payload is signal, not noise.
     """
     report = OffloadReport()
+    payloads: list[int] = []
     try:
         with pcap_path.open("rb") as f:
-            reader = dpkt.pcap.Reader(f)
+            reader = open_reader(f)
             if reader.datalink() != _DLT_EN10MB:
                 return report
             for i, (_ts, buf) in enumerate(reader):
@@ -64,27 +70,50 @@ def detect_offload(pcap_path: Path, max_frames: int = _SCAN_FRAMES) -> OffloadRe
                 if payload_len is None:
                     continue
                 report.tcp_segments += 1
-                if payload_len > report.max_payload:
-                    report.max_payload = payload_len
-                if payload_len > _OFFLOAD_PAYLOAD_THRESHOLD:
-                    report.oversized_segments += 1
+                report.max_payload = max(report.max_payload, payload_len)
+                payloads.append(payload_len)
     except (dpkt.dpkt.NeedData, ValueError, OSError):
         # Truncated / unreadable pcap: return what we got so far.
         pass
 
+    threshold = _oversized_threshold(payloads)
+    report.oversized_segments = sum(1 for p in payloads if p > threshold)
     if report.oversized_segments > 0:
         report.warnings.append(
             f"NIC offload (LSO/GSO/TSO/LRO/GRO): "
             f"{report.oversized_segments} of {report.tcp_segments} TCP segments "
-            f"exceed {_OFFLOAD_PAYLOAD_THRESHOLD} B (max {report.max_payload} B). "
+            f"exceed {threshold} B (max {report.max_payload} B). "
             f"MSS in the per-connection summary, time-sequence staircases, and "
             f"retransmit detection are unreliable on this capture."
         )
     return report
 
 
+def _oversized_threshold(payloads: list[int]) -> int:
+    """On-wire-MTU estimate above which a TCP payload is NIC-coalesced.
+
+    The path MTU isn't in the pcap, so estimate the link's normal max frame from
+    the capture's own median data payload — floored at the standard 1500 B MTU
+    and capped at the largest jumbo frame (~9216 B). This stops every jumbo-frame
+    segment from reading as offload while still catching coalesced super-segments;
+    any payload above the jumbo ceiling can't have crossed a link un-sliced, so
+    it is offload regardless of the capture's size distribution.
+    """
+    data = sorted(p for p in payloads if p > 0)
+    median = data[len(data) // 2] if data else 0
+    return min(max(_STANDARD_MTU_PAYLOAD, median), _MAX_JUMBO_PAYLOAD)
+
+
 def _tcp_payload_len(buf: bytes) -> int | None:
-    """Return the TCP payload byte length, or None if `buf` is not TCP."""
+    """Return the on-wire TCP payload byte length, or None if `buf` is not TCP.
+
+    Derived from the IP total-length field, NOT len(tcp.data): dpkt clamps
+    tcp.data to the bytes actually captured, so on a snaplen-truncated capture
+    (`tcpdump -s`) an offloaded super-segment reads short and slips under the
+    threshold. We take the max of the on-wire length and the captured length,
+    so the TX-side TSO case — where the IP length field can be left 0 for the
+    NIC to fill while the full pre-slice payload is captured — is still caught.
+    """
     try:
         eth = dpkt.ethernet.Ethernet(buf)
     except (dpkt.dpkt.NeedData, dpkt.dpkt.UnpackError):
@@ -95,4 +124,9 @@ def _tcp_payload_len(buf: bytes) -> int | None:
     tcp = ip.data
     if not isinstance(tcp, dpkt.tcp.TCP):
         return None
-    return len(tcp.data)
+    tcp_hdr_len = tcp.off * 4
+    if isinstance(ip, dpkt.ip.IP):
+        on_wire = ip.len - ip.hl * 4 - tcp_hdr_len
+    else:  # IPv6: plen is everything after the 40 B fixed header.
+        on_wire = ip.plen - tcp_hdr_len
+    return max(on_wire, len(tcp.data))

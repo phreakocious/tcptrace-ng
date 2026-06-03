@@ -136,14 +136,16 @@ def test_text_legend_entries_use_label_as_name():
     assert non_legend, "expected non-legend traces to remain (with showlegend=False)"
 
 
-def test_boxes_become_filled_polygons():
-    plot = XplPlot(commands=[Box(color="blue", x1=0, y1=0, x2=2, y2=3)])
+def test_box_becomes_square_marker():
+    # tcptrace's box is a 2-coord FIN marker (not a rectangle); the generic
+    # renderer draws it as a square marker, like dot/diamond.
+    plot = XplPlot(commands=[Box(color="blue", x=1.0, y=3.0)])
     fig = to_plotly_figure(plot)
-    polys = [t for t in fig["data"] if t.get("fill") == "toself"]
-    assert len(polys) == 1
-    # Closed polygon: 5 points (closing back to start) then None
-    assert polys[0]["x"] == [0.0, 2.0, 2.0, 0.0, 0.0, None]
-    assert polys[0]["y"] == [0.0, 0.0, 3.0, 3.0, 0.0, None]
+    markers = [t for t in fig["data"] if t.get("mode") == "markers"]
+    assert len(markers) == 1
+    assert markers[0]["marker"]["symbol"] == "square"
+    assert markers[0]["x"] == [1.0]
+    assert markers[0]["y"] == [3.0]
 
 
 def test_ticks_become_markers_with_directional_symbol():
@@ -480,12 +482,15 @@ def test_data_segment_trace_has_numeric_customdata_and_hovertemplate():
     seg_traces = [t for t in fig["data"] if t.get("name") == "data"]
     assert len(seg_traces) == 1
     t = seg_traces[0]
-    # Customdata is per-point numeric arrays — no pre-formatted strings.
+    # Customdata is per-point: numeric for the fixed fields, prebuilt strings for
+    # the optional delta/RTT fragments (so a missing value renders blank, not
+    # "NaN"; plotly hovertemplates can't branch). See L2.
     assert "customdata" in t
     assert isinstance(t["customdata"], list)
     first = t["customdata"][0]
     assert isinstance(first, list)
-    assert all(isinstance(v, (int, float)) for v in first)
+    assert all(isinstance(first[i], (int, float)) for i in (0, 2, 3, 4))
+    assert isinstance(first[1], str) and isinstance(first[5], str)
     # Customdata must align 1:1 with x/y points so Plotly can resolve hovertemplate
     # placeholders. Each segment contributes 3 points (t, t, None separator).
     assert len(t["customdata"]) == len(t["x"])
@@ -501,6 +506,36 @@ def test_data_segment_trace_has_numeric_customdata_and_hovertemplate():
     assert t["y"][:3] == [3493560572, 3493560700, None]
     # Hovertemplate references customdata indices.
     assert "customdata" in t["hovertemplate"]
+
+
+def test_seg_hover_blank_not_nan_for_first_and_unpaired_segment():
+    """L2: the first segment has no previous (delta) and an unpaired segment has
+    no paired RTT — those hover fields must render blank, not '+NaN ms' /
+    'ACKed NaN ms later'. Prebuilt into customdata since plotly can't branch."""
+    from tcptrace_ng.plotly_adapter import _data_segment_trace
+
+    model = TsgModel(
+        src="a",
+        dst="b",
+        direction="a2b",
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=0,
+                seq_end=100,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=100,
+            )
+        ],
+    )
+    tr = _data_segment_trace(model, name="data", color="#ffffff")
+    assert tr["customdata"][0][1] == ""  # first segment: no "+N ms" delta
+    assert tr["customdata"][0][5] == ""  # unpaired: no "ACKed N ms later"
+    # The optional fragments are rendered raw, not float-formatted (NaN-prone).
+    assert "customdata[1]:" not in tr["hovertemplate"]
+    assert "customdata[5]:" not in tr["hovertemplate"]
 
 
 def test_tsg_figure_rel_seq_mode_subtracts_constant_baseline():
@@ -594,8 +629,50 @@ def test_ack_trace_has_step_geometry_and_dup_count_in_customdata():
     # hold + vertical step) = 9 total.
     assert len(a["customdata"]) == len(a["x"])
     assert len(a["customdata"]) == 9
-    # Second ack's rows carry dup_count=3 in the last index.
-    assert a["customdata"][-1][-1] == 3.0
+    # Second ack's rows carry the prebuilt dup-ACK hover fragment in the last
+    # index (plotly templates can't branch, so the "#3" is baked in here).
+    assert a["customdata"][-1][-1] == "<br>dup-ACK #3"
+
+
+def test_ack_hover_omits_dup_line_for_non_dup_acks():
+    """M7: a plain cumulative ACK must not hover 'dup-ACK #0'. plotly templates
+    can't branch, so the dup line is prebuilt into customdata — empty for a
+    non-dup ACK, '<br>dup-ACK #N' for a real one — and the template references it
+    raw (no hardcoded 'dup-ACK #' prefix)."""
+    from tcptrace_ng.plotly_adapter import _ack_trace
+
+    model = TsgModel(
+        src="a",
+        dst="b",
+        direction="a2b",
+        acks=[
+            Ack(time=1.0, ack_seq=1000, rwin=5000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+            Ack(time=2.0, ack_seq=1000, rwin=5000, rwin_scaled=None, sack_blocks=(), dup_count=3),
+        ],
+    )
+    tr = _ack_trace(model, name="ack")
+    # The template must not hardcode the "dup-ACK #" prefix (that renders "#0").
+    assert "dup-ACK #%{customdata" not in tr["hovertemplate"]
+    dup_fields = {row[3] for row in tr["customdata"]}
+    assert "" in dup_fields  # non-dup ACK -> no dup line
+    assert "<br>dup-ACK #3" in dup_fields  # real dup -> shown
+
+
+def test_rwin_line_uses_scaled_window_when_known():
+    """L7: the rwin line must plot the scaled window (what the hover shows), not
+    the raw a.rwin — otherwise the line and tooltip disagree by the window-scale
+    factor once rwin_scaled is wired in."""
+    from tcptrace_ng.plotly_adapter import _rwin_trace
+
+    model = TsgModel(
+        src="a",
+        dst="b",
+        direction="a2b",
+        acks=[Ack(time=1.0, ack_seq=1000, rwin=100, rwin_scaled=8000, sack_blocks=(), dup_count=0)],
+    )
+    tr = _rwin_trace(model, name="rwin")
+    assert 9000 in tr["y"]  # ack_seq 1000 + scaled rwin 8000
+    assert 1100 not in tr["y"]  # NOT ack_seq + raw rwin 100
 
 
 def test_rwin_trace_tooltip_includes_window_value():
@@ -968,6 +1045,78 @@ def test_in_flight_overlay_self_contained_without_acks():
     # No acks -> cumack floor is the first segment's seq_start (500).
     assert min(o["y"]) == 500
     assert max(o["y"]) == 600  # 500 + peak in-flight 100
+
+
+def test_in_flight_overlay_pre_ack_floor_is_isn_not_first_cumack():
+    """H1: before the first observed ACK nothing is acked yet, so the band's
+    floor is the ISN (earliest segment seq_start), not the first ACK's cumack —
+    which has already advanced past the initial burst. Using the first cumack
+    floats the band above the data, implying outstanding bytes in a sequence
+    range that was never transmitted."""
+    model = TsgModel(
+        src="1.1.1.1:1",
+        dst="2.2.2.2:2",
+        direction="a2b",
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=500,
+                seq_end=1500,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=1000,
+            ),
+        ],
+        acks=[
+            Ack(time=2.0, ack_seq=1000, rwin=5000, rwin_scaled=None, sack_blocks=(), dup_count=0),
+        ],
+        # First in-flight sample (t=1.0) is BEFORE the only ACK (t=2.0).
+        in_flight=[(1.0, 1000), (2.0, 500)],
+    )
+    fig = to_tsg_figure(TsgModelPair(fwd=model))
+    o = next(t for t in fig["data"] if t.get("name") == "in-flight")
+    # Pre-first-ACK floor is the ISN (500), not the first cumack (1000).
+    assert min(o["y"]) == 500
+
+
+def test_legend_slot_claimed_only_when_role_trace_emitted():
+    """M6: the forward direction marking a role 'seen' even when it draws no
+    trace for that role suppressed the backward direction's legend entry. The
+    green ACK staircase (drawn only in the panel that carries the cumacks) then
+    rendered with no toggleable legend label. Claim the slot only on emit."""
+    from tcptrace_ng.plotly_adapter import _build_direction_traces
+
+    legend_seen: set[str] = set()
+    # Forward panel: data segments but NO acks -> no ack trace emitted.
+    fwd = TsgModel(
+        src="a",
+        dst="b",
+        direction="a2b",
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=0,
+                seq_end=100,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            )
+        ],
+    )
+    fwd_tr = _build_direction_traces(fwd, xaxis_ref="x", yaxis_ref="y", legend_seen=legend_seen)
+    # Backward panel: carries the cumack staircase.
+    bwd = TsgModel(
+        src="b",
+        dst="a",
+        direction="b2a",
+        acks=[Ack(time=2.0, ack_seq=100, rwin=5000, rwin_scaled=None, sack_blocks=(), dup_count=0)],
+    )
+    bwd_tr = _build_direction_traces(bwd, xaxis_ref="x2", yaxis_ref="y2", legend_seen=legend_seen)
+    ack_traces = [t for t in fwd_tr + bwd_tr if t.get("legendgroup") == "ack"]
+    assert len(ack_traces) == 1  # only the backward panel drew an ACK staircase
+    assert ack_traces[0]["showlegend"] is True  # and it owns the legend entry
 
 
 def test_info_tier_annotations_hidden_by_default():

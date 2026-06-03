@@ -113,6 +113,15 @@ def _write_pcap(tmp_path: Path, frames: list[bytes], name: str = "in.pcap") -> P
     return out
 
 
+def _write_pcapng(tmp_path: Path, frames: list[bytes], name: str = "in.pcapng") -> Path:
+    out = tmp_path / name
+    with out.open("wb") as f:
+        writer = dpkt.pcapng.Writer(f, snaplen=65535, linktype=1)  # DLT_EN10MB
+        for i, buf in enumerate(frames):
+            writer.writepkt(buf, ts=1000.0 + i * 0.001)
+    return out
+
+
 def _read_pcap_frames(p: Path) -> list[bytes]:
     with p.open("rb") as f:
         return [buf for _ts, buf in dpkt.pcap.Reader(f)]
@@ -147,6 +156,26 @@ def test_detect_mixed(tmp_path):
         [_build_geneve_frame(), _build_vxlan_frame(), _inner_tcp_eth()],
     )
     assert detect_encaps(pcap) == {"geneve", "vxlan"}
+
+
+def test_detect_encaps_reads_pcapng(tmp_path):
+    """C1: detect_encaps must scan pcapng captures. It used dpkt.pcap.Reader,
+    which raises ValueError on the pcapng magic, so encap was never detected
+    and the decap pass never ran on the modern default format."""
+    pcap = _write_pcapng(tmp_path, [_build_vxlan_frame()])
+    assert detect_encaps(pcap) == {"vxlan"}
+
+
+def test_decap_reads_pcapng_input(tmp_path):
+    """decap_pcap's read side must accept pcapng (it writes classic pcap out,
+    which is what tcptrace consumes)."""
+    pcap = _write_pcapng(tmp_path, [_build_geneve_frame()])
+    out = tmp_path / "out.pcap"
+    res = decap_pcap(pcap, out)
+    assert res.encaps == {"geneve"}
+    eth = dpkt.ethernet.Ethernet(_read_pcap_frames(out)[0])
+    assert isinstance(eth.data, dpkt.ip.IP)
+    assert eth.data.data.dport == 80
 
 
 def test_detect_ignores_non_ethernet_linktype(tmp_path):

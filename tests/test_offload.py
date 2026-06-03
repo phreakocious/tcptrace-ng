@@ -65,6 +65,15 @@ def _write_pcap(tmp_path: Path, frames: list[bytes], name: str = "x.pcap") -> Pa
     return out
 
 
+def _write_pcapng(tmp_path: Path, frames: list[bytes], name: str = "x.pcapng") -> Path:
+    out = tmp_path / name
+    with out.open("wb") as f:
+        w = dpkt.pcapng.Writer(f, snaplen=65535, linktype=1)
+        for i, fr in enumerate(frames):
+            w.writepkt(fr, ts=1000.0 + i * 0.001)
+    return out
+
+
 def test_detect_offload_finds_no_offload_on_mtu_traffic(tmp_path):
     pcap = _write_pcap(tmp_path, [_tcp_frame(1400) for _ in range(5)])
     rep = detect_offload(pcap)
@@ -72,6 +81,17 @@ def test_detect_offload_finds_no_offload_on_mtu_traffic(tmp_path):
     assert rep.oversized_segments == 0
     assert rep.max_payload == 1400
     assert rep.warnings == []
+
+
+def test_detect_offload_scans_pcapng(tmp_path):
+    """C1: pcapng is the modern default capture format; the detector must read
+    it. It used to construct dpkt.pcap.Reader, which raises ValueError on the
+    pcapng magic, so detect_offload silently returned frames_scanned=0."""
+    pcap = _write_pcapng(tmp_path, [_tcp_frame(1400) for _ in range(5)])
+    rep = detect_offload(pcap)
+    assert rep.frames_scanned == 5
+    assert rep.tcp_segments == 5
+    assert rep.max_payload == 1400
 
 
 def test_detect_offload_flags_oversized_segment(tmp_path):
@@ -89,6 +109,27 @@ def test_detect_offload_flags_oversized_segment(tmp_path):
     assert "LSO/GSO/TSO/LRO/GRO" in rep.warnings[0]
 
 
+def test_detect_offload_does_not_flag_uniform_jumbo_frames(tmp_path):
+    """M2: a jumbo path (9000 MTU, ~8960 B payloads) must not trip the offload
+    banner. The oversized threshold adapts to the capture's own typical frame
+    size, so consistent jumbo frames read as the path MTU, not coalescing."""
+    pcap = _write_pcap(tmp_path, [_tcp_frame(8960) for _ in range(20)])
+    rep = detect_offload(pcap)
+    assert rep.tcp_segments == 20
+    assert rep.oversized_segments == 0
+    assert rep.warnings == []
+
+
+def test_detect_offload_flags_supersegment_among_jumbo(tmp_path):
+    """A true offload super-segment stands out well above the jumbo baseline and
+    is still flagged."""
+    frames = [_tcp_frame(8960) for _ in range(19)] + [_tcp_frame(40000)]
+    pcap = _write_pcap(tmp_path, frames)
+    rep = detect_offload(pcap)
+    assert rep.oversized_segments == 1
+    assert rep.max_payload == 40000
+
+
 def test_detect_offload_ignores_non_tcp_frames(tmp_path):
     pcap = _write_pcap(tmp_path, [_udp_frame() for _ in range(3)])
     rep = detect_offload(pcap)
@@ -98,8 +139,9 @@ def test_detect_offload_ignores_non_tcp_frames(tmp_path):
 
 
 def test_detect_offload_bounded_by_max_frames(tmp_path):
-    # 50 frames, all "offloaded" — but we cap the scan at 5.
-    pcap = _write_pcap(tmp_path, [_tcp_frame(8000) for _ in range(50)])
+    # 50 frames, all "offloaded" — but we cap the scan at 5. 32768 B exceeds the
+    # jumbo ceiling so it reads as offload regardless of the size distribution.
+    pcap = _write_pcap(tmp_path, [_tcp_frame(32768) for _ in range(50)])
     rep = detect_offload(pcap, max_frames=5)
     assert rep.frames_scanned == 5
     assert rep.tcp_segments == 5
@@ -155,3 +197,18 @@ def test_detect_offload_handles_ipv6(tmp_path):
     assert rep.tcp_segments == 1
     assert rep.oversized_segments == 1
     assert rep.max_payload == 16384
+
+
+def test_detect_offload_uses_onwire_len_on_snaplen_truncated_capture(tmp_path):
+    """H6: a snaplen-truncated capture clamps the captured TCP payload below the
+    threshold, but the offloaded super-segment's true on-wire size lives in the
+    IP total-length field. Reading captured len(tcp.data) misses it -> no
+    offload banner -> coalescing-distorted retransmit/MSS signals get trusted."""
+    # Full 30000 B-payload segment whose ip.len advertises the on-wire size,
+    # then truncated to a 1514 B snaplen (only ~1460 B payload survives).
+    full = _tcp_frame(30000)
+    truncated = full[:1514]
+    pcap = _write_pcap(tmp_path, [truncated])
+    rep = detect_offload(pcap)
+    assert rep.oversized_segments == 1
+    assert rep.max_payload == 30000

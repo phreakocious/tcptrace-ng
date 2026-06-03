@@ -163,6 +163,14 @@ def _direction_is_coalesced(model) -> bool:
         return False
     if any(a.kind == "coalesced" for a in model.anomalies):
         return True
+    # MSS-free backstop: ONLY when MSS was unavailable (so no `coalesced` anomaly
+    # could be emitted). With a known MSS the precise anomaly above already
+    # covers real coalescing; applying a hardcoded 1500 here false-flags
+    # jumbo-frame paths (MSS up to ~8960) as coalesced — capping a real loss
+    # storm and appending a fabricated offload note. Jumbo is common in
+    # DC/storage, the target audience's turf.
+    if model.mss is not None:
+        return False
     return any((s.seq_end - s.seq_start) > _OVERSIZED_SEG_BYTES for s in model.segments)
 
 

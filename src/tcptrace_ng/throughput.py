@@ -77,8 +77,14 @@ def _make_summary(
     cliffs: list[Cliff],
     total_payload_bytes: int,
     total_wire_bytes: int,
+    total_retx_bytes: int,
 ) -> DirectionSummary:
-    retx_frac = 1.0 - total_payload_bytes / total_wire_bytes if total_wire_bytes > 0 else 0.0
+    # Overhead is retransmitted bytes only. NOT 1 - payload/wire: payload
+    # excludes first transmissions not yet ACKed (in flight at the capture's
+    # trailing edge, or whose ACK fell outside the capture), which are normal
+    # bytes — counting them as retransmission inflated overhead on short flows
+    # and captures cut mid-flight.
+    retx_frac = total_retx_bytes / total_wire_bytes if total_wire_bytes > 0 else 0.0
     gps = [s.goodput_Bps for s in samples]
     peak = max(gps) if gps else 0.0
     # Central tendency over *active* windows only. The sampler pads +/- half a
@@ -127,6 +133,8 @@ class ThroughputModel:
     _payload_seg_bytes: tuple[int, ...] = field(default=())
     _wire_seg_times: tuple[float, ...] = field(default=())
     _wire_seg_bytes: tuple[int, ...] = field(default=())
+    _retx_seg_times: tuple[float, ...] = field(default=())
+    _retx_seg_bytes: tuple[int, ...] = field(default=())
 
     def window_stats(self, t0: float | None, t1: float | None) -> DirectionSummary:
         sample_times = [s.t for s in self.samples]
@@ -160,8 +168,16 @@ class ThroughputModel:
         )
         wire_bytes = sum(self._wire_seg_bytes[w_lo:w_hi])
 
+        r_lo = bisect.bisect_left(self._retx_seg_times, t0) if t0 is not None else 0
+        r_hi = (
+            bisect.bisect_right(self._retx_seg_times, t1)
+            if t1 is not None
+            else len(self._retx_seg_times)
+        )
+        retx_bytes = sum(self._retx_seg_bytes[r_lo:r_hi])
+
         return _make_summary(
-            sliced_samples, sliced_stalls, sliced_cliffs, payload_bytes, wire_bytes
+            sliced_samples, sliced_stalls, sliced_cliffs, payload_bytes, wire_bytes, retx_bytes
         )
 
 
@@ -219,6 +235,7 @@ def _emit_samples(
     stride_s: float,
     t_start: float,
     t_end: float,
+    base_rtt_s: float | None,
 ) -> list[RateSample]:
     seg_times = [s.time for s in tsg.segments]
     ack_times = [a.time for a in tsg.acks]
@@ -248,17 +265,11 @@ def _emit_samples(
         acks_in = tsg.acks[ai_lo:ai_hi]
 
         rwins = [(a.rwin_scaled if a.rwin_scaled is not None else a.rwin) for a in acks_in]
-        rtts_in = [s.paired_rtt_ms for s in segs_in if s.paired_rtt_ms is not None]
-
-        if rwins and rtts_in:
-            # Floor RTT at 1ms. Sub-ms paired-RTT samples (e.g. piggybacked ACK
-            # arriving in the same pcap tick as the segment) otherwise drive the
-            # rwin/RTT ceiling to physically impossible rates (observed 12 GB/s
-            # on a 14 KB/s connection).
-            rtt_s = max(max(rtts_in) / 1000.0, 0.001)
-            max_bps: float | None = min(rwins) / rtt_s
-        else:
-            max_bps = None
+        # BDP ceiling = rwin / base RTT. Use the connection's base (propagation)
+        # RTT, NOT the in-window RTT: an inflated RTT (bufferbloat / queue growth)
+        # would otherwise shrink the ceiling and inflate BDP-utilization,
+        # misreading queue growth as the receive window limiting throughput (L1).
+        max_bps: float | None = min(rwins) / base_rtt_s if rwins and base_rtt_s else None
 
         samples.append(
             RateSample(t=t, goodput_Bps=goodput, wire_Bps=wire, max_Bps=max_bps, window_s=window_s)
@@ -280,16 +291,11 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
         seg_b = tsg.segments[i + 1]
         gap_s = seg_b.time - seg_a.time
 
-        if seg_a.paired_rtt_ms is not None:
-            srtt_ms = seg_a.paired_rtt_ms
-        else:
-            srtt_ms = None
-            for j in range(i + 1, len(tsg.segments)):
-                if tsg.segments[j].paired_rtt_ms is not None:
-                    srtt_ms = tsg.segments[j].paired_rtt_ms
-                    break
-            if srtt_ms is None:
-                srtt_ms = rtt_min_s * 1000.0
+        # When the pre-gap segment is unpaired, baseline on the connection's
+        # rtt_min — NOT the RTT of the segment that ENDS the gap (often the first
+        # post-stall / RTO-backed-off probe, whose inflated RTT would push the
+        # threshold up and hide or under-tier a genuine network-blocked stall).
+        srtt_ms = seg_a.paired_rtt_ms if seg_a.paired_rtt_ms is not None else rtt_min_s * 1000.0
 
         threshold = max(3.0 * (srtt_ms / 1000.0), 0.200)
         if gap_s < threshold:
@@ -383,13 +389,22 @@ def _detect_cliffs(
         ai_hi = bisect.bisect_right(anom_times, search_hi)
         nearby = [a for a in tsg.anomalies[ai_lo:ai_hi] if a.kind in _CLIFF_KINDS]
 
+        cause: Literal["post-loss", "rwin-shrink", "unknown"]
         if nearby:
-            best = max(nearby, key=lambda a: _SEVERITY_RANK[SEVERITY_BY_KIND.get(a.kind, "info")])
-            if best.kind in _CLIFF_LOSS_KINDS:
-                cause: Literal["post-loss", "rwin-shrink", "unknown"] = "post-loss"
+            # Explicit causal priority instead of a severity-rank tie (rto, fast
+            # and win_shrink_large all rank 'severe', so max() would pick
+            # whichever is earlier in time — flipping the diagnosis on a
+            # coincidence). A retransmit near the cliff is the direct
+            # congestion-response cause; prefer it over a co-occurring receiver
+            # window shrink (loss and window adjustments often co-occur).
+            if any(a.kind in _CLIFF_LOSS_KINDS for a in nearby):
+                cause = "post-loss"
             else:
                 cause = "rwin-shrink"
-            sev = _severity_of(best.kind)
+            sev = max(
+                (_severity_of(a.kind) for a in nearby),
+                key=lambda s: _SEVERITY_RANK[s],
+            )
             # A confirmed cliff (>=50% drop) is at least a warning regardless of
             # the attributed anomaly's presentation tier; attribution must not
             # demote it below what an unexplained cliff (below) would get.
@@ -439,12 +454,18 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
             samples=(),
             stalls=(),
             cliffs=(),
-            summary=_make_summary([], [], [], 0, 0),
+            summary=_make_summary([], [], [], 0, 0, 0),
             src=tsg.src,
             dst=tsg.dst,
         )
 
-    samples = _emit_samples(tsg, window_s, stride_s, t_start, t_end)
+    # Base RTT for the BDP ceiling: prefer tcptrace's -r rtt_min (excludes sub-ms
+    # piggyback-ACK artifacts), else the window-sizing rtt_min; floored at 1ms so
+    # sub-ms samples don't drive the ceiling to absurd rates (L1).
+    base_rtt_s = max(
+        (rtt_min_fallback_ms / 1000.0) if rtt_min_fallback_ms is not None else rtt_min_s, 0.001
+    )
+    samples = _emit_samples(tsg, window_s, stride_s, t_start, t_end, base_rtt_s)
     stalls = _detect_stalls(tsg, rtt_min_s)
     cliffs = _detect_cliffs(samples, tsg, window_s)
 
@@ -454,6 +475,7 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
         if s.rtx is None and s.paired_ack_time is not None
     )
     total_wire = sum(s.seq_end - s.seq_start for s in tsg.segments)
+    total_retx = sum(s.seq_end - s.seq_start for s in tsg.segments if s.rtx is not None)
 
     # Per-segment time series for exact viewport byte counting.
     wire_times = tuple(s.time for s in tsg.segments)
@@ -461,8 +483,11 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
     payload_segs = [s for s in tsg.segments if s.rtx is None and s.paired_ack_time is not None]
     payload_times = tuple(s.time for s in payload_segs)
     payload_bytes_tuple = tuple(s.seq_end - s.seq_start for s in payload_segs)
+    retx_segs = [s for s in tsg.segments if s.rtx is not None]
+    retx_times = tuple(s.time for s in retx_segs)
+    retx_bytes_tuple = tuple(s.seq_end - s.seq_start for s in retx_segs)
 
-    summary = _make_summary(samples, stalls, cliffs, total_payload, total_wire)
+    summary = _make_summary(samples, stalls, cliffs, total_payload, total_wire, total_retx)
 
     return ThroughputModel(
         samples=tuple(samples),
@@ -475,6 +500,8 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
         _payload_seg_bytes=payload_bytes_tuple,
         _wire_seg_times=wire_times,
         _wire_seg_bytes=wire_bytes,
+        _retx_seg_times=retx_times,
+        _retx_seg_bytes=retx_bytes_tuple,
     )
 
 

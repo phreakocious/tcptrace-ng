@@ -129,7 +129,9 @@ def _build_traces(
         elif isinstance(cmd, DLine):
             lines[("dash", cmd.color)].append((cmd.x1, cmd.y1, cmd.x2, cmd.y2))
         elif isinstance(cmd, Box):
-            boxes[("solid", cmd.color)].append((cmd.x1, cmd.y1, cmd.x2, cmd.y2))
+            # tcptrace's box is a 2-coord point glyph (the FIN marker), not a
+            # rectangle — render it as a square marker, like dot/diamond.
+            markers[("box", cmd.color)].append((cmd.x, cmd.y))
         elif isinstance(cmd, DBox):
             boxes[("dash", cmd.color)].append((cmd.x1, cmd.y1, cmd.x2, cmd.y2))
         elif isinstance(cmd, Arrow):
@@ -496,6 +498,8 @@ def _marker_symbol(kind: str) -> str:
         return "circle"
     if kind == "diamond":
         return "diamond"
+    if kind == "box":
+        return "square"
     return "circle"
 
 
@@ -515,32 +519,33 @@ def _humanize_title(raw: str) -> str:
     return cleaned
 
 
-_NAN = float("nan")
-
-
-def _seg_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float]]:
-    """Per-segment numeric tuple consumed by the hovertemplate.
+def _seg_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float | str]]:
+    """Per-segment tuple consumed by the hovertemplate.
 
     Index layout:
       0: 1-based segment index
-      1: ms since previous segment
+      1: inter-segment delta hover fragment — "" for the first segment (no
+         previous), " · +N.N ms" otherwise. Prebuilt (L2): plotly templates
+         can't branch, so a NaN delta would render "+NaN ms".
       2: seq_start  (relative to baseline when baseline != 0)
       3: length (bytes)
       4: in_flight_after (bytes)
-      5: paired_rtt_ms (NaN when no pair)
+      5: paired-RTT hover fragment — "" when unpaired, "<br>ACKed N.N ms later"
+         otherwise (L2; avoids "ACKed NaN ms later").
     """
-    out: list[list[float]] = []
+    out: list[list[float | str]] = []
     prev_time: float | None = None
     for i, s in enumerate(segments, start=1):
-        dt_ms = (s.time - prev_time) * 1000.0 if prev_time is not None else _NAN
+        delta = f" · +{(s.time - prev_time) * 1000.0:.1f} ms" if prev_time is not None else ""
+        rtt = f"<br>ACKed {s.paired_rtt_ms:.1f} ms later" if s.paired_rtt_ms is not None else ""
         out.append(
             [
                 float(i),
-                dt_ms,
+                delta,
                 float(s.seq_start - baseline),
                 float(s.seq_end - s.seq_start),
                 float(s.in_flight_after),
-                float(s.paired_rtt_ms) if s.paired_rtt_ms is not None else _NAN,
+                rtt,
             ]
         )
         prev_time = s.time
@@ -549,10 +554,10 @@ def _seg_customdata(segments: list[Segment], baseline: int = 0) -> list[list[flo
 
 _TSG_SEG_TEMPLATE = (
     "<b>Seg #%{customdata[0]:.0f}</b>"
-    " · +%{customdata[1]:.1f} ms<br>"
+    "%{customdata[1]}<br>"
     "seq %{customdata[2]:,.0f} (%{customdata[3]:.0f} B)<br>"
-    "in-flight after: %{customdata[4]:,.0f} B<br>"
-    "ACKed %{customdata[5]:.1f} ms later"
+    "in-flight after: %{customdata[4]:,.0f} B"
+    "%{customdata[5]}"
     "<extra></extra>"
 )
 
@@ -581,7 +586,7 @@ def _data_segment_trace(
         return None
     xs: list[Any] = []
     ys: list[float | None] = []
-    cd: list[list[float]] = []
+    cd: list[list[float | str]] = []
     per_seg = _seg_customdata(segs, baseline=baseline)
     for s, row in zip(segs, per_seg, strict=True):
         t_iso = _epoch_to_iso(s.time)
@@ -673,25 +678,28 @@ def _retx_segment_trace(
     }
 
 
-def _ack_customdata(acks: list[Ack], baseline: int = 0) -> list[list[float]]:
+def _ack_customdata(acks: list[Ack], baseline: int = 0) -> list[list[float | str]]:
     """Index layout:
     0: ack_seq  (relative to baseline when baseline != 0)
     1: rwin (scaled if known, else raw) — a length, never baselined
     2: rwin_scale_known (0/1)
-    3: dup_count
+    3: dup-ACK hover fragment — "" for a non-dup ACK, "<br>dup-ACK #N" otherwise.
+       Prebuilt because plotly hovertemplates can't branch; a literal
+       "dup-ACK #%{customdata[3]}" would render "#0" on every healthy ACK.
     """
-    out: list[list[float]] = []
+    out: list[list[float | str]] = []
     for a in acks:
         rwin = float(a.rwin_scaled if a.rwin_scaled is not None else a.rwin)
         scale_known = 1.0 if a.rwin_scaled is not None else 0.0
-        out.append([float(a.ack_seq - baseline), rwin, scale_known, float(a.dup_count)])
+        dup = f"<br>dup-ACK #{a.dup_count}" if a.dup_count else ""
+        out.append([float(a.ack_seq - baseline), rwin, scale_known, dup])
     return out
 
 
 _TSG_ACK_TEMPLATE = (
     "<b>ACK for seq %{customdata[0]:,.0f}</b><br>"
-    "rwnd %{customdata[1]:,.0f}<br>"
-    "dup-ACK #%{customdata[3]:.0f}"
+    "rwnd %{customdata[1]:,.0f}"
+    "%{customdata[3]}"
     "<extra></extra>"
 )
 
@@ -715,7 +723,7 @@ def _ack_trace(
         return None
     xs: list[Any] = []
     ys: list[float | None] = []
-    cd: list[list[float]] = []
+    cd: list[list[float | str]] = []
     prev_seq: int | None = None
     prev_time: float | None = None
     rows = _ack_customdata(model.acks, baseline=baseline)
@@ -760,12 +768,15 @@ def _rwin_trace(
         return None
     xs: list[Any] = []
     ys: list[float | None] = []
-    cd: list[list[float]] = []
+    cd: list[list[float | str]] = []
     prev_top: int | None = None
     prev_time: float | None = None
     rows = _ack_customdata(model.acks, baseline=baseline)
     for a, row in zip(model.acks, rows, strict=True):
-        top = a.ack_seq + a.rwin - baseline
+        # Plot the scaled window (what the hover shows via _ack_customdata), not
+        # the raw a.rwin — keep the line and tooltip consistent (L7).
+        rwin = a.rwin_scaled if a.rwin_scaled is not None else a.rwin
+        top = a.ack_seq + rwin - baseline
         if prev_top is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
             ys.extend([prev_top, prev_top, None])
@@ -1041,10 +1052,14 @@ def _in_flight_overlay(
         return None
     ack_times = [a.time for a in model.acks]
     ack_seqs = [a.ack_seq for a in model.acks]
-    if ack_seqs:
+    if model.segments:
+        # Before the first observed ACK nothing is acked yet, so the band's
+        # floor is the ISN — the earliest sequence sent — not the first ACK's
+        # cumack, which has already advanced past the initial burst. Matches the
+        # baseline _compute_in_flight seeds from (earliest seq_start).
+        pre_first_baseline = min(s.seq_start for s in model.segments)
+    elif ack_seqs:
         pre_first_baseline = ack_seqs[0]
-    elif model.segments:
-        pre_first_baseline = model.segments[0].seq_start
     else:
         pre_first_baseline = 0
 
@@ -1103,68 +1118,82 @@ def _build_direction_traces(
         legend_seen = set()
     out: list[dict[str, Any]] = []
 
-    def _show(role: str) -> bool:
-        if role in legend_seen:
-            return False
-        legend_seen.add(role)
-        return True
+    def _commit(role: str, tr: dict[str, Any] | None) -> None:
+        # Claim the shared legend slot only when a trace is actually emitted, so
+        # a direction that draws nothing for a role (e.g. the forward panel with
+        # no ACKs) doesn't suppress the other direction's legend entry for it.
+        # Builders are called with showlegend=False; we flip it on the first
+        # direction that emits the role.
+        if tr is None:
+            return
+        if role not in legend_seen:
+            tr["showlegend"] = True
+            legend_seen.add(role)
+        out.append(tr)
 
-    ack_tr = _ack_trace(
-        model,
-        name="ack",
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-        baseline=baseline,
-        showlegend=_show("ack"),
-        legendgroup="ack",
+    # Order matters for layering (later traces draw on top): ack staircase,
+    # rwin, in-flight band, data sticks, then retx on top.
+    _commit(
+        "ack",
+        _ack_trace(
+            model,
+            name="ack",
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="ack",
+        ),
     )
-    if ack_tr is not None:
-        out.append(ack_tr)
-    rwin_tr = _rwin_trace(
-        model,
-        name="rwin",
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-        baseline=baseline,
-        showlegend=_show("rwin"),
-        legendgroup="rwin",
+    _commit(
+        "rwin",
+        _rwin_trace(
+            model,
+            name="rwin",
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="rwin",
+        ),
     )
-    if rwin_tr is not None:
-        out.append(rwin_tr)
-    ifl_tr = _in_flight_overlay(
-        model,
-        name="in-flight",
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-        baseline=baseline,
-        showlegend=_show("in-flight"),
-        legendgroup="in-flight",
+    _commit(
+        "in-flight",
+        _in_flight_overlay(
+            model,
+            name="in-flight",
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="in-flight",
+        ),
     )
-    if ifl_tr is not None:
-        out.append(ifl_tr)
-    seg_tr = _data_segment_trace(
-        model,
-        name="data",
-        color=COLOR_MAP["white"],
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-        baseline=baseline,
-        showlegend=_show("data"),
-        legendgroup="data",
+    _commit(
+        "data",
+        _data_segment_trace(
+            model,
+            name="data",
+            color=COLOR_MAP["white"],
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="data",
+        ),
     )
-    if seg_tr is not None:
-        out.append(seg_tr)
-    rtx_tr = _retx_segment_trace(
-        model,
-        name="retx",
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-        baseline=baseline,
-        showlegend=_show("retx"),
-        legendgroup="retx",
+    _commit(
+        "retx",
+        _retx_segment_trace(
+            model,
+            name="retx",
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="retx",
+        ),
     )
-    if rtx_tr is not None:
-        out.append(rtx_tr)
     return out
 
 

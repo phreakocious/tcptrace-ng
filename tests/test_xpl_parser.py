@@ -102,9 +102,12 @@ def test_parses_dline():
 
 
 def test_parses_box():
-    src = "go\nblue\nbox 0 0 10 20\n"
+    # tcptrace's plotter_box emits 2 args (time, seq) — it marks the FIN on the
+    # TSG (plotter.c:491 `CallDoPlot(pl,"box",2,...)`), it is NOT a 4-coord
+    # rectangle. The old 4-arg shape sent every real box line to plot.unknown.
+    src = "go\nblue\nbox 1538187584.738972 3493560572\n"
     plot = parse_xpl(src)
-    assert plot.commands == [Box(color="blue", x1=0.0, y1=0.0, x2=10.0, y2=20.0)]
+    assert plot.commands == [Box(color="blue", x=1538187584.738972, y=3493560572.0)]
 
 
 def test_failed_text_verb_skips_its_label_line():
