@@ -539,7 +539,7 @@ def _detect_anomalies(
             Anomaly(
                 time=s.time,
                 kind=s.rtx,  # type: ignore[arg-type]
-                one_liner=f"{s.rtx} retransmit seq {s.seq_start}..{s.seq_end}",
+                one_liner=f"{s.rtx} retransmit seq {s.seq_start:,}..{s.seq_end:,}",
                 seq_lo=s.seq_start,
                 seq_hi=s.seq_end,
             )
@@ -576,7 +576,7 @@ def _detect_anomalies(
                     Anomaly(
                         time=a.time,
                         kind=kind,
-                        one_liner=f"window shrunk by {shrink_bytes} B",
+                        one_liner=f"window shrunk by {shrink_bytes:,} B",
                         seq_lo=rwin_top,
                         seq_hi=rwin_top,
                     )
@@ -589,7 +589,7 @@ def _detect_anomalies(
                         time=a.time,
                         kind="sack_gap",
                         one_liner=(
-                            f"SACK {lo}..{hi}; gap {a.ack_seq}..{lo} unacked"
+                            f"SACK {lo:,}..{hi:,}; gap {a.ack_seq:,}..{lo:,} unacked"
                         ),
                         seq_lo=lo,
                         seq_hi=hi,
@@ -611,7 +611,7 @@ def _detect_anomalies(
                     time=s.time,
                     kind="ooo",
                     one_liner=(
-                        f"out-of-order seq {s.seq_start}..{s.seq_end} (below max seen {max_seen})"
+                        f"out-of-order seq {s.seq_start:,}..{s.seq_end:,} (below max seen {max_seen:,})"
                     ),
                     seq_lo=s.seq_start,
                     seq_hi=s.seq_end,
@@ -627,7 +627,7 @@ def _detect_anomalies(
                 Anomaly(
                     time=s.time,
                     kind="keepalive",
-                    one_liner=f"keepalive at seq {s.seq_start}",
+                    one_liner=f"keepalive at seq {s.seq_start:,}",
                     seq_lo=s.seq_start,
                     seq_hi=s.seq_end,
                 )
@@ -813,7 +813,7 @@ def _classify_pure_acks(
                 Anomaly(
                     time=t,
                     kind="dup_ack",
-                    one_liner=f"duplicate ACK at seq {cumack}",
+                    one_liner=f"duplicate ACK at seq {cumack:,}",
                     seq_lo=cumack,
                     seq_hi=cumack,
                 )
@@ -833,7 +833,7 @@ def _classify_pure_acks(
                     time=t,
                     kind="partial_ack",
                     one_liner=(
-                        f"partial ACK at seq {cumack} (max sent {max_sent})"
+                        f"partial ACK at seq {cumack:,} (max sent {max_sent:,})"
                     ),
                     seq_lo=cumack,
                     seq_hi=cumack,
@@ -862,7 +862,7 @@ def _detect_coalesced(segments: list[Segment], mss: int | None) -> list[Anomaly]
                 Anomaly(
                     time=s.time,
                     kind="coalesced",
-                    one_liner=f"coalesced segment {size} B (> MSS {mss})",
+                    one_liner=f"coalesced segment {size:,} B (> MSS {mss:,})",
                     seq_lo=s.seq_start,
                     seq_hi=s.seq_end,
                 )
@@ -1159,7 +1159,7 @@ def _emit_handshake_ack(fwd: TsgModel, bwd: TsgModel) -> None:
                     time=ack.time,
                     kind="handshake_ack",
                     one_liner=(
-                        f"ACK (handshake completion) · cumack {ack.ack_seq}"
+                        f"ACK (handshake completion) · cumack {ack.ack_seq:,}"
                         f" · {delta_ms:.1f} ms after SYN/ACK"
                     ),
                     seq_lo=ack.ack_seq,

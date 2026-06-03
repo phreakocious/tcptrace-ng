@@ -461,7 +461,7 @@ def _model_with_segments() -> TsgModel:
 
 def test_data_segment_trace_has_numeric_customdata_and_hovertemplate():
     fig = to_tsg_figure(TsgModelPair(fwd=_model_with_segments()))
-    seg_traces = [t for t in fig["data"] if t.get("name") == "fwd data"]
+    seg_traces = [t for t in fig["data"] if t.get("name") == "data"]
     assert len(seg_traces) == 1
     t = seg_traces[0]
     # Customdata is per-point numeric arrays — no pre-formatted strings.
@@ -514,7 +514,7 @@ def test_retx_segment_trace_separate_from_data_with_rtx_kind_in_customdata():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    retx_traces = [t for t in fig["data"] if t.get("name") == "fwd retx"]
+    retx_traces = [t for t in fig["data"] if t.get("name") == "retx"]
     assert len(retx_traces) == 1
     t = retx_traces[0]
     # Per-segment customdata includes a numeric retx code; customdata aligns 1:1
@@ -553,8 +553,8 @@ def test_ack_trace_has_step_geometry_and_dup_count_in_customdata():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    ack_traces = [t for t in fig["data"] if t.get("name") == "fwd ack"]
-    rwin_traces = [t for t in fig["data"] if t.get("name") == "fwd rwin"]
+    ack_traces = [t for t in fig["data"] if t.get("name") == "ack"]
+    rwin_traces = [t for t in fig["data"] if t.get("name") == "rwin"]
     assert len(ack_traces) == 1
     assert len(rwin_traces) == 1
     a = ack_traces[0]
@@ -577,7 +577,7 @@ def test_rwin_trace_tooltip_includes_window_value():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    rwin_traces = [t for t in fig["data"] if t.get("name") == "fwd rwin"]
+    rwin_traces = [t for t in fig["data"] if t.get("name") == "rwin"]
     assert "rwnd" in rwin_traces[0]["hovertemplate"]
 
 
@@ -682,10 +682,13 @@ def test_tsg_figure_stacks_directions_as_subplots_when_both_populated():
     # x2 matches x so pan/zoom drives both.
     assert layout["xaxis2"]["matches"] == "x"
     # fwd traces use (x, y); bwd traces use (x2, y2).
-    fwd_data = next(t for t in fig["data"] if t.get("name") == "fwd data")
-    bwd_data = next(t for t in fig["data"] if t.get("name") == "bwd data")
+    data_traces = [t for t in fig["data"] if t.get("name") == "data"]
+    fwd_data = next(t for t in data_traces if t.get("yaxis") == "y")
+    bwd_data = next(t for t in data_traces if t.get("yaxis") == "y2")
     assert fwd_data["xaxis"] == "x" and fwd_data["yaxis"] == "y"
     assert bwd_data["xaxis"] == "x2" and bwd_data["yaxis"] == "y2"
+    assert fwd_data["legendgroup"] == bwd_data["legendgroup"] == "data"
+    assert fwd_data["showlegend"] and not bwd_data["showlegend"]
     # Subplot direction labels.
     label_texts = [a.get("text") for a in layout.get("annotations", [])]
     assert "1.1.1.1:1 → 2.2.2.2:2" in label_texts
@@ -876,7 +879,7 @@ def test_in_flight_overlay_trace_present_when_in_flight_nonempty():
         in_flight=[(1.0, 100), (2.0, 200), (3.0, 0)],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    overlays = [t for t in fig["data"] if t.get("name") == "fwd in-flight"]
+    overlays = [t for t in fig["data"] if t.get("name") == "in-flight"]
     assert len(overlays) == 1
     o = overlays[0]
     # Filled area trace.
@@ -983,9 +986,9 @@ def test_syn_segment_excluded_from_data_trace_to_avoid_orphan_hover():
 
 
 def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
-    """Hover is owned by the scatter trace (single styled popover per spot).
-    The annotation must NOT carry its own hovertext/captureevents — that
-    would stack a second default-styled popover on top."""
+    """Hover lives directly on the annotation so the popover lands on the
+    visible glyph (xshift/yshift applied) instead of the bare data point
+    14 px below. Verifies the annotation carries the enriched hovertext."""
     model = TsgModel(
         src="1.1.1.1:1",
         dst="2.2.2.2:2",
@@ -1005,21 +1008,22 @@ def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
         a for a in fig["layout"]["annotations"] if a.get("text") == "S"
     ]
     assert len(anns) == 1
-    assert "hovertext" not in anns[0]
-    assert not anns[0].get("captureevents")
-    hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
-    tip = hover["customdata"][0][0]
+    tip = anns[0]["hovertext"]
     assert "SYN (initiator)" in tip
-    assert "seq 12345" in tip
+    # Seq is comma-formatted so it matches the segment/ack popovers.
+    assert "seq 12,345" in tip
     assert "23.4 ms" in tip
     # Multi-line so dense detail doesn't sprawl horizontally.
     assert "<br>" in tip
+    # No separate scatter hover trace — annotation owns the popover.
+    assert not any(t.get("name") == "anomalies" for t in fig["data"])
 
 
-def test_anomaly_hover_trace_border_color_matches_severity():
+def test_anomaly_annotation_border_color_matches_severity():
     """Hover popovers' bordercolor used to be hardcoded red, so a SYN hover
-    looked like an alarm. Per-point arrays make handshake markers cyan, severe
-    red, warn amber, info grey — matching the on-chart glyph color."""
+    looked like an alarm. Per-annotation hoverlabel makes handshake markers
+    cyan, severe red, warn amber, info grey — matching the on-chart glyph
+    color."""
     from tcptrace_ng.plotly_adapter import _SEVERITY_COLOR
 
     model = TsgModel(
@@ -1036,8 +1040,11 @@ def test_anomaly_hover_trace_border_color_matches_severity():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
-    borders = hover["hoverlabel"]["bordercolor"]
+    glyph_anns = [
+        a for a in fig["layout"]["annotations"]
+        if a.get("text") in {"S", "⚠ RTO", "ooo"}
+    ]
+    borders = [a["hoverlabel"]["bordercolor"] for a in glyph_anns]
     assert borders == [
         _SEVERITY_COLOR["handshake"],
         _SEVERITY_COLOR["severe"],
@@ -1045,7 +1052,7 @@ def test_anomaly_hover_trace_border_color_matches_severity():
     ]
 
 
-def test_anomaly_hover_trace_excludes_info_when_hidden():
+def test_anomaly_annotations_exclude_info_when_hidden():
     """When info kinds are hidden from the chart, their hover targets must
     also disappear — otherwise hovering an empty region fires a tooltip with
     no visible source."""
@@ -1059,13 +1066,16 @@ def test_anomaly_hover_trace_excludes_info_when_hidden():
                     seq_lo=300, seq_hi=300),
         ],
     )
-    fig_hidden = to_tsg_figure(TsgModelPair(fwd=model))
-    hover_h = next(t for t in fig_hidden["data"] if t.get("name") == "anomalies")
-    assert len(hover_h["x"]) == 1                   # rto only
 
-    fig_shown = to_tsg_figure(TsgModelPair(fwd=model), show_info=True)
-    hover_s = next(t for t in fig_shown["data"] if t.get("name") == "anomalies")
-    assert len(hover_s["x"]) == 2                   # both
+    def hoverable_count(fig):
+        return sum(
+            1
+            for a in fig["layout"]["annotations"]
+            if a.get("hovertext") and a.get("yref") != "paper"
+        )
+
+    assert hoverable_count(to_tsg_figure(TsgModelPair(fwd=model))) == 1
+    assert hoverable_count(to_tsg_figure(TsgModelPair(fwd=model), show_info=True)) == 2
 
 
 def test_handshake_kinds_render_in_handshake_color():

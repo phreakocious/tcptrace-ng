@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -130,6 +131,11 @@ class _State:
         # Findings from pre-flight scans (NIC offload, etc.) that don't break
         # analysis but distort the results the user is about to see.
         self.pcap_warnings: list[str] = []
+        # Connection numbers where coalesced/LRO segments have been detected
+        # mid-analysis. The pre-flight offload scan is bounded to the first
+        # N frames and misses LRO that starts later; we top up the warning
+        # list as analyses complete and reveal it.
+        self.conns_with_lro: set[int] = set()
         self.stats: list[
             ConnStats | ConnRow
         ] = []  # may be ConnStats (rich) or ConnRow (basic) per pick
@@ -166,6 +172,13 @@ class _State:
         # session-global so a user investigating a flow sees consistent
         # density across whichever connection they jump into.
         self.show_info: bool = False
+        # Rate unit for throughput display. "bits" → bps/kbps/Mbps/Gbps
+        # (decimal 1000s, conventional for network rates). "bytes" → keeps
+        # the byte-prefixed display.
+        self.rate_unit: str = "bits"
+        # Sequence-number display. "rel" → subtract per-direction baseline
+        # so axes read 0..bytes_sent; "abs" → raw uint32 from the wire.
+        self.seq_mode: str = "rel"
 
 
 state = _State()
@@ -352,6 +365,8 @@ def _build_metric_figure(
     metric: str | None = None,
     details_text: str = "",
     show_info: bool = False,
+    rate_unit: str = "bytes",
+    seq_mode: str = "abs",
 ) -> dict | None:
     """Parse xpl(s) and build a plotly figure dict. Returns None if no data.
 
@@ -380,13 +395,13 @@ def _build_metric_figure(
             bad_csum_times_fwd=fwd_csum,
             bad_csum_times_bwd=bwd_csum,
         )
-        return to_tsg_figure(pair, show_info=show_info)
+        return to_tsg_figure(pair, show_info=show_info, seq_mode=seq_mode)
 
     if metric == "tput":
         tput_pair = _build_tput_model(forward, backward, details_text)
         if tput_pair is None:
             return None
-        return to_throughput_figure(tput_pair, show_info=show_info)
+        return to_throughput_figure(tput_pair, show_info=show_info, rate_unit=rate_unit)
 
     if combined is not None:
         plot, _err = _safe_parse_xpl(combined)
@@ -477,6 +492,46 @@ def _build_tput_model(
     return synthesize_throughput(tsg_pair, stats)
 
 
+_LRO_WARNING_PREFIX = "NIC offload (LRO/GRO): "
+
+
+def _has_lro_anomaly(pair) -> bool:
+    """True if either direction of the pair has any coalesced segment.
+
+    `pair` is a TsgModelPair or None. coalesced anomalies are emitted by
+    tcp_inspect across the whole capture, so this catches LRO that begins
+    after the pre-flight bounded scan's frame budget runs out.
+    """
+    if pair is None:
+        return False
+    for model in (pair.fwd, pair.bwd):
+        if model is None:
+            continue
+        if any(a.kind == "coalesced" for a in model.anomalies):
+            return True
+    return False
+
+
+def _sync_lro_warning(state: "_State") -> None:
+    """Add/refresh the LRO warning string in state.pcap_warnings.
+
+    Drops any stale LRO entry first, then appends a fresh one reflecting
+    the current `state.conns_with_lro` count. n=0 just drops.
+    """
+    state.pcap_warnings = [
+        w for w in state.pcap_warnings if not w.startswith(_LRO_WARNING_PREFIX)
+    ]
+    n = len(state.conns_with_lro)
+    if n == 0:
+        return
+    state.pcap_warnings.append(
+        f"{_LRO_WARNING_PREFIX}coalesced segments detected in {n} "
+        f"connection{'s' if n != 1 else ''}. See per-connection LRO "
+        f"counts in the TSG info strip. MSS, time-sequence staircases, "
+        f"and retransmit detection are unreliable for these flows."
+    )
+
+
 def _build_tsg_model(
     forward: Path | None,
     backward: Path | None,
@@ -544,6 +599,44 @@ def _format_throughput_Bps(v: float | None) -> str:  # noqa: N802 — `B` vs `b`
     return f"{v / (1024 * 1024 * 1024):.2f} GB/s"
 
 
+def _format_rate_bps(v_Bps: float | None) -> str:  # noqa: N802
+    """Same shape as `_format_throughput_Bps` but bits-per-second, SI (1000s).
+
+    Network engineers conventionally read line rates in decimal bits; matching
+    that here avoids a silent IEC-vs-SI confusion when the user expects Mbps.
+    """
+    if v_Bps is None:
+        return "—"
+    v = v_Bps * 8.0
+    if v < 1000:
+        return f"{v:.0f} bps"
+    if v < 1000 * 1000:
+        return f"{v / 1000:.1f} kbps"
+    if v < 1000 * 1000 * 1000:
+        return f"{v / (1000 * 1000):.1f} Mbps"
+    return f"{v / (1000 * 1000 * 1000):.2f} Gbps"
+
+
+def _format_rate(v_Bps: float | None, unit: str) -> str:
+    """Dispatch on `state.rate_unit` for any throughput display site."""
+    return _format_rate_bps(v_Bps) if unit == "bits" else _format_throughput_Bps(v_Bps)
+
+
+_CTX_RATE_RE = re.compile(r"(\d+)\s+Bps")
+
+
+def _apply_rate_unit_to_ctx(ctx: str, unit: str) -> str:
+    """Rewrite `NN Bps` substrings inside a conn-header context line.
+
+    `ctx` is built by `stats_parser.build_context_lines` and embeds tcptrace's
+    raw Bps integer; this re-renders it through `_format_rate` at view time so
+    flipping the toggle doesn't require re-parsing the tcptrace output.
+    """
+    if unit == "bytes":
+        return ctx
+    return _CTX_RATE_RE.sub(lambda m: _format_rate_bps(float(m.group(1))), ctx)
+
+
 def _format_bad_csum(ws) -> str:
     """Render the bad-csum slot for the Reliability column.
 
@@ -564,28 +657,53 @@ def _format_bad_csum(ws) -> str:
     return f"{total} bad csum"
 
 
-def _stats_grid_html(label: str, ws) -> str:
+def _sev(value: str, severity: str) -> str:
+    """Wrap a stat-token in a severity span. Severity in {ok, notable, bad}."""
+    return f'<span class="tt-{severity}">{value}</span>' if severity else value
+
+
+def _retx_severity(n_retx: int, n_segs: int) -> str:
+    if n_retx == 0:
+        return "ok"
+    pct = (n_retx / n_segs) if n_segs else 0.0
+    if pct >= 0.05:
+        return "bad"
+    if pct >= 0.01:
+        return "notable"
+    return ""
+
+
+def _stats_grid_html(label: str, ws, rate_unit: str = "bytes") -> str:
     pct = (100.0 * ws.n_retx / ws.n_segs) if ws.n_segs else 0.0
+    retx_sev = _retx_severity(ws.n_retx, ws.n_segs)
+    rto_sev = "bad" if ws.n_rto > 0 else "ok"
+    fast_sev = "notable" if ws.n_fast > 0 else "ok"
+    shrink_sev = "bad" if ws.n_win_shrink >= 1000 else "notable" if ws.n_win_shrink >= 100 else "ok"
+    zerow_sev = "bad" if ws.n_zero_win >= 10 else "notable" if ws.n_zero_win >= 1 else "ok"
+    csum_sev = "bad" if ws.n_bad_csum_lost > 0 else "notable" if ws.n_bad_csum > 0 else ""
+
+    csum_text = _format_bad_csum(ws)
+    other_anom = (
+        f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
+        f"{ws.n_coalesced} coal · {ws.n_ooo} OOO"
+    )
+    reliability_extras = (
+        f"{other_anom} · {_sev(csum_text, csum_sev)}"
+        if ws.n_bad_csum > 0
+        else other_anom
+    )
+
     rows = [
         ("Volume",
          f"{_format_count(ws.n_segs)} segs",
          f"{_format_bytes(ws.bytes_sent)} sent",
-         f"{ws.throughput_eff_Bps / 1024:.1f} KB/s eff",
+         f"{_format_rate(ws.throughput_eff_Bps, rate_unit)} eff",
          f"{_format_count(ws.n_sack_regions)} SACK"),
         ("Reliability",
-         f"{ws.n_retx} retx ({pct:.1f}%)",
-         f" · {ws.n_rto} RTO",
-         f" · {ws.n_fast} fast",
-         (
-             f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
-             f"{ws.n_coalesced} coal · {ws.n_ooo} OOO · "
-             + _format_bad_csum(ws)
-             if ws.n_bad_csum > 0
-             else (
-                 f"{ws.n_dup_ack} dup · {ws.n_partial_ack} partial · "
-                 f"{ws.n_coalesced} coal · {ws.n_ooo} OOO"
-             )
-         )),
+         _sev(f"{ws.n_retx} retx ({pct:.1f}%)", retx_sev),
+         f" · {_sev(f'{ws.n_rto} RTO', rto_sev)}",
+         f" · {_sev(f'{ws.n_fast} fast', fast_sev)}",
+         reliability_extras),
         ("Latency",
          f"p50 {_format_ms(ws.rtt_p50_ms)}",
          f"p95 {_format_ms(ws.rtt_p95_ms)}",
@@ -594,8 +712,8 @@ def _stats_grid_html(label: str, ws) -> str:
         ("Receiver",
          f"rwnd peak {_format_bytes(ws.rwin_peak)}",
          f"scale ×{ws.rwin_scale}" if ws.rwin_scale is not None else "scale unknown",
-         f"shrinks: {ws.n_win_shrink}",
-         f"0-win: {ws.n_zero_win}"),
+         _sev(f"shrinks: {ws.n_win_shrink}", shrink_sev),
+         _sev(f"0-win: {ws.n_zero_win}", zerow_sev)),
     ]
     parts = [f'<div class="dir-label">{label}</div>']
     # Render as four columns; each column is one category.
@@ -609,7 +727,7 @@ def _stats_grid_html(label: str, ws) -> str:
     return "".join(parts)
 
 
-def _throughput_stats_grid_html(label: str, summary: DirectionSummary) -> str:
+def _throughput_stats_grid_html(label: str, summary: DirectionSummary, rate_unit: str = "bytes") -> str:
     bdp = (
         f"{summary.bdp_utilization_frac * 100:.1f}%"
         if summary.bdp_utilization_frac is not None
@@ -617,10 +735,10 @@ def _throughput_stats_grid_html(label: str, summary: DirectionSummary) -> str:
     )
     rows = [
         ("Goodput",
-         f"avg {_format_throughput_Bps(summary.mean_goodput_Bps)}",
-         f"p50 {_format_throughput_Bps(summary.p50_goodput_Bps)}",
-         f"p95 {_format_throughput_Bps(summary.p95_goodput_Bps)}",
-         f"peak {_format_throughput_Bps(summary.peak_goodput_Bps)}"),
+         f"avg {_format_rate(summary.mean_goodput_Bps, rate_unit)}",
+         f"p50 {_format_rate(summary.p50_goodput_Bps, rate_unit)}",
+         f"p95 {_format_rate(summary.p95_goodput_Bps, rate_unit)}",
+         f"peak {_format_rate(summary.peak_goodput_Bps, rate_unit)}"),
         ("Wire",
          f"{_format_bytes(summary.total_wire_bytes)} total",
          f"{summary.retx_overhead_frac * 100:.1f}% retx overhead"),
@@ -653,9 +771,9 @@ def _render_throughput_stats_panel(
     with container:
         html_parts: list[str] = []
         if pair.fwd is not None:
-            html_parts.append(_throughput_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1)))
+            html_parts.append(_throughput_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit))
         if pair.bwd is not None:
-            html_parts.append(_throughput_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1)))
+            html_parts.append(_throughput_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit))
         ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
@@ -705,9 +823,9 @@ def _render_stats_panel(
     with container:
         html_parts: list[str] = []
         if pair.fwd is not None:
-            html_parts.append(_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1)))
+            html_parts.append(_stats_grid_html(fwd_label, pair.fwd.window_stats(t0, t1), state.rate_unit))
         if pair.bwd is not None:
-            html_parts.append(_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1)))
+            html_parts.append(_stats_grid_html(bwd_label, pair.bwd.window_stats(t0, t1), state.rate_unit))
         ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
@@ -758,6 +876,16 @@ def build_page() -> None:
                     .props("dense dark")
                     .tooltip("-zx: plot graph time axis from 0 instead of wallclock")
                 )
+                rate_toggle = (
+                    ui.toggle(["bits", "bytes"], value=state.rate_unit)
+                    .props("dense dark unelevated toggle-color=primary")
+                    .tooltip("throughput display unit (default bits)")
+                )
+                seq_toggle = (
+                    ui.toggle(["rel", "abs"], value=state.seq_mode)
+                    .props("dense dark unelevated toggle-color=primary")
+                    .tooltip("sequence number display (default relative)")
+                )
             ui.space()
             # Warning pill — hidden when there are no findings. Click opens a
             # dialog with the full text; tooltip shows the first line on hover.
@@ -779,7 +907,12 @@ def build_page() -> None:
             cache_label.set_text(" · ".join(parts))
 
         def refresh_warnings() -> None:
-            """Refresh the warning chip + dialog from `state.pcap_warnings`."""
+            """Refresh the warning chip + dialog from `state.pcap_warnings`.
+
+            Enters the chip's own slot so we can safely create the Tooltip
+            child element from a background task (e.g. when LRO surfaces
+            mid-render of a TSG figure).
+            """
             warnings = state.pcap_warnings
             if not warnings:
                 warning_chip.visible = False
@@ -787,9 +920,9 @@ def build_page() -> None:
             n = len(warnings)
             label = f"⚠ {n} warning" if n == 1 else f"⚠ {n} warnings"
             warning_chip.set_text(label)
-            warning_chip.tooltip(warnings[0] if n == 1 else f"{warnings[0]}  (+{n - 1} more)")
+            with warning_chip:
+                warning_chip.tooltip(warnings[0] if n == 1 else f"{warnings[0]}  (+{n - 1} more)")
             warning_chip.visible = True
-            # Rebuild the dialog body each refresh so it reflects the latest list.
             warning_dialog.clear()
             with warning_dialog, ui.card().classes("tcptrace-warning-card"):
                 ui.label("Capture warnings").classes("tcptrace-warning-title")
@@ -924,9 +1057,13 @@ def build_page() -> None:
                     if subtitle:
                         ui.label(subtitle).classes("tcptrace-subtitle")
                     if fwd_ctx:
-                        ui.label(f"{fwd_label}  {fwd_ctx}").classes("tcptrace-context")
+                        ui.label(
+                            f"{fwd_label}  {_apply_rate_unit_to_ctx(fwd_ctx, state.rate_unit)}"
+                        ).classes("tcptrace-context")
                     if bwd_ctx:
-                        ui.label(f"{bwd_label}  {bwd_ctx}").classes("tcptrace-context")
+                        ui.label(
+                            f"{bwd_label}  {_apply_rate_unit_to_ctx(bwd_ctx, state.rate_unit)}"
+                        ).classes("tcptrace-context")
                     if n in state.analyses:
                         groups, tabs, default_tab = _render_tabs_head(state.analyses[n])
                 if n not in state.analyses:
@@ -1041,7 +1178,7 @@ def build_page() -> None:
                             def _on_info_toggle(e) -> None:
                                 state.show_info = bool(e.value)
                                 new_fig = to_tsg_figure(
-                                    model_pair, show_info=state.show_info
+                                    model_pair, show_info=state.show_info, seq_mode=state.seq_mode
                                 )
                                 state.figure_cache[(conn_n, metric)] = new_fig
                                 plotly_el.update_figure(new_fig)
@@ -1079,7 +1216,7 @@ def build_page() -> None:
                             def _on_tput_info_toggle(e) -> None:
                                 state.show_info = bool(e.value)
                                 new_fig = to_throughput_figure(
-                                    tput_pair, show_info=state.show_info
+                                    tput_pair, show_info=state.show_info, rate_unit=state.rate_unit
                                 )
                                 state.figure_cache[(conn_n, metric)] = new_fig
                                 plotly_el.update_figure(new_fig)
@@ -1117,7 +1254,7 @@ def build_page() -> None:
                             details,
                         )
                         state.figure_cache[(conn_n, metric, "model")] = tput_pair
-                        fig = to_throughput_figure(tput_pair, show_info=state.show_info) if tput_pair is not None else None
+                        fig = to_throughput_figure(tput_pair, show_info=state.show_info, rate_unit=state.rate_unit) if tput_pair is not None else None
                     else:
                         fig = await run.io_bound(
                             _build_metric_figure,
@@ -1129,6 +1266,8 @@ def build_page() -> None:
                             g.metric,
                             details,
                             state.show_info,
+                            state.rate_unit,
+                            state.seq_mode,
                         )
                 except Exception as exc:
                     if state.selected_conn != conn_n:
@@ -1146,6 +1285,10 @@ def build_page() -> None:
                         details,
                     )
                     state.figure_cache[(conn_n, metric, "model")] = model_pair
+                    if _has_lro_anomaly(model_pair) and conn_n not in state.conns_with_lro:
+                        state.conns_with_lro.add(conn_n)
+                        _sync_lro_warning(state)
+                        refresh_warnings()
                 if state.selected_conn != conn_n:
                     return
                 _show_figure(metric, fig)
@@ -1380,6 +1523,7 @@ def build_page() -> None:
             state.effective_pcap = state.selected_pcap
             state.decap_encaps = set()
             state.pcap_warnings = []
+            state.conns_with_lro = set()
             refresh_warnings()
             state.selected_conn = None
             state.stats = []
@@ -1494,6 +1638,9 @@ def build_page() -> None:
                 _sh.rmtree(root)
             state.analyses.clear()
             state.figure_cache.clear()
+            state.conns_with_lro.clear()
+            _sync_lro_warning(state)
+            refresh_warnings()
             state.selected_conn = None
             refresh_cache_label()
             _refresh_download_btn()
@@ -1512,6 +1659,9 @@ def build_page() -> None:
             clear_pcap_cache(state.selected_pcap)
             state.analyses.clear()
             state.figure_cache.clear()
+            state.conns_with_lro.clear()
+            _sync_lro_warning(state)
+            refresh_warnings()
             state.selected_conn = None
             refresh_cache_label()
             _refresh_download_btn()
@@ -1533,6 +1683,15 @@ def build_page() -> None:
                 return
             await _on_pcap_pick(SimpleNamespace(value=str(state.selected_pcap)))
 
+        def _on_display_change(field: str, value: str) -> None:
+            """Display-only flag change: clear the figure cache and re-render
+            the current connection. Analyses on disk are untouched because
+            these toggles never reach tcptrace's CLI."""
+            setattr(state, field, value)
+            state.figure_cache.clear()
+            if state.selected_conn is not None:
+                render_main()
+
         # ---------- wire events ----------
         clear_btn.on_click(_clear_all)
         reanalyze_btn.on_click(_reanalyze)
@@ -1544,6 +1703,8 @@ def build_page() -> None:
         rtt_check.on_value_change(lambda e: _on_flag_change("with_rtt", e.value))
         warn_check.on_value_change(lambda e: _on_flag_change("with_warnings", e.value))
         zerox_check.on_value_change(lambda e: _on_flag_change("zero_x_axis", e.value))
+        rate_toggle.on_value_change(lambda e: _on_display_change("rate_unit", e.value))
+        seq_toggle.on_value_change(lambda e: _on_display_change("seq_mode", e.value))
         ui.timer(_PCAP_RESCAN_SECONDS, refresh_pcap_dropdown)
 
         # ---------- initial render ----------

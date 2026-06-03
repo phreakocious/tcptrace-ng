@@ -285,6 +285,11 @@ pre.tcptrace-output {
   color: #888888;
   margin-top: 8px;
 }
+/* Severity tints for stat tokens. Subtle on a dark background — these are
+   reading aids, not alerts. */
+.tsg-stats .tt-ok      { color: #7faa7f; }
+.tsg-stats .tt-notable { color: #c8b56b; }
+.tsg-stats .tt-bad     { color: #c97070; }
 @media (max-width: 800px) {
   .tsg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

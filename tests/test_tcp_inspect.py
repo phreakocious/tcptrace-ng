@@ -1104,7 +1104,7 @@ def test_handshake_ack_emitted_after_bwd_syn_ack():
     assert hs[0].seq_lo == 5001
     # Tooltip carries cumack and the delta from SYN/ACK so the cyan A glyph
     # owns the full handshake-leg context without a backing segment.
-    assert "cumack 5001" in hs[0].one_liner
+    assert "cumack 5,001" in hs[0].one_liner
     assert "500.0 ms" in hs[0].one_liner  # 2.0 - 1.5 = 0.5s = 500 ms
 
 

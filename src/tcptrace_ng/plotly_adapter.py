@@ -514,7 +514,7 @@ def to_paired_plotly_figure(
     # by xpl_grouper), so titles match modulo direction arrow. Forward title
     # is canonical.
     layout = _base_layout(
-        forward.title, dragmode="pan", showlegend=_has_legend_content(forward, backward)
+        forward.title, dragmode="zoom", showlegend=_has_legend_content(forward, backward)
     )
     layout["xaxis"] = fwd_xaxis
     layout["yaxis"] = fwd_yaxis
@@ -556,13 +556,13 @@ def _humanize_title(raw: str) -> str:
 _NAN = float("nan")
 
 
-def _seg_customdata(segments: list[Segment]) -> list[list[float]]:
+def _seg_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float]]:
     """Per-segment numeric tuple consumed by the hovertemplate.
 
     Index layout:
       0: 1-based segment index
       1: ms since previous segment
-      2: seq_start
+      2: seq_start  (relative to baseline when baseline != 0)
       3: length (bytes)
       4: in_flight_after (bytes)
       5: paired_rtt_ms (NaN when no pair)
@@ -574,7 +574,7 @@ def _seg_customdata(segments: list[Segment]) -> list[list[float]]:
         out.append([
             float(i),
             dt_ms,
-            float(s.seq_start),
+            float(s.seq_start - baseline),
             float(s.seq_end - s.seq_start),
             float(s.in_flight_after),
             float(s.paired_rtt_ms) if s.paired_rtt_ms is not None else _NAN,
@@ -600,6 +600,9 @@ def _data_segment_trace(
     color: str,
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
     """Build one scattergl trace for non-retx data segments.
 
@@ -615,26 +618,23 @@ def _data_segment_trace(
     xs: list[Any] = []
     ys: list[float | None] = []
     cd: list[list[float]] = []
-    per_seg = _seg_customdata(segs)
+    per_seg = _seg_customdata(segs, baseline=baseline)
     for s, row in zip(segs, per_seg):
         t_iso = _epoch_to_iso(s.time)
         xs.extend([t_iso, t_iso, None])
-        ys.extend([s.seq_start, s.seq_end, None])
-        # Customdata must align 1:1 with x/y points so Plotly can resolve
-        # `%{customdata[N]}` placeholders on hover. Repeat for both endpoints
-        # of the vertical line plus the None separator.
+        ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
         cd.extend([row, row, row])
     return {
         "type": "scattergl",
         "mode": "lines",
         "x": xs,
         "y": ys,
-        "line": {"color": color, "width": 1},
+        "line": {"color": color, "width": 2},
         "customdata": cd,
         "hovertemplate": _TSG_SEG_TEMPLATE,
         "name": name,
-        "legendgroup": name,
-        "showlegend": True,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
     }
@@ -643,9 +643,9 @@ def _data_segment_trace(
 _RTX_CODE = {None: 0.0, "rto": 1.0, "fast": 2.0, "spurious": 3.0}
 
 
-def _retx_customdata(segments: list[Segment]) -> list[list[float]]:
+def _retx_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float]]:
     """Index layout:
-      0: seq_start
+      0: seq_start  (relative to baseline when baseline != 0)
       1: length
       2: in_flight_after
       3: rtx_code (1=rto, 2=fast, 3=spurious)
@@ -653,7 +653,7 @@ def _retx_customdata(segments: list[Segment]) -> list[list[float]]:
     out: list[list[float]] = []
     for s in segments:
         out.append([
-            float(s.seq_start),
+            float(s.seq_start - baseline),
             float(s.seq_end - s.seq_start),
             float(s.in_flight_after),
             _RTX_CODE.get(s.rtx, 0.0),
@@ -676,6 +676,9 @@ def _retx_segment_trace(
     name: str,
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
     segs = [s for s in model.segments if s.rtx is not None]
     if not segs:
@@ -683,10 +686,10 @@ def _retx_segment_trace(
     xs: list[Any] = []
     ys: list[float | None] = []
     cd: list[list[float]] = []
-    for s, row in zip(segs, _retx_customdata(segs)):
+    for s, row in zip(segs, _retx_customdata(segs, baseline=baseline)):
         t_iso = _epoch_to_iso(s.time)
         xs.extend([t_iso, t_iso, None])
-        ys.extend([s.seq_start, s.seq_end, None])
+        ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
         cd.extend([row, row, row])
     return {
         "type": "scattergl",
@@ -697,17 +700,17 @@ def _retx_segment_trace(
         "customdata": cd,
         "hovertemplate": _TSG_RETX_TEMPLATE,
         "name": name,
-        "legendgroup": name,
-        "showlegend": True,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
     }
 
 
-def _ack_customdata(acks: list[Ack]) -> list[list[float]]:
+def _ack_customdata(acks: list[Ack], baseline: int = 0) -> list[list[float]]:
     """Index layout:
-      0: ack_seq
-      1: rwin (scaled if known, else raw)
+      0: ack_seq  (relative to baseline when baseline != 0)
+      1: rwin (scaled if known, else raw) — a length, never baselined
       2: rwin_scale_known (0/1)
       3: dup_count
     """
@@ -715,7 +718,7 @@ def _ack_customdata(acks: list[Ack]) -> list[list[float]]:
     for a in acks:
         rwin = float(a.rwin_scaled if a.rwin_scaled is not None else a.rwin)
         scale_known = 1.0 if a.rwin_scaled is not None else 0.0
-        out.append([float(a.ack_seq), rwin, scale_known, float(a.dup_count)])
+        out.append([float(a.ack_seq - baseline), rwin, scale_known, float(a.dup_count)])
     return out
 
 
@@ -740,6 +743,9 @@ def _ack_trace(
     name: str,
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
     if not model.acks:
         return None
@@ -748,17 +754,17 @@ def _ack_trace(
     cd: list[list[float]] = []
     prev_seq: int | None = None
     prev_time: float | None = None
-    rows = _ack_customdata(model.acks)
+    rows = _ack_customdata(model.acks, baseline=baseline)
     for a, row in zip(model.acks, rows):
-        # Horizontal hold then vertical step at each ack.
+        ack_seq_disp = a.ack_seq - baseline
         if prev_seq is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
             ys.extend([prev_seq, prev_seq, None])
             cd.extend([row, row, row])
         xs.extend([_epoch_to_iso(a.time), _epoch_to_iso(a.time), None])
-        ys.extend([prev_seq if prev_seq is not None else a.ack_seq, a.ack_seq, None])
+        ys.extend([prev_seq if prev_seq is not None else ack_seq_disp, ack_seq_disp, None])
         cd.extend([row, row, row])
-        prev_seq = a.ack_seq
+        prev_seq = ack_seq_disp
         prev_time = a.time
     return {
         "type": "scattergl",
@@ -769,8 +775,8 @@ def _ack_trace(
         "customdata": cd,
         "hovertemplate": _TSG_ACK_TEMPLATE,
         "name": name,
-        "legendgroup": name,
-        "showlegend": True,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
     }
@@ -782,6 +788,9 @@ def _rwin_trace(
     name: str,
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
     if not model.acks:
         return None
@@ -790,9 +799,9 @@ def _rwin_trace(
     cd: list[list[float]] = []
     prev_top: int | None = None
     prev_time: float | None = None
-    rows = _ack_customdata(model.acks)
+    rows = _ack_customdata(model.acks, baseline=baseline)
     for a, row in zip(model.acks, rows):
-        top = a.ack_seq + a.rwin
+        top = a.ack_seq + a.rwin - baseline
         if prev_top is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
             ys.extend([prev_top, prev_top, None])
@@ -811,8 +820,8 @@ def _rwin_trace(
         "customdata": cd,
         "hovertemplate": _TSG_RWIN_TEMPLATE,
         "name": name,
-        "legendgroup": name,
-        "showlegend": True,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
     }
@@ -913,26 +922,24 @@ def _cluster_anomalies(anomalies: list[Anomaly]) -> list[tuple[Anomaly, int]]:
 _SEG_BACKED_KINDS = {"syn", "syn_ack", "fin", "fin_retx"}
 
 
-def _anomaly_hovertext(a: Anomaly, model: TsgModel) -> str:
+def _anomaly_hovertext(a: Anomaly, model: TsgModel, baseline: int = 0) -> str:
     """Render the hover text for one anomaly as multi-line HTML.
 
     Handshake/teardown markers (SYN/SA/FA/R FA) get enriched with the seq +
     ACK-RTT from their backing segment, since we strip those 1-byte segs
     from the data trace to keep the chart anchor unambiguous. Other kinds
-    fall through to the raw one_liner (split on its own ` · ` separators).
+    fall through to the raw one_liner.
 
-    Plotly renders `<br>` as a line break inside hover popovers — using it
-    here lets a long detail string stack into a readable column instead of
-    sprawling sideways across the chart.
+    When `baseline` is non-zero the SYN/SA/FA enriched line shows the seq
+    relative to the connection's baseline. The free-form one_liner produced
+    by tcp_inspect.py keeps its absolute seqs — re-parsing it here would
+    couple this module to that text format.
     """
     if a.kind in _SEG_BACKED_KINDS:
         for s in model.segments:
-            # Times are float epoch; an exact equality holds because both the
-            # segment and the flag-text annotation are sourced from the same
-            # xpl command's x coordinate (no rebinning happens between).
             if s.time != a.time:
                 continue
-            parts = [a.one_liner, f"seq {s.seq_start}"]
+            parts = [a.one_liner, f"seq {s.seq_start - baseline:,}"]
             if s.paired_rtt_ms is not None:
                 parts.append(f"ACKed {s.paired_rtt_ms:.1f} ms later")
             return "<br>".join(parts)
@@ -945,6 +952,7 @@ def _anomaly_annotations(
     xref: str = "x",
     yref: str = "y",
     show_info: bool = False,
+    baseline: int = 0,
 ) -> list[dict[str, Any]]:
     visible = [
         a
@@ -959,7 +967,7 @@ def _anomaly_annotations(
         text = _ANOMALY_GLYPH.get(a.kind, a.kind)
         if count > 1:
             text = f"{text} ×{count}"  # noqa: RUF001 — intentional Unicode multiplication sign
-        y = a.seq_lo if a.seq_lo is not None else 0
+        y = (a.seq_lo - baseline) if a.seq_lo is not None else 0
         yshift = _KIND_YSHIFT.get(a.kind, _DEFAULT_YSHIFT)
         if last_time is not None and (a.time - last_time) <= _ANOMALY_COLLISION_S:
             rank += 1
@@ -969,6 +977,11 @@ def _anomaly_annotations(
         xshift = rank * _COLLISION_XSHIFT_PX
         severity = SEVERITY_BY_KIND.get(a.kind, "info")
         color = _SEVERITY_COLOR[severity]
+        # Hovertext lives directly on the annotation so the popover fires on
+        # the visible glyph (xshift/yshift applied) instead of 14 px below at
+        # the bare data point — which is what the separate invisible-marker
+        # trace used to do. With no competing scatter trace at the same spot,
+        # the doubled-popover issue from the previous attempt doesn't recur.
         anns.append(
             {
                 "x": _epoch_to_iso(a.time),
@@ -980,11 +993,11 @@ def _anomaly_annotations(
                 "font": {"color": color, "size": 10, "family": "Menlo, monospace"},
                 "xshift": xshift,
                 "yshift": yshift,
-                # Hover is owned by `_anomaly_hover_trace` so each popover
-                # gets per-severity styling and there's exactly one popover
-                # per location. Setting hovertext + captureevents here would
-                # produce a second, default-styled popover stacked on top of
-                # the scatter trace's — the user saw both for SYN/SA/FA.
+                "hovertext": _anomaly_hovertext(a, model, baseline=baseline),
+                "hoverlabel": {
+                    "bgcolor": _SEVERITY_HOVER_BG[severity],
+                    "bordercolor": color,
+                },
             }
         )
     return anns
@@ -1028,75 +1041,19 @@ def _info_strip(
         parts.append(f"{n} {glyph}")
     if not parts:
         return None
+    # Anchor to the right edge of the subplot so the strip does not collide
+    # with the direction label that sits at the top-left of every subplot.
     return {
-        "x": 0.0,
+        "x": 1.0,
         "y": y_domain_top,
         "xref": f"{xref} domain",
         "yref": "paper",
         "text": "info: " + " · ".join(parts),
         "showarrow": False,
         "font": {"color": _SEVERITY_COLOR["info"], "size": 10, "family": "Menlo, monospace"},
-        "xanchor": "left",
+        "xanchor": "right",
         "yanchor": "bottom",
         "yshift": 2,
-    }
-
-
-# Just the detail text — the visible glyph IS the header. Repeating it
-# inside the popover wasted a line (e.g. a bold "S" above "SYN (initiator)").
-_ANOMALY_HOVER_TEMPLATE = "%{customdata[0]}<extra></extra>"
-
-
-def _anomaly_hover_trace(
-    model: TsgModel,
-    *,
-    xaxis_ref: str = "x",
-    yaxis_ref: str = "y",
-    show_info: bool = False,
-) -> dict[str, Any] | None:
-    """Invisible scatter trace co-located with anomaly annotations, sized so
-    Plotly's `hovermode: closest` picks it up before the nearest data segment.
-    Captures the case where the user hovers near (not exactly on) a label.
-
-    Per-point hoverlabel colors so a SYN's popover reads cyan, an RTO's reads
-    red, etc. — a single hardcoded red bordercolor was making every anomaly
-    tooltip look like an alarm. Filter info-tier anomalies when they're not
-    inlined as annotations (mirrors the visibility filter in
-    `_anomaly_annotations`) so hovering an empty region doesn't pull up an
-    invisible info marker.
-    """
-    visible = [
-        a
-        for a in model.anomalies
-        if show_info or SEVERITY_BY_KIND.get(a.kind, "info") != "info"
-    ]
-    if not visible:
-        return None
-    xs: list[Any] = []
-    ys: list[float] = []
-    cd: list[list[str]] = []
-    border_colors: list[str] = []
-    bg_colors: list[str] = []
-    for a in visible:
-        xs.append(_epoch_to_iso(a.time))
-        ys.append(float(a.seq_lo) if a.seq_lo is not None else 0.0)
-        cd.append([_anomaly_hovertext(a, model)])
-        severity = SEVERITY_BY_KIND.get(a.kind, "info")
-        border_colors.append(_SEVERITY_COLOR[severity])
-        bg_colors.append(_SEVERITY_HOVER_BG[severity])
-    return {
-        "type": "scattergl",
-        "mode": "markers",
-        "x": xs,
-        "y": ys,
-        "marker": {"color": "rgba(255, 85, 85, 0.0)", "size": 18},
-        "customdata": cd,
-        "hovertemplate": _ANOMALY_HOVER_TEMPLATE,
-        "name": "anomalies",
-        "showlegend": False,
-        "hoverlabel": {"bgcolor": bg_colors, "bordercolor": border_colors},
-        "xaxis": xaxis_ref,
-        "yaxis": yaxis_ref,
     }
 
 
@@ -1106,6 +1063,9 @@ def _in_flight_overlay(
     name: str,
     xaxis_ref: str = "x",
     yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
 ) -> dict[str, Any] | None:
     """In-flight area: y = current cumack + in_flight bytes. The area between
     this trace and the ACK staircase visualizes outstanding data.
@@ -1114,10 +1074,6 @@ def _in_flight_overlay(
         return None
     ack_times = [a.time for a in model.acks]
     ack_seqs = [a.ack_seq for a in model.acks]
-    # Anchor pre-first-ack overlay points to the first ack's seq (or the first
-    # segment's seq_start when there are no acks) so the overlay sits on the
-    # data band, not at y=0 — which would force the y-axis to autorange down
-    # to 0 and leave most of the chart empty.
     if ack_seqs:
         pre_first_baseline = ack_seqs[0]
     elif model.segments:
@@ -1132,7 +1088,7 @@ def _in_flight_overlay(
         return ack_seqs[i - 1] if i > 0 else pre_first_baseline
 
     xs = [_epoch_to_iso(t) for t, _ in model.in_flight]
-    ys = [_cumack_at(t) + ifl for t, ifl in model.in_flight]
+    ys = [_cumack_at(t) + ifl - baseline for t, ifl in model.in_flight]
     return {
         "type": "scattergl",
         "mode": "lines",
@@ -1142,8 +1098,8 @@ def _in_flight_overlay(
         "fillcolor": "rgba(85, 255, 255, 0.10)",
         "line": {"color": "rgba(85, 255, 255, 0.0)", "width": 0},
         "name": name,
-        "legendgroup": name,
-        "showlegend": True,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
         "hoverinfo": "skip",
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
@@ -1153,48 +1109,70 @@ def _in_flight_overlay(
 def _build_direction_traces(
     model: TsgModel,
     *,
-    prefix: str,
     xaxis_ref: str,
     yaxis_ref: str,
-    show_info: bool = False,
+    baseline: int = 0,
+    legend_seen: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Assemble all per-direction traces (data, retx, ack, rwin, in-flight)
-    bound to the given subplot axes. Skips traces with no data."""
+    """Assemble all per-direction traces bound to the given subplot axes.
+
+    Order matters: Plotly draws lower-index traces first, so later traces sit
+    on top. We want data sticks visible above the ack staircase (they share
+    the same y-range), and retx visible above data. In-flight keeps its
+    relative position after rwin so its `tonexty` fill anchors against rwin
+    the same way it did before.
+
+    Names are unprefixed ("data"/"ack"/...) and `legend_seen` dedupes across
+    directions: the second direction's traces use `showlegend=False` while
+    sharing the same `legendgroup`, so toggling one entry collapses both
+    panels' lines for that role.
+    """
+    if legend_seen is None:
+        legend_seen = set()
     out: list[dict[str, Any]] = []
-    seg_tr = _data_segment_trace(
-        model,
-        name=f"{prefix} data",
-        color=COLOR_MAP["white"],
-        xaxis_ref=xaxis_ref,
-        yaxis_ref=yaxis_ref,
-    )
-    if seg_tr is not None:
-        out.append(seg_tr)
-    rtx_tr = _retx_segment_trace(
-        model, name=f"{prefix} retx", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref
-    )
-    if rtx_tr is not None:
-        out.append(rtx_tr)
+
+    def _show(role: str) -> bool:
+        if role in legend_seen:
+            return False
+        legend_seen.add(role)
+        return True
+
     ack_tr = _ack_trace(
-        model, name=f"{prefix} ack", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref
+        model, name="ack", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
+        showlegend=_show("ack"), legendgroup="ack",
     )
     if ack_tr is not None:
         out.append(ack_tr)
     rwin_tr = _rwin_trace(
-        model, name=f"{prefix} rwin", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref
+        model, name="rwin", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
+        showlegend=_show("rwin"), legendgroup="rwin",
     )
     if rwin_tr is not None:
         out.append(rwin_tr)
     ifl_tr = _in_flight_overlay(
-        model, name=f"{prefix} in-flight", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref
+        model, name="in-flight", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
+        showlegend=_show("in-flight"), legendgroup="in-flight",
     )
     if ifl_tr is not None:
         out.append(ifl_tr)
-    hover_tr = _anomaly_hover_trace(
-        model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, show_info=show_info
+    seg_tr = _data_segment_trace(
+        model,
+        name="data",
+        color=COLOR_MAP["white"],
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+        showlegend=_show("data"),
+        legendgroup="data",
     )
-    if hover_tr is not None:
-        out.append(hover_tr)
+    if seg_tr is not None:
+        out.append(seg_tr)
+    rtx_tr = _retx_segment_trace(
+        model, name="retx", xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, baseline=baseline,
+        showlegend=_show("retx"), legendgroup="retx",
+    )
+    if rtx_tr is not None:
+        out.append(rtx_tr)
     return out
 
 
@@ -1223,6 +1201,23 @@ def _direction_label(model: TsgModel) -> str:
     if model.src and model.dst:
         return f"{model.src} → {model.dst}"
     return ""
+
+
+def _baseline_seq(model: TsgModel | None, seq_mode: str) -> int:
+    """Per-direction baseline for relative-seq display.
+
+    Use the minimum seq seen in either segments or acks — acks reference
+    this direction's own sent seqs, so they share the segment space.
+    Returns 0 for absolute mode or when the model is empty.
+    """
+    if model is None or seq_mode != "rel":
+        return 0
+    lo = None
+    for s in model.segments:
+        lo = s.seq_start if lo is None or s.seq_start < lo else lo
+    for a in model.acks:
+        lo = a.ack_seq if lo is None or a.ack_seq < lo else lo
+    return lo if lo is not None else 0
 
 
 def _capped_yaxis_range(model: TsgModel) -> list[float] | None:
@@ -1256,7 +1251,12 @@ def _capped_yaxis_range(model: TsgModel) -> list[float] | None:
     return [data_lo - margin, cap_hi + margin]
 
 
-def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, Any]:
+def to_tsg_figure(
+    pair: TsgModelPair,
+    *,
+    show_info: bool = False,
+    seq_mode: str = "abs",
+) -> dict[str, Any]:
     """Build a Plotly figure for the TSG metric from a TsgModelPair.
 
     Each direction lives in its own TCP sequence space (independent ISNs), so
@@ -1266,13 +1266,12 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
     subplot's y-axis auto-scales to its own data. When only one direction is
     populated we fall back to a single subplot.
 
-    Tooltips use numeric customdata + hovertemplate so the JSON stays small;
-    formatting happens JS-side.
+    `seq_mode="rel"` subtracts a per-direction baseline (min seq in segments
+    or acks) so the y-axis reads 0..bytes_sent instead of raw uint32s.
     """
     fwd = pair.fwd
     bwd = pair.bwd
 
-    # Title shows the canonical (forward) direction when available.
     if fwd is not None and fwd.src and fwd.dst:
         title = f"{fwd.src} → {fwd.dst}"
     elif bwd is not None and bwd.src and bwd.dst:
@@ -1280,7 +1279,19 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
     else:
         title = "time sequence graph"
 
-    layout = _base_layout(title, dragmode="pan", showlegend=True)
+    layout = _base_layout(title, dragmode="zoom", showlegend=True)
+    layout["legend"] = {
+        "orientation": "h",
+        "xanchor": "right",
+        "x": 1.0,
+        "yanchor": "bottom",
+        "y": 1.02,
+        "bgcolor": "rgba(0,0,0,0)",
+        "font": {"size": 11, "family": "Menlo, monospace"},
+    }
+
+    fwd_base = _baseline_seq(fwd, seq_mode)
+    bwd_base = _baseline_seq(bwd, seq_mode)
 
     if fwd is None and bwd is None:
         layout["xaxis"] = _tsg_xaxis(show_ticks=True)
@@ -1288,22 +1299,21 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
         layout["annotations"] = []
         return {"data": [], "layout": layout}
 
-    # Single-direction figure: one subplot, no axis splitting.
     if fwd is None or bwd is None:
         only = fwd if fwd is not None else bwd
-        prefix = "fwd" if fwd is not None else "bwd"
+        baseline = fwd_base if fwd is not None else bwd_base
         layout["xaxis"] = _tsg_xaxis(show_ticks=True)
         yaxis = _tsg_yaxis()
         only_range = _capped_yaxis_range(only)
         if only_range is not None:
-            yaxis["range"] = only_range
+            yaxis["range"] = [only_range[0] - baseline, only_range[1] - baseline]
             yaxis["autorange"] = False
         layout["yaxis"] = yaxis
         traces = _build_direction_traces(
-            only, prefix=prefix, xaxis_ref="x", yaxis_ref="y", show_info=show_info
+            only, xaxis_ref="x", yaxis_ref="y", baseline=baseline
         )
         annotations = _anomaly_annotations(
-            only, xref="x", yref="y", show_info=show_info
+            only, xref="x", yref="y", show_info=show_info, baseline=baseline
         )
         strip = _info_strip(only, xref="x", y_domain_top=1.0)
         if strip is not None:
@@ -1311,9 +1321,6 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
         layout["annotations"] = annotations
         return {"data": traces, "layout": layout}
 
-    # Both directions: stacked subplots. Forward top, backward bottom; x2
-    # matches x so pan/zoom on either subplot drives both. Each y-axis
-    # auto-scales to its own direction's sequence space.
     fwd_xaxis = _tsg_xaxis(show_ticks=False)
     fwd_xaxis["anchor"] = "y"
     fwd_yaxis = _tsg_yaxis()
@@ -1321,7 +1328,7 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
     fwd_yaxis["anchor"] = "x"
     fwd_range = _capped_yaxis_range(fwd)
     if fwd_range is not None:
-        fwd_yaxis["range"] = fwd_range
+        fwd_yaxis["range"] = [fwd_range[0] - fwd_base, fwd_range[1] - fwd_base]
         fwd_yaxis["autorange"] = False
 
     bwd_xaxis = _tsg_xaxis(show_ticks=True)
@@ -1333,7 +1340,7 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
     bwd_yaxis["anchor"] = "x2"
     bwd_range = _capped_yaxis_range(bwd)
     if bwd_range is not None:
-        bwd_yaxis["range"] = bwd_range
+        bwd_yaxis["range"] = [bwd_range[0] - bwd_base, bwd_range[1] - bwd_base]
         bwd_yaxis["autorange"] = False
 
     layout["xaxis"] = fwd_xaxis
@@ -1341,19 +1348,20 @@ def to_tsg_figure(pair: TsgModelPair, *, show_info: bool = False) -> dict[str, A
     layout["xaxis2"] = bwd_xaxis
     layout["yaxis2"] = bwd_yaxis
 
+    legend_seen: set[str] = set()
     traces = (
         _build_direction_traces(
-            fwd, prefix="fwd", xaxis_ref="x", yaxis_ref="y", show_info=show_info
+            fwd, xaxis_ref="x", yaxis_ref="y", baseline=fwd_base, legend_seen=legend_seen
         )
         + _build_direction_traces(
-            bwd, prefix="bwd", xaxis_ref="x2", yaxis_ref="y2", show_info=show_info
+            bwd, xaxis_ref="x2", yaxis_ref="y2", baseline=bwd_base, legend_seen=legend_seen
         )
     )
 
     annotations = _anomaly_annotations(
-        fwd, xref="x", yref="y", show_info=show_info
+        fwd, xref="x", yref="y", show_info=show_info, baseline=fwd_base
     ) + _anomaly_annotations(
-        bwd, xref="x2", yref="y2", show_info=show_info
+        bwd, xref="x2", yref="y2", show_info=show_info, baseline=bwd_base
     )
     for strip in (
         _info_strip(fwd, xref="x", y_domain_top=_FWD_DOMAIN[1]),
@@ -1410,11 +1418,18 @@ def _tput_xaxis(*, show_ticks: bool) -> dict[str, Any]:
     }
 
 
-def _tput_yaxis() -> dict[str, Any]:
+def _rate_scale_suffix(rate_unit: str) -> tuple[float, str]:
+    """Convert Bps → display value. `bits` multiplies by 8 and uses `bps`;
+    `bytes` keeps Bps and uses the legacy `B/s` suffix."""
+    return (8.0, "bps") if rate_unit == "bits" else (1.0, "B/s")
+
+
+def _tput_yaxis(rate_unit: str = "bytes") -> dict[str, Any]:
+    _, suffix = _rate_scale_suffix(rate_unit)
     return {
         "title": {"text": "throughput"},
         "tickformat": ".3s",
-        "ticksuffix": "B/s",
+        "ticksuffix": suffix,
         "gridcolor": GRID_COLOR,
         "zerolinecolor": ZERO_LINE_COLOR,
     }
@@ -1487,7 +1502,9 @@ def _envelope_trace(
     xaxis_ref: str,
     yaxis_ref: str,
     legend_seen: set[str],
+    rate_unit: str = "bytes",
 ) -> dict[str, Any] | None:
+    scale, suffix = _rate_scale_suffix(rate_unit)
     xs: list[Any] = []
     ys: list[Any] = []
     for s in model.samples:
@@ -1497,7 +1514,7 @@ def _envelope_trace(
                 ys.append(None)
         else:
             xs.append(_epoch_to_iso(s.t))
-            ys.append(s.max_Bps)
+            ys.append(s.max_Bps * scale)
     while xs and xs[0] is None:
         xs.pop(0)
         ys.pop(0)
@@ -1509,7 +1526,6 @@ def _envelope_trace(
     show = "ceiling" not in legend_seen
     if show:
         legend_seen.add("ceiling")
-    # scattergl OK here (no fill, unlike wire/goodput which need scatter for fill: tozeroy)
     return {
         "type": "scattergl",
         "mode": "lines",
@@ -1517,7 +1533,7 @@ def _envelope_trace(
         "y": ys,
         "line": {"color": "#888", "dash": "dot", "width": 1},
         "opacity": 0.6,
-        "hovertemplate": "ceiling %{y:.3s}B/s (rwin/RTT)<extra></extra>",
+        "hovertemplate": f"ceiling %{{y:.3s}}{suffix} (rwin/RTT)<extra></extra>",
         "name": "ceiling",
         "legendgroup": "ceiling",
         "showlegend": show,
@@ -1532,11 +1548,13 @@ def _wire_trace(
     xaxis_ref: str,
     yaxis_ref: str,
     legend_seen: set[str],
+    rate_unit: str = "bytes",
 ) -> dict[str, Any] | None:
     if not model.samples:
         return None
+    scale, suffix = _rate_scale_suffix(rate_unit)
     xs = [_epoch_to_iso(s.t) for s in model.samples]
-    ys = [s.wire_Bps for s in model.samples]
+    ys = [s.wire_Bps * scale for s in model.samples]
     show = "wire" not in legend_seen
     if show:
         legend_seen.add("wire")
@@ -1548,7 +1566,7 @@ def _wire_trace(
         "fill": "tozeroy",
         "fillcolor": "rgba(85,153,255,0.25)",
         "line": {"color": "#5599ff", "width": 1},
-        "hovertemplate": "wire %{y:.3s}B/s<extra></extra>",
+        "hovertemplate": f"wire %{{y:.3s}}{suffix}<extra></extra>",
         "name": "wire",
         "legendgroup": "wire",
         "showlegend": show,
@@ -1563,13 +1581,15 @@ def _goodput_trace(
     xaxis_ref: str,
     yaxis_ref: str,
     legend_seen: set[str],
+    rate_unit: str = "bytes",
 ) -> dict[str, Any] | None:
     if not model.samples:
         return None
     if all(s.goodput_Bps == 0.0 for s in model.samples):
         return None
+    scale, suffix = _rate_scale_suffix(rate_unit)
     xs = [_epoch_to_iso(s.t) for s in model.samples]
-    ys = [s.goodput_Bps for s in model.samples]
+    ys = [s.goodput_Bps * scale for s in model.samples]
     show = "goodput" not in legend_seen
     if show:
         legend_seen.add("goodput")
@@ -1581,7 +1601,7 @@ def _goodput_trace(
         "fill": "tozeroy",
         "fillcolor": "rgba(85,255,85,0.45)",
         "line": {"color": "#55ff55", "width": 1},
-        "hovertemplate": "goodput %{y:.3s}B/s<extra></extra>",
+        "hovertemplate": f"goodput %{{y:.3s}}{suffix}<extra></extra>",
         "name": "goodput",
         "legendgroup": "goodput",
         "showlegend": show,
@@ -1650,6 +1670,7 @@ def _build_tput_direction(
     show_info: bool,
     legend_seen: set[str],
     y_paper: float = 0.5,
+    rate_unit: str = "bytes",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Returns (traces, annotations) for one direction."""
     if not model.samples:
@@ -1657,7 +1678,9 @@ def _build_tput_direction(
         label = f"(no data sent {dir_label})" if dir_label else "(no data)"
         return [], [_no_data_annotation(label, y_paper=y_paper)]
 
-    y_range = _tput_yaxis_range(model.samples)
+    scale, _ = _rate_scale_suffix(rate_unit)
+    raw_range = _tput_yaxis_range(model.samples)
+    y_range = [raw_range[0] * scale, raw_range[1] * scale]
     traces: list[dict[str, Any]] = []
     anns: list[dict[str, Any]] = []
 
@@ -1667,15 +1690,15 @@ def _build_tput_direction(
         show_info=show_info, legend_seen=legend_seen,
     ))
 
-    env = _envelope_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    env = _envelope_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
     if env is not None:
         traces.append(env)
 
-    wire = _wire_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    wire = _wire_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
     if wire is not None:
         traces.append(wire)
 
-    gput = _goodput_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen)
+    gput = _goodput_trace(model, xaxis_ref=xaxis_ref, yaxis_ref=yaxis_ref, legend_seen=legend_seen, rate_unit=rate_unit)
     if gput is not None:
         traces.append(gput)
     elif all(s.goodput_Bps == 0.0 for s in model.samples):
@@ -1700,7 +1723,12 @@ def _build_tput_direction(
     return traces, anns
 
 
-def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) -> dict[str, Any]:
+def to_throughput_figure(
+    pair: ThroughputModelPair,
+    *,
+    show_info: bool = False,
+    rate_unit: str = "bytes",
+) -> dict[str, Any]:
     fwd = pair.fwd
     bwd = pair.bwd
 
@@ -1711,9 +1739,7 @@ def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) 
     else:
         title = "throughput"
 
-    layout = _base_layout(title, dragmode="pan", showlegend=True)
-    # Cliff annotations live near y_top, so the default top-right legend
-    # collides with them. Float the legend horizontally below the title.
+    layout = _base_layout(title, dragmode="zoom", showlegend=True)
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1724,23 +1750,30 @@ def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) 
         "font": {"size": 11, "family": "Menlo, monospace"},
     }
 
+    scale, _ = _rate_scale_suffix(rate_unit)
+
+    def _scaled_range(samples) -> list[float]:
+        r = _tput_yaxis_range(samples)
+        return [r[0] * scale, r[1] * scale]
+
     if fwd is None and bwd is None:
         layout["xaxis"] = _tput_xaxis(show_ticks=True)
-        layout["yaxis"] = _tput_yaxis()
+        layout["yaxis"] = _tput_yaxis(rate_unit)
         layout["annotations"] = [_no_data_annotation("no throughput data")]
         return {"data": [], "layout": layout}
 
     if fwd is None or bwd is None:
         only = fwd if fwd is not None else bwd
         legend_seen: set[str] = set()
-        yax = _tput_yaxis()
-        yax["range"] = _tput_yaxis_range(only.samples)
+        yax = _tput_yaxis(rate_unit)
+        yax["range"] = _scaled_range(only.samples)
         yax["autorange"] = False
         layout["xaxis"] = _tput_xaxis(show_ticks=True)
         layout["yaxis"] = yax
         traces, anns = _build_tput_direction(
             only, xaxis_ref="x", yaxis_ref="y",
             show_info=show_info, legend_seen=legend_seen,
+            rate_unit=rate_unit,
         )
         layout["annotations"] = anns
         return {"data": traces, "layout": layout}
@@ -1750,20 +1783,20 @@ def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) 
 
     fwd_xaxis = _tput_xaxis(show_ticks=False)
     fwd_xaxis["anchor"] = "y"
-    fwd_yax = _tput_yaxis()
+    fwd_yax = _tput_yaxis(rate_unit)
     fwd_yax["domain"] = list(_FWD_DOMAIN)
     fwd_yax["anchor"] = "x"
-    fwd_yax["range"] = _tput_yaxis_range(fwd.samples)
+    fwd_yax["range"] = _scaled_range(fwd.samples)
     fwd_yax["autorange"] = False
 
     bwd_xaxis = _tput_xaxis(show_ticks=True)
     bwd_xaxis["matches"] = "x"
     bwd_xaxis["anchor"] = "y2"
     bwd_xaxis["side"] = "bottom"
-    bwd_yax = _tput_yaxis()
+    bwd_yax = _tput_yaxis(rate_unit)
     bwd_yax["domain"] = list(_BWD_DOMAIN)
     bwd_yax["anchor"] = "x2"
-    bwd_yax["range"] = _tput_yaxis_range(bwd.samples)
+    bwd_yax["range"] = _scaled_range(bwd.samples)
     bwd_yax["autorange"] = False
 
     layout["xaxis"] = fwd_xaxis
@@ -1775,11 +1808,13 @@ def to_throughput_figure(pair: ThroughputModelPair, *, show_info: bool = False) 
         fwd, xaxis_ref="x", yaxis_ref="y",
         show_info=show_info, legend_seen=legend_seen,
         y_paper=(_FWD_DOMAIN[0] + _FWD_DOMAIN[1]) / 2,
+        rate_unit=rate_unit,
     )
     bwd_traces, bwd_anns = _build_tput_direction(
         bwd, xaxis_ref="x2", yaxis_ref="y2",
         show_info=show_info, legend_seen=legend_seen,
         y_paper=(_BWD_DOMAIN[0] + _BWD_DOMAIN[1]) / 2,
+        rate_unit=rate_unit,
     )
 
     annotations = fwd_anns + bwd_anns
