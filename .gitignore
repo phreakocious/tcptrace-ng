@@ -18,6 +18,8 @@ venv/
 # Editor
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # tcptrace-ng runtime cache (created next to pcaps)
 .tcptrace/
