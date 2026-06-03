@@ -655,3 +655,54 @@ async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypa
         assert seen_paths, "runner was never invoked"
         for p in seen_paths:
             assert p == app_mod.state.effective_pcap, f"runner got {p}, not decap path"
+
+
+async def test_conn_click_renders_findings_panel(user: User, tmp_path, monkeypatch):
+    pcap = tmp_path / "f.pcap"
+    pcap.write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    app_mod = importlib.import_module("tcptrace_ng.app")
+
+    from tcptrace_ng.classifier import Class
+    from tcptrace_ng.diagnose import Finding
+    from tcptrace_ng.stats_parser import ConnStats
+
+    rows = [ConnStats(
+        n=1, host_a="10.0.0.1:50000", host_b="10.0.0.2:443", client_is_a=True,
+        total_bytes=4000, total_packets=14, duration_s=0.2, rexmt_packets=2,
+        has_rst=False, complete_handshake=True, verdict=Class.NORMAL,
+        fwd_ctx="", bwd_ctx="",
+    )]
+    fake_result = AnalyzeResult(details_text="", xpl_files=[])
+    finding = Finding(code="loss_storm", severity="bad", scope="a2b",
+                      headline="High retransmission rate", detail="18 of 120 segs retransmitted")
+
+    class _InlineRun:
+        @staticmethod
+        async def io_bound(fn, *a, **k):
+            return fn(*a, **k)
+
+    with (
+        patch.object(app_mod, "analyze_all", return_value=rows),
+        patch.object(app_mod, "analyze_connection", return_value=fake_result),
+        patch.object(app_mod, "diagnose", return_value=[finding]),
+        patch.object(app_mod, "run", _InlineRun),
+    ):
+        app_mod.build_page()
+        await user.open("/")
+        select = _select_element(user)
+        select.set_value(str(pcap))
+        await user.should_see("10.0.0.1:50000")
+
+        items = _conn_items(user)
+        assert items, "expected a conn item in sidebar"
+        items[0]._handle_event({"listener_id": next(iter(items[0]._event_listeners)), "args": {}})
+        for _ in range(20):
+            await asyncio.sleep(0)
+            # Wait on findings (computed just after analyses) — the thing asserted below.
+            if app_mod.state.selected_conn == 1 and 1 in app_mod.state.findings:
+                break
+
+        assert app_mod.state.findings.get(1) == [finding]
+        await user.should_see("High retransmission rate")  # findings panel
+        await user.should_see("⚠1")  # sidebar issue badge

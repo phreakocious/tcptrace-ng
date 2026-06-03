@@ -37,6 +37,7 @@ from .cache import (
 from .classifier import Class, classify
 from .csum import CsumEvent, scan_pcap as scan_csums
 from .decap import DECAP_VERSION, decap_pcap, detect_encaps
+from .diagnose import Finding, diagnose, severity_to_class
 from .offload import detect_offload
 from .plotly_adapter import to_paired_plotly_figure, to_plotly_figure, to_throughput_figure, to_tsg_figure
 from .tcp_inspect import synthesize as synthesize_tsg
@@ -145,6 +146,10 @@ class _State:
         self.chip_filters: set[str] = set()
         self.sort_key: str = "n"
         self.analyses: dict[int, AnalyzeResult] = {}
+        # Per-connection diagnose() output, computed at analysis time. Shares
+        # the analyses lifecycle (NOT figure_cache): display-only toggles don't
+        # invalidate findings.
+        self.findings: dict[int, list[Finding]] = {}
         # Built plotly figure dicts keyed by (conn_n, metric). Populated lazily
         # when a tab is activated; survives tab switches and re-clicks so
         # already-built figures don't re-parse the xpl or rebuild the dict.
@@ -295,6 +300,55 @@ _VERDICT_CSS = {
     Class.BAD: "tcptrace-dot-bad",
     Class.NORMAL: "tcptrace-dot-normal",
 }
+
+
+def _issue_summary(findings: list[Finding]) -> tuple[int, Class] | None:
+    """(#issues, worst Class) over interesting+bad findings, else None.
+
+    'good' findings (e.g. capture_vantage) never drive the ⚠N badge.
+    """
+    issues = [f for f in findings if f.severity in ("interesting", "bad")]
+    if not issues:
+        return None
+    worst = Class.BAD if any(f.severity == "bad" for f in issues) else Class.LOOK
+    return (len(issues), worst)
+
+
+# _issue_summary only ever returns BAD or LOOK (issues are interesting+bad).
+_WARN_CLASS = {Class.BAD: "conn-warn-bad", Class.LOOK: "conn-warn-look"}
+
+
+def _warn_badge_html(findings: list[Finding]) -> str:
+    """`<span>⚠N</span>` colored by worst severity, or '' when no issues."""
+    summary = _issue_summary(findings)
+    if summary is None:
+        return ""
+    count, worst = summary
+    return f'<span class="conn-warn {_WARN_CLASS[worst]}">⚠{count}</span>'
+
+
+def _findings_panel_html(findings: list[Finding], fwd_label: str, bwd_label: str) -> str:
+    """Stacked findings rows for the main-panel header. '' when empty.
+
+    Findings arrive severity-sorted from diagnose(). Glyph reuses the sidebar
+    dot (tcptrace-conn-dot + _VERDICT_CSS); scope tag uses the connection's
+    direction labels when known.
+    """
+    if not findings:
+        return ""
+    scope_label = {"a2b": fwd_label or "a→b", "b2a": bwd_label or "b→a", "conn": "conn"}
+    rows: list[str] = []
+    for f in findings:
+        dot_cls = _VERDICT_CSS[severity_to_class(f.severity)]
+        rows.append(
+            f'<div class="finding-row">'
+            f'<span class="tcptrace-conn-dot {dot_cls}"></span>'
+            f'<span class="finding-head">{_escape_html(f.headline)}</span>'
+            f'<span class="finding-scope">{_escape_html(scope_label[f.scope])}</span>'
+            f'<span class="finding-detail">{_escape_html(f.detail)}</span>'
+            f"</div>"
+        )
+    return f'<div class="tcptrace-findings">{"".join(rows)}</div>'
 
 
 _BULK_BYTES_THRESHOLD = 100 * 1024  # 100 KB; hardcoded per spec
@@ -560,6 +614,26 @@ def _build_tsg_model(
         bad_csum_times_fwd=fwd_csum,
         bad_csum_times_bwd=bwd_csum,
     )
+
+
+def _compute_findings(n: int) -> list[Finding]:
+    """Build connection n's TSG model and run diagnose(). Pure read of state.
+
+    Runs off the event loop (callers wrap it in run.io_bound). diagnose() today
+    consumes only stats + tsg; tput/offload/csum are reserved, so we pass None /
+    defaults. A connection with no TSG xpl yields tsg=None (stats-only findings).
+    """
+    result = state.analyses.get(n)
+    if result is None:
+        return []
+    stats = next((r for r in state.stats if isinstance(r, ConnStats) and r.n == n), None)
+    g_tsg = next((g for g in group_xpls(result.xpl_files) if g.metric == "tsg"), None)
+    tsg = (
+        _build_tsg_model(g_tsg.forward, g_tsg.backward, result.details_text)
+        if g_tsg is not None
+        else None
+    )
+    return diagnose(stats, tsg, None)
 
 
 def _format_bytes(n: float | int | None) -> str:
@@ -1064,6 +1138,9 @@ def build_page() -> None:
                         ui.label(
                             f"{bwd_label}  {_apply_rate_unit_to_ctx(bwd_ctx, state.rate_unit)}"
                         ).classes("tcptrace-context")
+                    _findings = state.findings.get(n)
+                    if _findings:
+                        ui.html(_findings_panel_html(_findings, fwd_label, bwd_label))
                     if n in state.analyses:
                         groups, tabs, default_tab = _render_tabs_head(state.analyses[n])
                 if n not in state.analyses:
@@ -1380,6 +1457,7 @@ def build_page() -> None:
                                 f'<span class="conn-num">{row.n}</span>'
                                 f'<span class="tcptrace-conn-dot {dot_cls}"></span>'
                                 f'<span class="conn-badges">{_escape_html(badge_str)}</span>'
+                                f"{_warn_badge_html(state.findings.get(row.n, []))}"
                                 f"</div>"
                                 f'<div class="conn-host">{_escape_html(row.host_a)}</div>'
                                 f'<div class="conn-host">↔ {_escape_html(row.host_b)}</div>'
@@ -1453,6 +1531,11 @@ def build_page() -> None:
                 state.analyses[n] = result
             refresh_cache_label()
             _refresh_download_btn()
+            if n not in state.findings:
+                try:
+                    state.findings[n] = await run.io_bound(_compute_findings, n)
+                except Exception:
+                    state.findings[n] = []
             render_main()
             render_sidebar()
 
@@ -1528,6 +1611,7 @@ def build_page() -> None:
             state.selected_conn = None
             state.stats = []
             state.analyses = {}
+            state.findings = {}
             state.figure_cache = {}
             state.conn_filter = ""
             filter_input.set_value("")
@@ -1637,6 +1721,7 @@ def build_page() -> None:
             if root.exists():
                 _sh.rmtree(root)
             state.analyses.clear()
+            state.findings.clear()
             state.figure_cache.clear()
             state.conns_with_lro.clear()
             _sync_lro_warning(state)
@@ -1658,6 +1743,7 @@ def build_page() -> None:
                 return
             clear_pcap_cache(state.selected_pcap)
             state.analyses.clear()
+            state.findings.clear()
             state.figure_cache.clear()
             state.conns_with_lro.clear()
             _sync_lro_warning(state)

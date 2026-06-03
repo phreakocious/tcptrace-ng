@@ -19,3 +19,11 @@ def test_dark_css_styles_sidebar_and_header():
     assert ".tcptrace-header" in DARK_CSS
     assert ".tcptrace-sidebar" in DARK_CSS
     assert ".tcptrace-conn-row" in DARK_CSS
+
+
+def test_dark_css_styles_findings_panel_and_warn_badge():
+    assert ".tcptrace-findings" in DARK_CSS
+    assert ".finding-row" in DARK_CSS
+    assert ".finding-detail" in DARK_CSS
+    assert ".conn-warn" in DARK_CSS
+    assert ".conn-warn-bad" in DARK_CSS

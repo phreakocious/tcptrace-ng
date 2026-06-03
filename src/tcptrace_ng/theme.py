@@ -108,6 +108,18 @@ body, .nicegui-content, .q-page, .q-layout {
 .tcptrace-dot-bad    { background: #ff5555; }
 .tcptrace-dot-normal { background: #555; }
 
+/* ---- diagnosis findings ---- */
+.tcptrace-findings { display: flex; flex-direction: column; gap: 7px; margin: 8px 0 4px; }
+.finding-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 2px 8px; align-items: baseline; }
+.finding-row .tcptrace-conn-dot { margin-top: 5px; }
+.finding-head { color: #ddd; font-size: 13px; }
+.finding-scope { font-family: Menlo, monospace; font-size: 10px; color: #777; justify-self: end; white-space: nowrap; }
+.finding-detail { grid-column: 2 / 4; color: #888; font-size: 11px; line-height: 1.35; }
+.tcptrace-conn-row .conn-warn { font-family: Menlo, monospace; font-size: 10px; font-weight: 600; }
+.tcptrace-conn-row .conn-warn-good { color: #00ff00; }
+.tcptrace-conn-row .conn-warn-look { color: #ffff00; }
+.tcptrace-conn-row .conn-warn-bad  { color: #ff5555; }
+
 /* ---- main panel ---- */
 .tcptrace-main {
     padding: 18px 22px;

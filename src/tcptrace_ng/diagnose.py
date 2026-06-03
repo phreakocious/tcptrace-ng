@@ -166,7 +166,9 @@ def _direction_is_coalesced(model) -> bool:
     return any((s.seq_end - s.seq_start) > _OVERSIZED_SEG_BYTES for s in model.segments)
 
 
-def _loss_storm(tsg: TsgModelPair) -> list[Finding]:
+def _loss_storm(tsg: TsgModelPair | None) -> list[Finding]:
+    if tsg is None:
+        return []
     out: list[Finding] = []
     for model, scope in ((tsg.fwd, "a2b"), (tsg.bwd, "b2a")):
         if model is None:
@@ -218,8 +220,8 @@ def _loss_storm(tsg: TsgModelPair) -> list[Finding]:
 
 def diagnose(
     stats: ConnStats | None,
-    tsg: TsgModelPair,
-    tput: ThroughputModelPair,
+    tsg: TsgModelPair | None,
+    tput: ThroughputModelPair | None,
     *,
     offload: OffloadReport | None = None,
     csum_events: Sequence[CsumEvent] = (),

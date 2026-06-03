@@ -221,3 +221,14 @@ def test_loss_storm_excludes_spurious_retx():
         segs[i] = _data_seg(float(i), i * 1448, (i + 1) * 1448, rtx="spurious")
     tsg = TsgModelPair(fwd=TsgModel(direction="a2b", segments=segs, acks=[]))
     assert _loss_storm(tsg) == []
+
+
+def test_diagnose_accepts_none_tsg_runs_capture_vantage_only():
+    # tsg=None must not crash; only stats-based detectors run.
+    stats = _stats(rtt_3whs_a=80.0, rtt_3whs_b=0.1)
+    out = diagnose(stats, None, None)
+    assert [f.code for f in out] == ["capture_vantage"]
+
+
+def test_diagnose_all_none_returns_empty():
+    assert diagnose(None, None, None) == []
