@@ -29,7 +29,7 @@ def _resolve_tcptrace() -> str:
     """Locate the tcptrace binary: $TCPTRACE_BIN > vendored > PATH.
 
     The vendored copy lives at `<repo>/vendor/tcptrace/tcptrace` (a submodule
-    of github.com/blitz/tcptrace, built via `make vendor-tcptrace`). Only
+    of github.com/phreakocious/tcptrace, built via `make vendor-tcptrace`). Only
     findable when running from a source checkout — installed wheels fall back
     to PATH.
     """
