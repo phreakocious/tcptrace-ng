@@ -25,7 +25,7 @@ from .classifier import Class, classify
 # fields for connections past 13 (two-letter host labels: aa/ab, …).
 # v3 adds per-direction RTT min/avg/max fields (from tcptrace -r output).
 # v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
-STATS_PARSER_VERSION = "4"
+STATS_PARSER_VERSION = "5"  # v5 adds rtt_3whs_a/b
 
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",
@@ -56,6 +56,10 @@ _RTT_MAX_RE = re.compile(
 )
 _RTT_AVG_RE = re.compile(
     r"^\s*RTT avg:\s+(\d+\.\d+)\s+ms\s+RTT avg:\s+(\d+\.\d+)\s+ms",
+    re.MULTILINE,
+)
+_RTT_3WHS_RE = re.compile(
+    r"^\s*RTT from 3WHS:\s+(\d+\.\d+)\s+ms\s+RTT from 3WHS:\s+(\d+\.\d+)\s+ms",
     re.MULTILINE,
 )
 
@@ -184,6 +188,8 @@ class ConnStats:
     mss_b: int | None = None
     wscale_a: int | None = None
     wscale_b: int | None = None
+    rtt_3whs_a: float | None = None
+    rtt_3whs_b: float | None = None
 
 
 def build_context_lines(body: str) -> tuple[str, str]:
@@ -225,6 +231,7 @@ def _parse_block(n: int, body: str) -> ConnStats:
     rtt_avg_a, rtt_avg_b = _pair_floats(_RTT_AVG_RE, body)
     mss_a, mss_b = _pair_ints(_MSS_RE, body)
     wscale_a, wscale_b = _pair_ints(_WS_RE, body)
+    rtt_3whs_a, rtt_3whs_b = _pair_floats(_RTT_3WHS_RE, body)
     return ConnStats(
         n=n,
         host_a=host_a,
@@ -249,4 +256,6 @@ def _parse_block(n: int, body: str) -> ConnStats:
         mss_b=mss_b,
         wscale_a=wscale_a,
         wscale_b=wscale_b,
+        rtt_3whs_a=rtt_3whs_a,
+        rtt_3whs_b=rtt_3whs_b,
     )

@@ -22,6 +22,9 @@ venv/
 # tcptrace-ng runtime cache (created next to pcaps)
 .tcptrace/
 
+# diag_pipeline test-helper scratch (tcptrace xpl output, regenerable)
+.pipeline/
+
 # Captures — don't commit; this is a tool, not a dataset
 *.pcap
 *.pcapng

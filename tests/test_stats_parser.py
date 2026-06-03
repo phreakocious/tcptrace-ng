@@ -315,3 +315,19 @@ TCP connection 1:
     assert rows[0].mss_b is None
     assert rows[0].wscale_a is None
     assert rows[0].wscale_b is None
+    assert rows[0].rtt_3whs_a is None
+    assert rows[0].rtt_3whs_b is None
+
+
+def test_parses_rtt_from_3whs():
+    body = """TCP connection 1:
+\thost a:        10.0.0.1:50000
+\thost b:        10.0.0.2:443
+\tcomplete conn: yes
+   a->b:\t\t\t      b->a:
+     SYN/FIN pkts sent:       1/1           SYN/FIN pkts sent:       1/1
+     RTT from 3WHS:          80.0 ms        RTT from 3WHS:           0.1 ms
+"""
+    conns = parse_stats(body)
+    assert conns[0].rtt_3whs_a == 80.0
+    assert conns[0].rtt_3whs_b == 0.1
