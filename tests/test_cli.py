@@ -69,6 +69,24 @@ def test_pick_free_port_falls_back_when_preferred_busy():
     assert picked > 0
 
 
+def test_main_suppresses_nicegui_welcome_and_prints_branded_banner(tmp_path, capsys):
+    """NiceGUI's default 'NiceGUI ready to go on …' message is generic and
+    doesn't tell the user which app they just started. Suppress it via
+    show_welcome_message=False and print our own branded line with the
+    resolved port."""
+    with (
+        patch("tcptrace_ng.cli.ui") as mock_ui,
+        patch("tcptrace_ng.cli.build_page"),
+        patch("tcptrace_ng.cli.os.chdir"),
+    ):
+        main([str(tmp_path), "--no-browser", "--port", "9876"])
+    kwargs = mock_ui.run.call_args.kwargs
+    assert kwargs["show_welcome_message"] is False
+    out = capsys.readouterr().out
+    assert "tcptrace-ng" in out
+    assert "9876" in out
+
+
 def test_main_auto_picks_port_when_omitted(tmp_path):
     """The CLI's --port help text promises 'pick free' on omission. Previously
     omitting --port forwarded None to NiceGUI, which would refuse to start if

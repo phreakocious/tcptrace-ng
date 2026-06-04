@@ -64,12 +64,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     # busy); omitting --port auto-picks so the canonical default port being
     # taken doesn't keep the UI from launching.
     port = args.port if args.port is not None else _pick_free_port()
+    # Replace NiceGUI's generic "NiceGUI ready to go" line with a branded
+    # banner that names the app and the URL the user can click.
+    print(f"tcptrace-ng → http://localhost:{port}", flush=True)
     ui.run(
         port=port,
         show=not args.no_browser,
         reload=False,
         title="tcptrace-ng",
         dark=True,
+        show_welcome_message=False,
     )
 
 
