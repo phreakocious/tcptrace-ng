@@ -1247,6 +1247,17 @@ def _tsg_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "gridcolor": GRID_COLOR,
         "zerolinecolor": ZERO_LINE_COLOR,
         "showticklabels": show_ticks,
+        # Full-height vertical hover crossbar — helps correlate events between
+        # the fwd/bwd panels. spikemode=across spans the plot area;
+        # spikesnap=cursor follows the mouse instead of snapping to the
+        # nearest data point. Needs hovermode=x at the layout level so the
+        # spike activates between data points, not only on top of them.
+        "showspikes": True,
+        "spikemode": "across",
+        "spikesnap": "cursor",
+        "spikethickness": 1,
+        "spikecolor": "#666",
+        "spikedash": "dot",
     }
     return xaxis
 
@@ -1339,6 +1350,7 @@ def to_tsg_figure(
     # was just duplicated text occupying the room the legend bar needs.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
+    layout["hovermode"] = "x"  # arms the full-height x-axis spike crossbar
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1485,6 +1497,13 @@ def _tput_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "zerolinecolor": ZERO_LINE_COLOR,
         "showticklabels": show_ticks,
         "title": {"text": "time" if show_ticks else ""},
+        # See _tsg_xaxis for spike rationale.
+        "showspikes": True,
+        "spikemode": "across",
+        "spikesnap": "cursor",
+        "spikethickness": 1,
+        "spikecolor": "#666",
+        "spikedash": "dot",
     }
 
 
@@ -1855,6 +1874,7 @@ def to_throughput_figure(
     # Title omitted: per-panel labels carry the direction, see to_tsg_figure.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
+    layout["hovermode"] = "x"
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",

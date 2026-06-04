@@ -560,6 +560,30 @@ def test_tsg_figure_has_no_top_title():
     assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
 
 
+def test_tsg_xaxis_has_full_height_hover_spike():
+    """A full-height vertical line at the cursor's x position helps correlate
+    events between the fwd/bwd panels. Plotly's `showspikes`+`spikemode:
+    across` does this; the layout's `hovermode` must be x-locked so the spike
+    follows the cursor instead of snapping per-point per-trace."""
+    fwd = TsgModel(src="1.1.1.1:1", dst="2.2.2.2:2", direction="a2b")
+    bwd = TsgModel(src="2.2.2.2:2", dst="1.1.1.1:1", direction="b2a")
+    fig = to_tsg_figure(TsgModelPair(fwd=fwd, bwd=bwd))
+    for ax in ("xaxis", "xaxis2"):
+        assert fig["layout"][ax].get("showspikes") is True, f"{ax} missing spike"
+        assert fig["layout"][ax].get("spikemode") == "across"
+    assert fig["layout"].get("hovermode") in ("x", "x unified")
+
+
+def test_throughput_xaxis_has_full_height_hover_spike():
+    fwd = _tput_model(samples=(_sample(1.0),))
+    bwd = _tput_model(samples=(_sample(2.0),), src="2.2.2.2:2", dst="1.1.1.1:1")
+    fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+    for ax in ("xaxis", "xaxis2"):
+        assert fig["layout"][ax].get("showspikes") is True, f"{ax} missing spike"
+        assert fig["layout"][ax].get("spikemode") == "across"
+    assert fig["layout"].get("hovermode") in ("x", "x unified")
+
+
 def test_throughput_figure_has_no_top_title():
     fwd = _tput_model(samples=(_sample(1.0),))
     fig = to_throughput_figure(ThroughputModelPair(fwd=fwd))
