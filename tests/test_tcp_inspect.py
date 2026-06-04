@@ -490,6 +490,79 @@ line 1.500 1000 1.500 1100
     assert "rto" in kinds
 
 
+def test_rwin_known_when_yellow_unchanged_between_acks():
+    """tcptrace omits the yellow vertical when the advertised window doesn't
+    change between two ACKs — it only emits a horizontal yellow line ending
+    at the next ACK's time plus a utick at that point. Previously we only
+    consulted yellow verticals, so those ACKs got rwin_known=False and
+    rwin=0, collapsing the rwin trace to ack_seq for one sample and creating
+    a misleading vertical spike on the chart. The horizontal endpoint + tick
+    carry the same level information and must be honored."""
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+green
+line 0.0 1000 1.0 1000
+line 1.0 1000 1.0 1100
+line 1.0 1100 2.0 1100
+line 2.0 1100 2.0 1200
+yellow
+line 0.0 5000 1.0 5000
+line 1.0 5000 1.0 5500
+line 1.0 5500 2.0 5500
+utick 2.0 5500
+"""
+    pair = synthesize(parse_xpl(xpl_text), None, "")
+    acks = pair.fwd.acks
+    assert len(acks) == 2
+    # rwin level stayed at 5500 between t=1 and t=2; ack 2 at seq 1200.
+    assert acks[1].rwin_known is True, "yellow endpoint/tick at ack time should make rwin known"
+    assert acks[1].rwin == 5500 - 1200
+
+
+def test_rwin_uses_post_step_endpoint_on_window_shrink():
+    """tcptrace's yellow vertical at an ACK is `line x OLD x NEW` (trace.c:2345
+    — y1 is the old windowend, y2 is the new one). Using `max(y1, y2)` was a
+    grow-only convenience that silently returned the OLD level on shrinks,
+    leaving rwin frozen at the prior value, masking downstream win_shrink /
+    zero_win detection, and pinning the chart's yellow line at the old top."""
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+green
+line 0.0 1000 1.0 1000
+line 1.0 1000 1.0 1100
+line 1.0 1100 2.0 1100
+line 2.0 1100 2.0 1200
+yellow
+line 0.0 6500 1.0 6500
+line 1.0 6500 1.0 7000
+line 1.0 7000 2.0 7000
+line 2.0 7000 2.0 5000
+"""
+    pair = synthesize(parse_xpl(xpl_text), None, "")
+    acks = pair.fwd.acks
+    assert len(acks) == 2
+    # ack 1 at seq 1100 with window top 7000 → rwin = 5900 (grow).
+    assert acks[0].rwin == 7000 - 1100
+    # ack 2 at seq 1200 with window top 5000 (shrink from 7000) → rwin = 3800.
+    assert acks[1].rwin == 5000 - 1200, "post-step y2 should govern; max() returns the old top"
+    # win_shrink anomaly should fire — prior code missed it because rwin
+    # appeared unchanged.
+    kinds = [a.kind for a in pair.fwd.anomalies]
+    assert "win_shrink" in kinds or "win_shrink_large" in kinds
+
+
 def test_anomaly_zero_win_when_rwin_zero_at_ack():
     xpl_text = """\
 timeval double

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from .stats_parser import ConnStats, parse_stats
-from .xpl_parser import Arrow, Line, Text, XplPlot
+from .xpl_parser import Arrow, Line, Text, Tick, XplPlot
 
 
 @dataclass(frozen=True)
@@ -326,21 +326,39 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     sack_by_time: dict[float, list[tuple[int, int]]] = {}  # time -> [(lo, hi), ...]
 
     for cmd in xpl.commands:
-        if isinstance(cmd, Line) and _is_vertical(cmd):
+        if isinstance(cmd, Line):
             if cmd.color == "green":
-                if cmd.y2 != cmd.y1:
-                    green_steps.append((cmd.x1, int(max(cmd.y1, cmd.y2))))
-                else:
-                    green_zero.append((cmd.x1, int(cmd.y1)))
+                if _is_vertical(cmd):
+                    if cmd.y2 != cmd.y1:
+                        green_steps.append((cmd.x1, int(max(cmd.y1, cmd.y2))))
+                    else:
+                        green_zero.append((cmd.x1, int(cmd.y1)))
             elif cmd.color == "yellow":
-                yellow_at_time[cmd.x1] = int(max(cmd.y1, cmd.y2))
-            elif cmd.color == "purple":
+                # The rwin track is a step function. tcptrace emits the
+                # vertical as `line x OLD x NEW` (trace.c:2345), so y2 is the
+                # post-step level — using max() returned OLD on shrinks. The
+                # bracketing horizontal carries the OLD level at both
+                # endpoints; record those via setdefault so a later vertical
+                # at the same x can override with the new level. Horizontal
+                # endpoints are also the only signal when the rwin doesn't
+                # change between two ACKs (tcptrace omits the vertical then).
+                if _is_vertical(cmd):
+                    yellow_at_time[cmd.x1] = int(cmd.y2)
+                else:
+                    yellow_at_time.setdefault(cmd.x1, int(cmd.y1))
+                    yellow_at_time.setdefault(cmd.x2, int(cmd.y2))
+            elif cmd.color == "purple" and _is_vertical(cmd):
                 # Each SACK block is a purple vertical line spanning
                 # sack_left..sack_right at the report time (tcptrace draws it with
                 # plotter_line + hticks, NOT a box — the box glyph is the 2-coord
                 # FIN marker — and in purple, not yellow; trace.c:127,2398-2412).
                 lo, hi = sorted((int(cmd.y1), int(cmd.y2)))
                 sack_by_time.setdefault(cmd.x1, []).append((lo, hi))
+        elif isinstance(cmd, Tick) and cmd.color == "yellow":
+            # utick/dtick on the rwin track marks the level at a specific
+            # time (one is emitted at every ACK, even when the rwin doesn't
+            # change). Fallback when no Line endpoint already recorded it.
+            yellow_at_time.setdefault(cmd.x, int(cmd.y))
         elif isinstance(cmd, Text) and cmd.color == "green":
             label = cmd.label.strip()
             if label.isdigit():
