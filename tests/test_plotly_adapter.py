@@ -1652,3 +1652,43 @@ class TestThroughputFigure:
         fig = to_throughput_figure(ThroughputModelPair(fwd=model))
         y_range = fig["layout"]["yaxis"]["range"]
         assert y_range[1] == pytest.approx(80000.0 * 1.3)
+
+    def test_ceiling_pegged_at_y_top_when_runaway(self):
+        """When BDP ceiling sits far above the data band — typical for
+        app-limited connections — _tput_yaxis_range deliberately sizes the
+        axis to the data so the data stays visible. The ceiling trace must
+        still render: clamped to the y-axis top with the real value carried
+        in customdata so hover reveals it. Silently dropping the line off-
+        screen gave network engineers no indication a ceiling existed at
+        all."""
+        high_max = 1_000_000.0
+        samples = (
+            _sample(1.0, wire=10000.0, max_bps=high_max),
+            _sample(1.1, wire=10000.0, max_bps=high_max),
+        )
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        y_max = fig["layout"]["yaxis"]["range"][1]
+        ceil = next(t for t in fig["data"] if t.get("name") == "ceiling")
+        # Every y value clamped at the y-axis top (real ceiling >> y_max).
+        assert all(y == pytest.approx(y_max) for y in ceil["y"]), (
+            f"expected all ceiling y at {y_max}; got {ceil['y']}"
+        )
+        # Real (un-clamped) values carried in customdata for the hover.
+        assert list(ceil["customdata"]) == [high_max, high_max]
+        # Hovertemplate references customdata, not y.
+        assert "%{customdata" in ceil["hovertemplate"]
+
+    def test_ceiling_uses_real_y_when_within_range(self):
+        """Mixed case: ceiling stays inside the y-axis, so y values are the
+        real ceiling values (no clamping). Customdata still mirrors y so
+        the hovertemplate is consistent across both cases."""
+        samples = (
+            _sample(1.0, wire=10000.0, max_bps=20000.0),
+            _sample(1.1, wire=10000.0, max_bps=20000.0),
+        )
+        model = _tput_model(samples=samples)
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        ceil = next(t for t in fig["data"] if t.get("name") == "ceiling")
+        assert ceil["y"] == [20000.0, 20000.0]
+        assert list(ceil["customdata"]) == [20000.0, 20000.0]

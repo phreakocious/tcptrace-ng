@@ -1519,24 +1519,38 @@ def _envelope_trace(
     yaxis_ref: str,
     legend_seen: set[str],
     rate_unit: str = "bytes",
+    y_max: float | None = None,
 ) -> dict[str, Any] | None:
+    """The BDP ceiling (rwin/RTT) — drawn as a dashed line. When the ceiling
+    sits well above the data, _tput_yaxis_range sizes the axis to the data
+    so the data band stays visible. To keep the ceiling discoverable rather
+    than silently clipping it off-screen, pass `y_max` (scaled units) and the
+    line is clamped at the axis top with the un-clamped value carried in
+    customdata so hover always shows the real ceiling.
+    """
     scale, suffix = _rate_scale_suffix(rate_unit)
     xs: list[Any] = []
     ys: list[Any] = []
+    real_ys: list[Any] = []
     for s in model.samples:
         if s.max_Bps is None:
             if xs and xs[-1] is not None:
                 xs.append(None)
                 ys.append(None)
+                real_ys.append(None)
         else:
+            real = s.max_Bps * scale
             xs.append(_epoch_to_iso(s.t))
-            ys.append(s.max_Bps * scale)
+            ys.append(min(real, y_max) if y_max is not None else real)
+            real_ys.append(real)
     while xs and xs[0] is None:
         xs.pop(0)
         ys.pop(0)
+        real_ys.pop(0)
     while xs and xs[-1] is None:
         xs.pop()
         ys.pop()
+        real_ys.pop()
     if not xs:
         return None
     show = "ceiling" not in legend_seen
@@ -1547,9 +1561,10 @@ def _envelope_trace(
         "mode": "lines",
         "x": xs,
         "y": ys,
+        "customdata": real_ys,
         "line": {"color": "#888", "dash": "dot", "width": 1},
         "opacity": 0.6,
-        "hovertemplate": f"ceiling %{{y:.3s}}{suffix} (rwin/RTT)<extra></extra>",
+        "hovertemplate": f"ceiling %{{customdata:.3s}}{suffix} (rwin/RTT)<extra></extra>",
         "name": "ceiling",
         "legendgroup": "ceiling",
         "showlegend": show,
@@ -1719,6 +1734,7 @@ def _build_tput_direction(
         yaxis_ref=yaxis_ref,
         legend_seen=legend_seen,
         rate_unit=rate_unit,
+        y_max=y_range[1],
     )
     if env is not None:
         traces.append(env)
