@@ -2,7 +2,10 @@ from tcptrace_ng.theme import DARK_CSS
 
 
 def test_dark_css_has_dark_background_rule():
-    assert "#000" in DARK_CSS or "black" in DARK_CSS.lower()
+    # Post-rewrite: surface backgrounds reference --q-dark-page / --q-panel,
+    # which resolve to dark Palette values via quasar_colors(). The literal
+    # "#000" / "black" rule was replaced by var(--q-…) references.
+    assert "var(--q-dark-page)" in DARK_CSS or "var(--q-panel)" in DARK_CSS
 
 
 def test_dark_css_has_class_colors():

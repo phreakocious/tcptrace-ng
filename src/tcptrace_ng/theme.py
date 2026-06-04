@@ -1,63 +1,142 @@
-"""Dark theme — both the CSS and the Plotly palette constants.
+"""Palette + dark theme + Plotly palette constants.
+
+Three layers all feed off the single `Palette` dataclass below:
+
+1. `quasar_colors()` returns the kwargs for `ui.colors(...)` — fills every
+   Quasar slot (`primary`/`positive`/…) and registers our brand tokens
+   (`good`/`bad`/`emph`/`muted`/…) as `--q-<name>` CSS vars on `body`.
+2. `DARK_CSS` reads those CSS vars and shapes the surfaces that don't map to
+   a Quasar slot (sidebar, dialog cards, classifier output spans, severity
+   tints, dots, findings panel).
+3. Plotly constants below resolve to concrete hexes at server-render time
+   (Plotly's layout JSON can't see CSS vars).
+
+After this rewrite, every 6-digit hex in `src/tcptrace_ng/` lives in the
+`Palette` dataclass and the documented `LEGEND_BG` rgba — the audit is
+`grep -rnE "#[0-9a-fA-F]{6}" src/tcptrace_ng/`.
 
 The `.tcptrace-output` block and color classes are load-bearing: they style
 the color-coded tcptrace text output that the classifier categorizes line by
-line. Everything else is chrome (header, sidebar, conn rows, expansions).
-
-The palette constants below feed the Plotly adapter so the chart grid/lines
-share their dim shade with the CSS chrome.
+line. Everything else is chrome.
 """
 
 from __future__ import annotations
 
-# Plotly line color: tcptrace's saturated white/green/yellow segment lines clobber
-# the events the user is scanning for on a dark background; force them all to one
-# dim gray. Markers/arrows/dots keep their semantic colors.
-LINE_DIM_COLOR = "#555555"
+from dataclasses import dataclass
 
-# Axis grid + zero-line: plotly_dark's defaults are too bright and compete with
-# data lines/markers. Both axes get the same dim shade.
-GRID_COLOR = "#1c1c1c"
-ZERO_LINE_COLOR = "#2a2a2a"
+
+@dataclass(frozen=True)
+class Palette:
+    """Every hex in the app. Solarized-derived foreground colors over near-black
+    terminal backgrounds. Field names are role-semantic ('bad', 'emph') so a
+    future palette tweak ("orange shouldn't be bad anymore") is a one-line edit
+    here rather than a grep across the codebase."""
+
+    # backgrounds
+    bg_page: str = "#0a0a0a"
+    bg_surface: str = "#0e1115"
+    bg_panel: str = "#0e1115"
+    border: str = "#1f2629"
+
+    # text (Solarized base scale)
+    text_emph: str = "#eee8d5"
+    text_body: str = "#93a1a1"
+    text_muted: str = "#657b83"
+    text_dim: str = "#586e75"
+
+    # status — semantic, not hue-named
+    good: str = "#859900"     # Solarized green
+    notable: str = "#b58900"  # Solarized yellow — "look here"
+    bad: str = "#cb4b16"      # Solarized orange — everyday bad / warn
+    crit: str = "#dc322f"     # Solarized red — reserved for critical
+    info: str = "#268bd2"     # Solarized blue
+    accent: str = "#2aa198"   # Solarized cyan — selection / primary
+    rare: str = "#6c71c4"     # Solarized violet
+    magenta: str = "#d33682"  # Solarized magenta — xpl-magenta passthrough
+
+
+PALETTE = Palette()
+
+
+def quasar_colors() -> dict[str, str]:
+    """Kwargs for `ui.colors(...)`. Quasar slots cover the semantic role they
+    best fit; short brand tokens become `--q-<name>` CSS vars on body. The
+    utility classes (`.text-good`, `.text-emph`, …) that resolve those vars
+    are emitted in DARK_CSS below — Quasar doesn't auto-generate them for
+    custom brand tokens, only for its own slots."""
+    p = PALETTE
+    return {
+        "primary": p.accent, "secondary": p.info, "accent": p.rare,
+        "dark": p.bg_surface, "dark_page": p.bg_page,
+        "positive": p.good, "negative": p.bad, "info": p.info, "warning": p.notable,
+        # semantic brand tokens
+        "good": p.good, "notable": p.notable, "bad": p.bad, "crit": p.crit,
+        # text-role brand tokens
+        "emph": p.text_emph, "body": p.text_body, "muted": p.text_muted, "dim": p.text_dim,
+        # surface brand tokens
+        "panel": p.bg_panel, "border": p.border,
+        # hue-named tokens (for symmetry / rare external consumers)
+        "sol_red": p.crit, "sol_orange": p.bad, "sol_yellow": p.notable,
+        "sol_green": p.good, "sol_cyan": p.accent, "sol_blue": p.info,
+        "sol_violet": p.rare, "sol_magenta": p.magenta,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plotly-side constants. Concrete hexes (not CSS vars) because Plotly's layout
+# JSON is rendered client-side by Plotly's own code, which can't resolve
+# var(--q-…). Source from PALETTE so changing the dataclass rebuilds figures
+# with the new color on the next render.
+
+LINE_DIM_COLOR = PALETTE.border
+GRID_COLOR = PALETTE.bg_surface
+ZERO_LINE_COLOR = PALETTE.border
+SUBPLOT_LABEL_COLOR = PALETTE.text_muted
+
+HOVER_BG = PALETTE.bg_surface
+HOVER_BORDER = PALETTE.border
+HOVER_TEXT = PALETTE.text_body
+
+# Legend bg keeps its rgba(...) because Plotly needs the alpha channel. This
+# is the one documented hex outside `Palette` — kept in sync with bg_surface
+# manually (mirrors PALETTE.bg_surface = #0e1115 at 0.4 alpha).
+LEGEND_BG = "rgba(14,17,21,0.4)"
+LEGEND_BORDER = PALETTE.border
+
+PLOTLY_MONO_FAMILY = '"DejaVu Sans Mono", monospace'
 
 DARK_CSS = """
-body, .nicegui-content, .q-page, .q-layout {
-    background: #000 !important;
-    color: #ddd !important;
-}
-.q-page {
-    padding: 0 !important;
-}
+/* Utility classes — Quasar bakes in `.text-primary` / `.text-positive` etc.
+   for its own slots; we mirror the pattern for our custom brand tokens so
+   `.classes("text-muted")` / `.classes("text-bad")` resolve correctly. */
+.text-emph    { color: var(--q-emph) !important; }
+.text-body    { color: var(--q-body) !important; }
+.text-muted   { color: var(--q-muted) !important; }
+.text-dim     { color: var(--q-dim) !important; }
+.text-good    { color: var(--q-good) !important; }
+.text-notable { color: var(--q-notable) !important; }
+.text-bad     { color: var(--q-bad) !important; }
+.text-crit    { color: var(--q-crit) !important; }
+.bg-panel     { background: var(--q-panel) !important; }
+
+/* The q-page padding override remains — NiceGUI default would re-introduce it. */
+.q-page { padding: 0 !important; }
 
 /* ---- top bar ---- */
 .tcptrace-header {
-    background: #0a0a0a !important;
-    border-bottom: 1px solid #1f1f1f;
+    background: var(--q-panel) !important;
+    border-bottom: 1px solid var(--q-border);
     box-shadow: none !important;
     min-height: 44px;
 }
-.tcptrace-brand {
-    color: #e6e6e6;
-    font-weight: 500;
-    letter-spacing: 0.02em;
-}
-.tcptrace-sep { color: #555; }
+.tcptrace-brand { color: var(--q-emph); font-weight: 500; letter-spacing: 0.02em; }
+.tcptrace-sep   { color: var(--q-dim); }
 
 /* ---- left drawer ---- */
-.tcptrace-sidebar {
-    background: #0a0a0a !important;
-    border-right: 1px solid #1f1f1f !important;
-}
-.tcptrace-sidebar-header {
-    border-bottom: 1px solid #1f1f1f;
-}
-.tcptrace-sidebar-footer {
-    border-top: 1px solid #1f1f1f;
-}
-.tcptrace-filter input {
-    color: #ddd !important;
-    font-size: 12px !important;
-}
+.tcptrace-sidebar { background: var(--q-panel) !important; border-right: 1px solid var(--q-border) !important; }
+.tcptrace-sidebar-header { border-bottom: 1px solid var(--q-border); }
+.tcptrace-sidebar-footer { border-top:    1px solid var(--q-border); }
+.tcptrace-filter input   { color: var(--q-body) !important; font-size: 12px !important; }
 
 /* ---- connection rows ---- */
 .tcptrace-conn-row {
@@ -67,244 +146,184 @@ body, .nicegui-content, .q-page, .q-layout {
     border-left: 2px solid transparent;
     transition: background 80ms ease;
 }
-.tcptrace-conn-row:hover {
-    background: #141414;
-}
+/* hover lifts ~8% toward body text — works even when panel and dark share a value */
+.tcptrace-conn-row:hover { background: color-mix(in srgb, var(--q-panel) 92%, var(--q-body)); }
+/* selection bar = cyan (--q-primary), not violet (--q-accent), not phosphor green */
 .tcptrace-conn-selected {
-    background: #1a1a1a !important;
-    border-left: 2px solid #00ff00 !important;
+    background: color-mix(in srgb, var(--q-panel) 80%, var(--q-body));
+    border-left: 2px solid var(--q-primary) !important;
 }
-.tcptrace-conn-row .conn-num {
-    color: #888;
-    font-family: Menlo, monospace;
-    font-size: 11px;
-}
-.tcptrace-conn-row .conn-host {
-    color: #bbb;
-    font-size: 12px;
-}
+.tcptrace-conn-row .conn-num { color: var(--q-dim); font-family: var(--mono); font-size: 11px; }
+.tcptrace-conn-row .conn-host { color: var(--q-body); font-size: 12px; }
+.tcptrace-conn-row .conn-meta-top { display: flex; align-items: center; gap: 6px;
+                                    font-family: var(--mono); font-size: 10px;
+                                    color: var(--q-dim); margin-bottom: 2px; }
+.tcptrace-conn-row .conn-badges  { letter-spacing: 0.04em; color: var(--q-muted); }
+.tcptrace-conn-row .conn-meta-bot { font-family: var(--mono); font-size: 10px;
+                                    color: var(--q-dim); margin-top: 2px; }
 
-/* ---- conn row v2 ---- */
-.tcptrace-conn-row .conn-meta-top {
-    display: flex; align-items: center; gap: 6px;
-    font-family: Menlo, monospace; font-size: 10px;
-    color: #777; margin-bottom: 2px;
-}
-.tcptrace-conn-row .conn-badges {
-    letter-spacing: 0.04em;
-    color: #aaa;
-}
-.tcptrace-conn-row .conn-meta-bot {
-    font-family: Menlo, monospace; font-size: 10px;
-    color: #666; margin-top: 2px;
-}
+/* dots */
 .tcptrace-conn-dot {
     width: 6px; height: 6px; border-radius: 50%;
-    display: inline-block;
-    opacity: 0.9;
+    display: inline-block; opacity: 0.9;
 }
-.tcptrace-dot-good   { background: #00ff00; }
-.tcptrace-dot-look   { background: #ffff00; }
-.tcptrace-dot-bad    { background: #ff5555; }
-.tcptrace-dot-normal { background: #555; }
-/* findings not computed yet (connection not opened): hollow neutral dot */
-.tcptrace-dot-pending { background: transparent; box-shadow: inset 0 0 0 1.5px #555; }
+.tcptrace-dot-good   { background: var(--q-good); }
+.tcptrace-dot-look   { background: var(--q-notable); }
+.tcptrace-dot-bad    { background: var(--q-bad); }
+.tcptrace-dot-crit   { background: var(--q-crit); }
+.tcptrace-dot-normal { background: var(--q-dim); }
+.tcptrace-dot-pending { background: transparent; box-shadow: inset 0 0 0 1.5px var(--q-dim); }
 
-/* ---- diagnosis findings ---- */
+/* ---- findings panel ---- */
 .tcptrace-findings { display: flex; flex-direction: column; gap: 7px; margin: 8px 0 4px; }
 .finding-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 2px 8px; align-items: baseline; }
 .finding-row .tcptrace-conn-dot { margin-top: 5px; }
-.finding-head { color: #ddd; font-size: 13px; }
-.finding-scope { font-family: Menlo, monospace; font-size: 10px; color: #777; justify-self: end; white-space: nowrap; }
-.finding-detail { grid-column: 2 / 4; color: #888; font-size: 11px; line-height: 1.35; }
-.tcptrace-conn-row .conn-warn { font-family: Menlo, monospace; font-size: 10px; font-weight: 600; }
-.tcptrace-conn-row .conn-warn-good { color: #00ff00; }
-.tcptrace-conn-row .conn-warn-look { color: #ffff00; }
-.tcptrace-conn-row .conn-warn-bad  { color: #ff5555; }
+.finding-head { color: var(--q-body); font-size: 13px; }
+.finding-scope { font-family: var(--mono); font-size: 10px; color: var(--q-dim); justify-self: end; white-space: nowrap; }
+.finding-detail { grid-column: 2 / 4; color: var(--q-muted); font-size: 11px; line-height: 1.35; }
+.tcptrace-conn-row .conn-warn { font-family: var(--mono); font-size: 10px; font-weight: 600; }
+.tcptrace-conn-row .conn-warn-good { color: var(--q-good); }
+.tcptrace-conn-row .conn-warn-look { color: var(--q-notable); }
+.tcptrace-conn-row .conn-warn-bad  { color: var(--q-bad); }
+.tcptrace-conn-row .conn-warn-crit { color: var(--q-crit); }
 
 /* ---- main panel ---- */
-.tcptrace-main {
-    padding: 18px 22px;
-}
-.tcptrace-title {
-    font-size: 15px;
-    color: #e6e6e6;
-    font-weight: 500;
-    margin-bottom: 4px;
-}
-.tcptrace-subtitle {
-    font-family: Menlo, monospace;
-    font-size: 12px;
-    color: #888;
-}
-.tcptrace-context {
-    font-family: Menlo, monospace;
-    font-size: 11px;
-    color: #6a6a6a;
-    line-height: 1.45;
-}
-.tcptrace-empty {
-    color: #555;
-    font-style: italic;
-    text-align: center;
-    margin-top: 64px;
-}
+.tcptrace-main { padding: 18px 22px; }
+.tcptrace-title { font-size: 15px; color: var(--q-emph); font-weight: 500; margin-bottom: 4px; }
+.tcptrace-subtitle { font-family: var(--mono); font-size: 12px; color: var(--q-muted); }
+.tcptrace-context  { font-family: var(--mono); font-size: 11px; color: var(--q-dim); line-height: 1.45; }
+.tcptrace-empty    { color: var(--q-dim); font-style: italic; text-align: center; margin-top: 64px; }
 
-/* ---- tabs ---- */
-.q-tab--active { color: #e6e6e6 !important; }
-.q-tab__indicator { background: #00ff00 !important; }
-.q-tab { min-height: 32px !important; padding: 0 12px !important; }
-
-/* ---- output expansion ---- */
+/* ---- output expansion + dialogs ---- */
 .tcptrace-expansion .q-expansion-item__container {
-    border: 1px solid #1f1f1f;
+    border: 1px solid var(--q-border);
     border-radius: 4px;
-    background: #050505;
+    background: var(--q-dark);
 }
-.tcptrace-expansion .q-item {
-    background: #0a0a0a;
-}
+.tcptrace-expansion .q-item { background: var(--q-panel); }
 .tcptrace-legend {
-    font-family: Menlo, monospace;
+    font-family: var(--mono);
     font-size: 11px;
     padding: 6px 12px;
-    color: #777;
-    border-bottom: 1px solid #1f1f1f;
+    color: var(--q-muted);
+    border-bottom: 1px solid var(--q-border);
 }
-.tcptrace-legend .swatch {
-    display: inline-block;
-    margin-right: 12px;
-    font-weight: 600;
-}
-/* Legend swatches put the class on the same element as .swatch, so we need
-   a compound selector — the .tcptrace-output descendant rule below only
-   styles spans nested inside <pre class="tcptrace-output">. */
-.tcptrace-legend .swatch.good { color: #00ff00; }
-.tcptrace-legend .swatch.look { color: #ffff00; }
-.tcptrace-legend .swatch.bad  { color: #ff5555; }
+.tcptrace-legend .swatch { display: inline-block; margin-right: 12px; font-weight: 600; }
+.tcptrace-legend .swatch.good { color: var(--q-good); }
+.tcptrace-legend .swatch.look { color: var(--q-notable); }
+.tcptrace-legend .swatch.bad  { color: var(--q-bad); }
 
+/* tcptrace text output — load-bearing semantics from classifier.py */
 pre.tcptrace-output {
-    font-family: Menlo, Monaco, Consolas, "Liberation Mono", "DejaVu Sans Mono",
-                 "Bitstream Vera Sans Mono", "Courier New", monospace;
+    font-family: var(--mono);
     font-size: 12px;
-    background: #000;
-    color: #ddd;
+    background: var(--q-dark-page);
+    color: var(--q-body);
     padding: 12px;
     margin: 0;
     white-space: pre;
 }
-.tcptrace-output .good   { color: #00ff00; }
-.tcptrace-output .bad    { color: #ff5555; }
-.tcptrace-output .look   { color: #ffff00; }
-.tcptrace-output .normal { color: #ddd; }
+.tcptrace-output .good   { color: var(--q-good); }
+.tcptrace-output .look   { color: var(--q-notable); }
+.tcptrace-output .bad    { color: var(--q-bad); }
+.tcptrace-output .normal { color: var(--q-body); }
 
-/* ---- raw-output dialog ---- */
+/* raw-output + warning dialog cards */
 .tcptrace-output-card {
-    background: #050505 !important;
-    color: #ddd !important;
-    max-width: 1100px;
-    width: 95vw;
-    max-height: 85vh;
-    overflow: auto;
+    background: var(--q-dark) !important;
+    color: var(--q-body) !important;
+    max-width: 1100px; width: 95vw; max-height: 85vh; overflow: auto;
 }
 .tcptrace-rawout-btn {
-    color: #888 !important;
-    text-transform: none !important;
-    letter-spacing: 0;
-    font-size: 11px;
-    padding: 0 8px !important;
-    min-height: 22px !important;
+    color: var(--q-muted) !important;
+    text-transform: none !important; letter-spacing: 0;
+    font-size: 11px; padding: 0 8px !important; min-height: 22px !important;
 }
+.tcptrace-warning-card {
+    background: var(--q-dark) !important;
+    color: var(--q-body) !important;
+    max-width: 720px; width: 90vw; padding: 16px !important;
+}
+.tcptrace-warning-title { color: var(--q-warning); font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.tcptrace-warning-body  { font-family: var(--mono); font-size: 12px; color: var(--q-body); line-height: 1.5; margin-bottom: 8px; }
 
-/* ---- chip filter strip ---- */
-.tcptrace-chip-row {
-    flex-wrap: wrap;
-    margin-bottom: 4px;
-}
-.tcptrace-chip-row .q-chip {
-    font-size: 10px !important;
-    height: 20px;
-}
-
-/* ---- misc ---- */
-.tcptrace-cache-label {
-    font-family: Menlo, monospace;
-    font-size: 11px;
-    color: #888;
-}
+/* warning chip — dim-amber bg, yellow text, tinted border via color-mix */
 .tcptrace-warning-chip {
-    font-family: Menlo, monospace !important;
+    font-family: var(--mono) !important;
     font-size: 11px !important;
     text-transform: none !important;
     letter-spacing: 0 !important;
-    color: #f2c037 !important;
-    border: 1px solid #5a4710 !important;
-    background: #1a1407 !important;
-    padding: 0 8px !important;
-    min-height: 22px !important;
+    color: var(--q-warning) !important;
+    border: 1px solid color-mix(in srgb, var(--q-warning) 45%, var(--q-panel)) !important;
+    background:    color-mix(in srgb, var(--q-warning) 12%, var(--q-panel)) !important;
+    padding: 0 8px !important; min-height: 22px !important;
 }
 .tcptrace-warning-chip:hover {
-    background: #2a1f0c !important;
+    background:    color-mix(in srgb, var(--q-warning) 20%, var(--q-panel)) !important;
 }
-.tcptrace-warning-card {
-    background: #050505 !important;
-    color: #ddd !important;
-    max-width: 720px;
-    width: 90vw;
-    padding: 16px !important;
-}
-.tcptrace-warning-title {
-    color: #f2c037;
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 8px;
-}
-.tcptrace-warning-body {
-    font-family: Menlo, monospace;
-    font-size: 12px;
-    color: #ddd;
-    line-height: 1.5;
-    margin-bottom: 8px;
-}
+
+/* ---- chip filter strip ---- */
+.tcptrace-chip-row { flex-wrap: wrap; margin-bottom: 4px; }
+.tcptrace-chip-row .q-chip { font-size: 10px !important; height: 20px; }
+
+/* ---- misc ---- */
+.tcptrace-cache-label { font-family: var(--mono); font-size: 11px; color: var(--q-muted); }
 
 /* ---- sticky tab/title header ---- */
 .tcptrace-sticky-head {
     position: sticky;
     top: 0;
     z-index: 5;
-    background: #000;
+    background: var(--q-dark-page);
     padding-bottom: 4px;
 }
 
-/* TSG viewport stats panel — 4-column grid below the chart. */
+/* ---- TSG viewport stats panel — 4-column grid below the chart ---- */
 .tsg-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px 24px;
-  padding: 12px 16px;
-  margin-top: 8px;
-  border-top: 1px solid #1f1f1f;
-  font-family: Menlo, monospace;
-  font-size: 11px;
-  color: #cccccc;
-  background: rgba(10, 10, 10, 0.5);
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px 24px;
+    padding: 12px 16px;
+    margin-top: 8px;
+    border-top: 1px solid var(--q-border);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--q-body);
+    background: color-mix(in srgb, var(--q-panel) 50%, transparent);
 }
-.tsg-stats .col-title {
-  color: #888888;
-  font-weight: bold;
-  margin-bottom: 4px;
-}
-.tsg-stats .dir-label {
-  grid-column: 1 / -1;
-  color: #888888;
-  margin-top: 8px;
-}
-/* Severity tints for stat tokens. Subtle on a dark background — these are
-   reading aids, not alerts. */
-.tsg-stats .tt-ok      { color: #7faa7f; }
-.tsg-stats .tt-notable { color: #c8b56b; }
-.tsg-stats .tt-bad     { color: #c97070; }
+.tsg-stats .col-title { color: var(--q-muted); font-weight: bold; margin-bottom: 4px; }
+.tsg-stats .dir-label { grid-column: 1 / -1; color: var(--q-muted); margin-top: 8px; }
+/* Severity tints — desaturated mix toward body text. Reading aids, not alerts. */
+.tsg-stats .tt-ok      { color: color-mix(in srgb, var(--q-good)    70%, var(--q-body)); }
+.tsg-stats .tt-notable { color: color-mix(in srgb, var(--q-notable) 70%, var(--q-body)); }
+.tsg-stats .tt-bad     { color: color-mix(in srgb, var(--q-bad)     70%, var(--q-body)); }
 @media (max-width: 800px) {
-  .tsg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tsg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+"""
+
+FONT_FACES = """
+<style>
+@font-face {
+    font-family: "DejaVu Sans Mono";
+    src: url("/_tt/fonts/DejaVuSansMono.woff2") format("woff2");
+    font-weight: 400;
+    font-display: block;
+}
+@font-face {
+    font-family: "DejaVu Sans Mono";
+    src: url("/_tt/fonts/DejaVuSansMono-Bold.woff2") format("woff2");
+    font-weight: 700;
+    font-display: block;
+}
+:root {
+    --mono: "DejaVu Sans Mono", "Fira Code", Menlo, Consolas, monospace;
+    font-feature-settings: "liga" 0, "calt" 0;
+}
+body,
+.tcptrace-output, .tcptrace-context, .tcptrace-subtitle,
+.tsg-stats, .conn-meta-top, .conn-meta-bot, .conn-num,
+.tcptrace-cache-label, .tcptrace-legend, .tcptrace-warning-body,
+.tcptrace-filter input { font-family: var(--mono); }
+</style>
 """
