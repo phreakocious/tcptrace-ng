@@ -18,9 +18,11 @@ import re
 import time
 import zipfile
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
 
+from nicegui import app as _ng_app
 from nicegui import background_tasks, run, ui
 
 from . import __version__
@@ -58,10 +60,19 @@ from .runner import (
 )
 from .stats_parser import STATS_PARSER_VERSION, ConnStats
 from .tcp_inspect import synthesize as synthesize_tsg
-from .theme import DARK_CSS
+from .theme import DARK_CSS, FONT_FACES, PALETTE, quasar_colors
 from .throughput import DirectionSummary, ThroughputModelPair, synthesize_throughput
 from .xpl_grouper import GroupedXpl, group_xpls
 from .xpl_parser import XplPlot, parse_xpl
+
+# Self-host the DejaVu Sans Mono woff2s shipped in the package so the
+# `@font-face` rules in `FONT_FACES` resolve regardless of network access.
+# Mounted once at module-import time — adding it inside the page handler
+# would re-register the route on every request.
+_ng_app.add_static_files(
+    "/_tt/fonts",
+    str(files("tcptrace_ng") / "static" / "fonts"),
+)
 
 PCAP_GLOBS = ("*.pcap", "*.pcapng", "*.cap")
 
@@ -221,11 +232,11 @@ _HOVER_CROSSBAR_JS = """
     root.style.cssText =
       'position:absolute;top:0;left:0;pointer-events:none;display:none;z-index:1;';
     const line = document.createElement('div');
-    line.style.cssText = 'position:absolute;width:0;border-left:1px dotted #888888;';
+    line.style.cssText = 'position:absolute;width:0;border-left:1px dotted __LINE_COLOR__;';
     const label = document.createElement('div');
     label.style.cssText =
       'position:absolute;transform:translate(-50%,-50%);white-space:nowrap;'
-      + 'color:#aaaaaa;font:10px/1.4 Menlo,monospace;'
+      + 'color:__LABEL_COLOR__;font:10px/1.4 Menlo,monospace;'
       + 'background:rgba(20,20,20,0.85);padding:0 4px;border-radius:2px;';
     root.appendChild(line);
     root.appendChild(label);
@@ -293,7 +304,7 @@ _HOVER_CROSSBAR_JS = """
   }
 })();
 </script>
-"""
+""".replace("__LINE_COLOR__", PALETTE.text_muted).replace("__LABEL_COLOR__", PALETTE.text_body)
 
 
 class _State:
@@ -1229,6 +1240,9 @@ def build_page() -> None:
 
     @ui.page("/")
     def index() -> None:
+        ui.dark_mode().enable()
+        ui.colors(**quasar_colors())
+        ui.add_head_html(FONT_FACES)
         ui.add_head_html(f"<style>{DARK_CSS}</style>")
         ui.add_head_html(_HOVER_CROSSBAR_JS)
 
@@ -1293,8 +1307,8 @@ def build_page() -> None:
             warning_chip.visible = False
             warning_dialog = ui.dialog()
             cache_label = ui.label().classes("tcptrace-cache-label mr-2")
-            clear_btn = ui.button("Clear cache").props("flat dense no-caps color=grey-5")
-            reanalyze_btn = ui.button("Reanalyze").props("flat dense no-caps color=grey-5")
+            clear_btn = ui.button("Clear cache").props("flat dense no-caps color=muted")
+            reanalyze_btn = ui.button("Reanalyze").props("flat dense no-caps color=muted")
 
         def refresh_cache_label() -> None:
             parts = [f"cache: {_format_size(total_cache_size(cwd))}"]
@@ -1346,7 +1360,7 @@ def build_page() -> None:
             ui.column().classes("w-full h-full gap-0 no-wrap"),
         ):
             with ui.column().classes("w-full tcptrace-sidebar-header px-3 py-2 gap-1"):
-                conn_count_label = ui.label("").classes("text-xs text-gray-500")
+                conn_count_label = ui.label("").classes("text-xs text-muted")
                 with ui.row().classes("tcptrace-chip-row w-full gap-1"):
                     for key, label in [
                         ("bad", "Bad"),
@@ -1362,11 +1376,11 @@ def build_page() -> None:
                                 state.chip_filters.discard(k)
                             else:
                                 state.chip_filters.add(k)
-                            c.props("color=primary" if k in state.chip_filters else "color=grey-8")
+                            c.props("color=primary" if k in state.chip_filters else "color=dim")
                             render_sidebar()
 
                         chip.on("click", _toggle)
-                        chip.props("color=grey-8")
+                        chip.props("color=dim")
                 filter_input = (
                     ui.input(placeholder="filter…")
                     .props("dense dark borderless debounce=150")
@@ -1395,7 +1409,7 @@ def build_page() -> None:
             with ui.row().classes("w-full tcptrace-sidebar-footer px-3 py-2"):
                 download_btn = (
                     ui.button("↓ xpl zip")
-                    .props("flat dense no-caps color=grey-5 disable")
+                    .props("flat dense no-caps color=muted disable")
                     .classes("w-full")
                 )
 
@@ -1420,7 +1434,7 @@ def build_page() -> None:
             main_container.clear()
             with main_container:
                 if not pcaps:
-                    ui.label(f"no pcap files in {cwd}").classes("tcptrace-empty text-red")
+                    ui.label(f"no pcap files in {cwd}").classes("tcptrace-empty text-bad")
                     return
                 if state.selected_pcap is None:
                     ui.label("select a pcap from the header").classes("tcptrace-empty w-full")
@@ -1471,7 +1485,7 @@ def build_page() -> None:
                 if n not in state.analyses:
                     with ui.row().classes("w-full items-center gap-2 mt-6"):
                         ui.spinner(size="md")
-                        ui.label(f"running tcptrace for conn {n}…").classes("text-gray-400")
+                        ui.label(f"running tcptrace for conn {n}…").classes("text-muted")
                     return
                 _render_analysis(state.analyses[n], groups, tabs, default_tab)
 
@@ -1490,7 +1504,7 @@ def build_page() -> None:
             default_metric = "tsg" if any(g.metric == "tsg" for g in groups) else groups[0].metric
             with (
                 ui.tabs()
-                .props("dense dark active-color=white outside-arrows mobile-arrows")
+                .props("dense dark active-color=emph outside-arrows mobile-arrows")
                 .classes("w-full") as tabs
             ):
                 for g in groups:
@@ -1686,7 +1700,7 @@ def build_page() -> None:
                         return
                     container.clear()
                     with container:
-                        ui.label(f"[render error: {exc}]").classes("text-red")
+                        ui.label(f"[render error: {exc}]").classes("text-bad")
                     return
                 state.figure_cache[cache_key] = fig
                 if metric == "tsg":
