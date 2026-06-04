@@ -130,37 +130,58 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
 # vice versa); this draws a single layout shape spanning the entire figure
 # (yref=paper) at the cursor's x. MutationObserver wires it up on any
 # .js-plotly-plot the app mounts, including ones swapped in by tab changes
-# or update_figure().
+# or update_figure(). Debug counters live on window.tcpNgCrossbar so the
+# console can confirm whether the script loaded and how many plots are wired.
 _HOVER_CROSSBAR_JS = """
 <script>
 (function() {
-  const BAR = {
-    type: 'line',
-    xref: 'x',
-    yref: 'paper',
-    y0: 0, y1: 1,
-    line: {color: '#3a3a3a', width: 1, dash: 'dot'},
-    layer: 'above',
-  };
+  const debug = {loaded: true, attached: 0, hovers: 0, lastX: null, lastErr: null};
+  window.tcpNgCrossbar = debug;
   function attach(gd) {
     if (gd._tcpNgCrosshair) return;
     if (!gd._fullLayout || typeof gd.on !== 'function') return;
     gd._tcpNgCrosshair = true;
+    debug.attached++;
     gd.on('plotly_hover', function(d) {
-      const pt = d.points && d.points[0];
-      if (!pt) return;
-      const shape = Object.assign({}, BAR, {x0: pt.x, x1: pt.x});
-      Plotly.relayout(gd, {shapes: [shape]});
+      try {
+        const pt = d.points && d.points[0];
+        if (!pt) return;
+        debug.hovers++;
+        debug.lastX = pt.x;
+        Plotly.relayout(gd, {
+          shapes: [{
+            type: 'line',
+            xref: 'x', yref: 'paper',
+            x0: pt.x, x1: pt.x,
+            y0: 0, y1: 1,
+            line: {color: '#888888', width: 1, dash: 'dot'},
+            layer: 'above',
+          }],
+        });
+      } catch (e) {
+        debug.lastErr = String(e);
+      }
     });
     gd.on('plotly_unhover', function() {
-      Plotly.relayout(gd, {shapes: []});
+      try { Plotly.relayout(gd, {shapes: []}); }
+      catch (e) { debug.lastErr = String(e); }
     });
   }
   function scan() {
     document.querySelectorAll('.js-plotly-plot').forEach(attach);
   }
-  new MutationObserver(scan).observe(document.body, {childList: true, subtree: true});
-  setInterval(scan, 1000);
+  function start() {
+    new MutationObserver(scan).observe(document.body, {childList: true, subtree: true});
+    setInterval(scan, 1000);
+    scan();
+  }
+  // The script runs in <head>, so document.body may not exist yet — defer
+  // until the DOM is ready. (No-op if already past DOMContentLoaded.)
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
 })();
 </script>
 """
