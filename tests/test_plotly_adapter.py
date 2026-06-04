@@ -442,11 +442,17 @@ def test_to_tsg_figure_empty_pair_returns_dark_layout():
     assert fig["data"] == []
 
 
-def test_to_tsg_figure_uses_endpoints_in_title():
+def test_to_tsg_figure_emits_endpoints_in_panel_label():
+    """The figure title is gone; the direction lives on the per-panel label
+    (top-left of the subplot) that worked even with the title in place."""
     model = TsgModel(src="1.2.3.4:80", dst="5.6.7.8:51234", direction="a2b")
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    assert "1.2.3.4:80" in fig["layout"]["title"]["text"]
-    assert "5.6.7.8:51234" in fig["layout"]["title"]["text"]
+    paper_anns = [
+        a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") == "paper"
+    ]
+    assert any(
+        "1.2.3.4:80" in (t or "") and "5.6.7.8:51234" in (t or "") for t in paper_anns
+    )
 
 
 def _model_with_segments() -> TsgModel:
@@ -536,6 +542,33 @@ def test_seg_hover_blank_not_nan_for_first_and_unpaired_segment():
     # The optional fragments are rendered raw, not float-formatted (NaN-prone).
     assert "customdata[1]:" not in tr["hovertemplate"]
     assert "customdata[5]:" not in tr["hovertemplate"]
+
+
+def test_tsg_figure_has_no_top_title():
+    """The figure-wide title (e.g. '1.1.1.1:1 → 2.2.2.2:2') duplicated the
+    per-panel direction labels already drawn at the top-left of each
+    subplot. Dropping it frees the top margin for the horizontal legend
+    bar that sits just above the data."""
+    fwd = TsgModel(src="1.1.1.1:1", dst="2.2.2.2:2", direction="a2b")
+    fig = to_tsg_figure(TsgModelPair(fwd=fwd))
+    assert fig["layout"].get("title", {}).get("text", "") == ""
+    # The per-panel label must remain — that's what conveys direction now.
+    panel_labels = [
+        a.get("text") for a in fig["layout"]["annotations"]
+        if a.get("xref") == "paper" and a.get("yref") == "paper" and " → " in (a.get("text") or "")
+    ]
+    assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
+
+
+def test_throughput_figure_has_no_top_title():
+    fwd = _tput_model(samples=(_sample(1.0),))
+    fig = to_throughput_figure(ThroughputModelPair(fwd=fwd))
+    assert fig["layout"].get("title", {}).get("text", "") == ""
+    panel_labels = [
+        a.get("text") for a in fig["layout"]["annotations"]
+        if a.get("xref") == "paper" and a.get("yref") == "paper" and " → " in (a.get("text") or "")
+    ]
+    assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
 
 
 def test_tsg_figure_rel_seq_mode_subtracts_constant_baseline():
@@ -1162,7 +1195,12 @@ def test_info_strip_summarizes_hidden_kinds_above_subplot():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    paper_anns = [a for a in fig["layout"]["annotations"] if a.get("yref") == "paper"]
+    # Paper-anchored annotations include the direction label (top-left) and
+    # the info strip; filter out the label so the strip stands alone.
+    paper_anns = [
+        a for a in fig["layout"]["annotations"]
+        if a.get("yref") == "paper" and " → " not in (a.get("text") or "")
+    ]
     assert len(paper_anns) == 1
     text = paper_anns[0]["text"]
     assert "2 PA" in text

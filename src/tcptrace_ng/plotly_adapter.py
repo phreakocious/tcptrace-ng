@@ -1334,14 +1334,11 @@ def to_tsg_figure(
     fwd = pair.fwd
     bwd = pair.bwd
 
-    if fwd is not None and fwd.src and fwd.dst:
-        title = f"{fwd.src} → {fwd.dst}"
-    elif bwd is not None and bwd.src and bwd.dst:
-        title = f"{bwd.dst} → {bwd.src}"
-    else:
-        title = "time sequence graph"
-
-    layout = _base_layout(title, dragmode="zoom", showlegend=True)
+    # No figure title: the per-panel direction labels (top-left of each
+    # subplot, set below) already convey direction. A top-of-figure title
+    # was just duplicated text occupying the room the legend bar needs.
+    layout = _base_layout("", dragmode="zoom", showlegend=True)
+    layout["margin"]["t"] = 40
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1378,6 +1375,24 @@ def to_tsg_figure(
         strip = _info_strip(only, xref="x", y_domain_top=1.0)
         if strip is not None:
             annotations.append(strip)
+        # Direction label (top-left). The figure title used to carry this for
+        # single-direction figures; with the title gone, the per-panel label
+        # is the only direction indicator.
+        only_label = _direction_label(only)
+        if only_label:
+            annotations.append(
+                {
+                    "text": only_label,
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0,
+                    "y": 1.0,
+                    "xanchor": "left",
+                    "yanchor": "bottom",
+                    "showarrow": False,
+                    "font": _SUBPLOT_LABEL_FONT,
+                }
+            )
         layout["annotations"] = annotations
         return {"data": traces, "layout": layout}
 
@@ -1837,14 +1852,9 @@ def to_throughput_figure(
     fwd = pair.fwd
     bwd = pair.bwd
 
-    if fwd is not None and fwd.src and fwd.dst:
-        title = f"{fwd.src} → {fwd.dst} throughput"
-    elif bwd is not None and bwd.src and bwd.dst:
-        title = f"{bwd.dst} → {bwd.src} throughput"
-    else:
-        title = "throughput"
-
-    layout = _base_layout(title, dragmode="zoom", showlegend=True)
+    # Title omitted: per-panel labels carry the direction, see to_tsg_figure.
+    layout = _base_layout("", dragmode="zoom", showlegend=True)
+    layout["margin"]["t"] = 40
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1883,6 +1893,22 @@ def to_throughput_figure(
             legend_seen=legend_seen,
             rate_unit=rate_unit,
         )
+        # Direction label (top-left). See to_tsg_figure's matching branch.
+        only_label = _throughput_direction_label(only)
+        if only_label:
+            anns.append(
+                {
+                    "text": only_label,
+                    "xref": "paper",
+                    "yref": "paper",
+                    "x": 0,
+                    "y": 1.0,
+                    "xanchor": "left",
+                    "yanchor": "bottom",
+                    "showarrow": False,
+                    "font": _SUBPLOT_LABEL_FONT,
+                }
+            )
         layout["annotations"] = anns
         return {"data": traces, "layout": layout}
 
