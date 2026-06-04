@@ -184,3 +184,74 @@ def test_compute_findings_none_stats_for_connrow(monkeypatch):
         app_mod.state, "analyses", {1: AnalyzeResult(details_text="", xpl_files=[])}
     )
     assert app_mod._compute_findings(1) == []
+
+
+def test_coalesces_directed_filters_by_direction(monkeypatch):
+    monkeypatch.setattr(
+        app_mod.state,
+        "desegment_coalesces",
+        [
+            {
+                "time": 1.0,
+                "src": "10.0.0.2:443",
+                "dst": "10.0.0.1:50000",
+                "parent_seq_start": 1,
+                "parent_seq_end": 2,
+                "pieces": 1,
+                "mss": 1460,
+                "mss_source": "syn",
+            },
+            {
+                "time": 2.0,
+                "src": "10.0.0.9:80",
+                "dst": "10.0.0.1:50000",
+                "parent_seq_start": 1,
+                "parent_seq_end": 2,
+                "pieces": 1,
+                "mss": 1460,
+                "mss_source": "syn",
+            },
+        ],
+    )
+    got = app_mod._coalesces_directed("10.0.0.2:443", "10.0.0.1:50000")
+    assert len(got) == 1 and got[0]["time"] == 1.0
+    # reverse direction must not match (the manifest is directional)
+    assert app_mod._coalesces_directed("10.0.0.1:50000", "10.0.0.2:443") == []
+
+
+def test_desegment_banner_text_reflects_manifest():
+    from tcptrace_ng import app
+
+    saved_k, saved_c = app.state.desegment_kinds, app.state.desegment_coalesces
+    app.state.desegment_kinds = {"lro/gro/tso"}
+    app.state.desegment_coalesces = [{"pieces": 6}, {"pieces": 6}]
+    try:
+        txt = app._desegment_banner_text()
+        assert txt is not None and "2 offload frames" in txt and "12 segments" in txt
+    finally:
+        app.state.desegment_kinds, app.state.desegment_coalesces = saved_k, saved_c
+
+
+def test_desegment_banner_text_none_without_offload():
+    from tcptrace_ng import app
+
+    saved = app.state.desegment_kinds
+    app.state.desegment_kinds = set()
+    try:
+        assert app._desegment_banner_text() is None
+    finally:
+        app.state.desegment_kinds = saved
+
+
+def test_stats_grid_shows_reconstructed_count():
+    from tcptrace_ng import app
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    m = TsgModel(
+        segments=[
+            Segment(1.0, 0, 1460, None, None, None, 0, True),
+            Segment(2.0, 1460, 2920, None, None, None, 0, False),
+        ]
+    )
+    html = app._stats_grid_html("a→b", m.window_stats(None, None))
+    assert "reconstructed" in html

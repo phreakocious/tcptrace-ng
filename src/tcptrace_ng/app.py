@@ -38,6 +38,7 @@ from .classifier import Class, classify
 from .csum import CsumEvent
 from .csum import scan_pcap as scan_csums
 from .decap import DECAP_VERSION, decap_pcap, detect_encaps
+from .desegment import DESEGMENT_VERSION, desegment_pcap
 from .diagnose import Finding, diagnose, severity_to_class
 from .offload import detect_offload
 from .plotly_adapter import (
@@ -127,15 +128,20 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
 
 # Full-figure hover crossbar. Plotly's per-axis spike stops at its subplot
 # boundary, so the bwd panel goes blank when hovering the fwd panel (and
-# vice versa). On every plotly_hover we:
-#   1. draw a single layout shape (yref=paper) at the cursor's x so the
-#      vertical line spans both stacked panels, with a date+time label so
-#      the user can read the absolute timestamp anywhere on the chart;
-#   2. fire Plotly.Fx.hover on the *other* subplot at the same xval so the
-#      per-trace tooltips pop on both panels simultaneously.
+# vice versa). On every mousemove over the plot area we:
+#   1. derive the cursor's data-x via xaxis.p2c() and draw a single layout
+#      shape (yref=paper) at that x — the vertical line spans both stacked
+#      panels and stays visible the whole time the cursor is on the chart,
+#      not gated on landing on a data point;
+#   2. fire Plotly.Fx.hover on every cartesian subplot at the same xval so
+#      the per-trace tooltips pop on both panels simultaneously.
 #
-# A re-entry guard prevents the programmatic Fx.hover from triggering an
-# infinite cascade through this same handler.
+# Bottom panel is x2y2 (xaxis2 + yaxis2), NOT xy2 — the earlier mirror
+# targeted a subplot that didn't exist, which is why cross-panel tooltips
+# weren't appearing.
+#
+# Work is rAF-throttled so we redraw at most once per frame even when
+# mousemove fires faster.
 #
 # A MutationObserver wires this up on any .js-plotly-plot the app mounts,
 # including ones swapped in by tab changes or update_figure(). Debug
@@ -144,68 +150,75 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
 _HOVER_CROSSBAR_JS = """
 <script>
 (function() {
-  const debug = {loaded: true, attached: 0, hovers: 0, lastX: null, lastErr: null};
+  const debug = {loaded: true, attached: 0, draws: 0, lastX: null, lastErr: null};
   window.tcpNgCrossbar = debug;
-  function fmtDate(x) {
-    const d = (x instanceof Date) ? x : new Date(x);
-    if (isNaN(d.getTime())) return String(x);
-    // YYYY-MM-DD HH:MM:SS.mmm in UTC — matches the xaxis hoverformat.
-    const pad = (n, w) => String(n).padStart(w || 2, '0');
-    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate())
-      + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds())
-      + '.' + pad(d.getUTCMilliseconds(), 3);
+  function subplotIds(gd) {
+    const fl = gd._fullLayout;
+    const sp = fl && fl._subplots && fl._subplots.cartesian;
+    if (sp && sp.length) return sp.slice();
+    const ids = [];
+    if (fl && fl.xaxis && fl.yaxis) ids.push('xy');
+    if (fl && fl.xaxis2 && fl.yaxis2) ids.push('x2y2');
+    return ids;
   }
-  function otherSubplot(gd, axId) {
-    // For paired figures the second subplot anchors x2 -> y2; the single-
-    // direction case has only 'xy'. Returns null when there's nothing to
-    // mirror to.
-    if (axId === 'x' && gd._fullLayout.xaxis2) return 'xy2';
-    if (axId === 'x2' && gd._fullLayout.xaxis) return 'xy';
-    return null;
+  function cursorX(gd, ev) {
+    // Client coords → data x on the primary x-axis, or null when the
+    // cursor is over a margin, the legend, or the gap between panels.
+    const fl = gd._fullLayout;
+    const xa = fl && fl.xaxis;
+    if (!xa || xa._offset == null || xa._length == null) return null;
+    const r = gd.getBoundingClientRect();
+    const px = ev.clientX - r.left - xa._offset;
+    if (px < 0 || px > xa._length) return null;
+    const py = ev.clientY - r.top;
+    const yaxes = [fl.yaxis, fl.yaxis2].filter(y => y && y._offset != null);
+    if (!yaxes.some(y => py >= y._offset && py <= y._offset + y._length)) return null;
+    return xa.p2c(px);
+  }
+  function clearBar(gd) {
+    try {
+      Plotly.relayout(gd, {shapes: []});
+      Plotly.Fx.unhover(gd);
+    } catch (e) { debug.lastErr = String(e); }
+  }
+  function draw(gd, x) {
+    debug.draws++;
+    debug.lastX = x;
+    try {
+      Plotly.relayout(gd, {
+        shapes: [{
+          type: 'line',
+          xref: 'x', yref: 'paper',
+          x0: x, x1: x,
+          y0: 0, y1: 1,
+          line: {color: '#888888', width: 1, dash: 'dot'},
+          layer: 'above',
+        }],
+      });
+      Plotly.Fx.hover(gd, {xval: x}, subplotIds(gd));
+    } catch (e) {
+      debug.lastErr = String(e);
+    }
   }
   function attach(gd) {
     if (gd._tcpNgCrosshair) return;
-    if (!gd._fullLayout || typeof gd.on !== 'function') return;
+    if (!gd._fullLayout) return;
     gd._tcpNgCrosshair = true;
     debug.attached++;
-    gd.on('plotly_hover', function(d) {
-      if (gd._tcpNgInHover) return;
-      gd._tcpNgInHover = true;
-      try {
-        const pt = d.points && d.points[0];
-        if (!pt) return;
-        debug.hovers++;
-        debug.lastX = pt.x;
-        Plotly.relayout(gd, {
-          shapes: [{
-            type: 'line',
-            xref: 'x', yref: 'paper',
-            x0: pt.x, x1: pt.x,
-            y0: 0, y1: 1,
-            line: {color: '#888888', width: 1, dash: 'dot'},
-            layer: 'above',
-            label: {
-              text: fmtDate(pt.x),
-              textposition: 'top center',
-              font: {color: '#aaaaaa', size: 10, family: 'Menlo, monospace'},
-              yanchor: 'bottom',
-            },
-          }],
-        });
-        const mirror = otherSubplot(gd, pt.xaxis && (pt.xaxis._id || pt.xaxis.id));
-        if (mirror) Plotly.Fx.hover(gd, {xval: pt.x}, mirror);
-      } catch (e) {
-        debug.lastErr = String(e);
-      } finally {
-        // Clear the guard after Plotly drains the synchronous event queue
-        // from the programmatic Fx.hover call above.
-        setTimeout(function() { gd._tcpNgInHover = false; }, 0);
-      }
+    let pending = false;
+    let lastEv = null;
+    gd.addEventListener('mousemove', function(ev) {
+      lastEv = ev;
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(function() {
+        pending = false;
+        const x = cursorX(gd, lastEv);
+        if (x == null) clearBar(gd);
+        else draw(gd, x);
+      });
     });
-    gd.on('plotly_unhover', function() {
-      try { Plotly.relayout(gd, {shapes: []}); }
-      catch (e) { debug.lastErr = String(e); }
-    });
+    gd.addEventListener('mouseleave', function() { clearBar(gd); });
   }
   function scan() {
     document.querySelectorAll('.js-plotly-plot').forEach(attach);
@@ -237,6 +250,8 @@ class _State:
         # it points at <cache>/decap.pcap. Always None when no pcap is picked.
         self.effective_pcap: Path | None = None
         self.decap_encaps: set[str] = set()
+        self.desegment_kinds: set[str] = set()
+        self.desegment_coalesces: list[dict] = []
         # Findings from pre-flight scans (NIC offload, etc.) that don't break
         # analysis but distort the results the user is about to see.
         self.pcap_warnings: list[str] = []
@@ -310,7 +325,7 @@ def _cache_version() -> str:
     can't share artifacts. The decap version is always included so changes to
     decap rewrite semantics invalidate every cache (including for plain pcaps
     that didn't trigger decap)."""
-    parts = [__version__, f"d{DECAP_VERSION}", f"s{STATS_PARSER_VERSION}"]
+    parts = [__version__, f"d{DECAP_VERSION}", f"s{STATS_PARSER_VERSION}", f"x{DESEGMENT_VERSION}"]
     if not state.dns:
         parts.append("n")
     if state.with_rtt:
@@ -401,6 +416,22 @@ def _csum_times_directed(src: str, dst: str) -> list[float]:
 def _csum_counts_for_endpoints(host_a: str, host_b: str) -> tuple[int, int]:
     """(a→b, b→a) bad-checksum counts for one connection."""
     return len(_csum_times_directed(host_a, host_b)), len(_csum_times_directed(host_b, host_a))
+
+
+def _coalesces_directed(src: str, dst: str) -> list[dict]:
+    """Desegment manifest entries for coalesced data going `src` → `dst` (each
+    `ip:port`). The manifest is pcap-wide; filtering by endpoint avoids a
+    cross-connection seq collision (tagging itself is by timestamp+seq). Empty
+    when either endpoint won't parse. Mirrors `_csum_times_directed`."""
+    s = _split_endpoint(src)
+    d = _split_endpoint(dst)
+    if s is None or d is None:
+        return []
+    return [
+        c
+        for c in state.desegment_coalesces
+        if _split_endpoint(c.get("src", "")) == s and _split_endpoint(c.get("dst", "")) == d
+    ]
 
 
 _VERDICT_CSS = {
@@ -551,6 +582,19 @@ def _direction_labels(row) -> tuple[str, str]:
     )
 
 
+def _coalesce_to_dict(c) -> dict:
+    return {
+        "time": c.time,
+        "src": c.src,
+        "dst": c.dst,
+        "parent_seq_start": c.parent_seq_start,
+        "parent_seq_end": c.parent_seq_end,
+        "pieces": c.pieces,
+        "mss": c.mss,
+        "mss_source": c.mss_source,
+    }
+
+
 def _build_metric_figure(
     forward: Path | None,
     backward: Path | None,
@@ -583,12 +627,15 @@ def _build_metric_figure(
         if fwd_plot is None and bwd_plot is None:
             return None
         fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+        fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
         pair = synthesize_tsg(
             fwd_plot,
             bwd_plot,
             details_text,
             bad_csum_times_fwd=fwd_csum,
             bad_csum_times_bwd=bwd_csum,
+            coalesces_fwd=fwd_co,
+            coalesces_bwd=bwd_co,
         )
         return to_tsg_figure(pair, show_info=show_info, seq_mode=seq_mode)
 
@@ -652,6 +699,26 @@ def _csum_for_plots(
     return fwd_times, bwd_times
 
 
+def _coalesces_for_plots(
+    fwd_plot: XplPlot | None, bwd_plot: XplPlot | None
+) -> tuple[list[dict], list[dict]]:
+    """Per-direction desegment manifest, keyed off the xpl titles (the same
+    directional filter `_csum_for_plots` uses)."""
+    from .tcp_inspect import _parse_endpoints  # avoid widening tcp_inspect's API
+
+    fwd: list[dict] = []
+    bwd: list[dict] = []
+    if fwd_plot is not None:
+        src, dst = _parse_endpoints(fwd_plot.title)
+        if src and dst:
+            fwd = _coalesces_directed(src, dst)
+    if bwd_plot is not None:
+        src, dst = _parse_endpoints(bwd_plot.title)
+        if src and dst:
+            bwd = _coalesces_directed(src, dst)
+    return fwd, bwd
+
+
 def _build_tput_model(
     forward: Path | None,
     backward: Path | None,
@@ -670,12 +737,15 @@ def _build_tput_model(
     if fwd_plot is None and bwd_plot is None:
         return None
     fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+    fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
     tsg_pair = synthesize_tsg(
         fwd_plot,
         bwd_plot,
         details_text,
         bad_csum_times_fwd=fwd_csum,
         bad_csum_times_bwd=bwd_csum,
+        coalesces_fwd=fwd_co,
+        coalesces_bwd=bwd_co,
     )
     stats = (
         tsg_pair.fwd.summary
@@ -746,12 +816,15 @@ def _build_tsg_model(
     if fwd_plot is None and bwd_plot is None:
         return None
     fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
+    fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
     return synthesize_tsg(
         fwd_plot,
         bwd_plot,
         details_text,
         bad_csum_times_fwd=fwd_csum,
         bad_csum_times_bwd=bwd_csum,
+        coalesces_fwd=fwd_co,
+        coalesces_bwd=bwd_co,
     )
 
 
@@ -887,6 +960,20 @@ def _retx_severity(n_retx: int, n_segs: int) -> str:
     return ""
 
 
+def _desegment_banner_text() -> str | None:
+    """One-line provenance banner when analysis ran on a de-coalesced copy of the
+    pcap. None when no offload was split. Counts come from the manifest in state."""
+    if not state.desegment_kinds:
+        return None
+    frames = len(state.desegment_coalesces)
+    segments = sum(c.get("pieces", 0) for c in state.desegment_coalesces)
+    kinds = "/".join(sorted(state.desegment_kinds))
+    return (
+        f"analysis ran on a de-coalesced copy: {frames} offload "
+        f"frame{'' if frames == 1 else 's'} → {segments} segments ({kinds})"
+    )
+
+
 def _stats_grid_html(label: str, ws, rate_unit: str = "bytes") -> str:
     pct = (100.0 * ws.n_retx / ws.n_segs) if ws.n_segs else 0.0
     retx_sev = _retx_severity(ws.n_retx, ws.n_segs)
@@ -904,10 +991,14 @@ def _stats_grid_html(label: str, ws, rate_unit: str = "bytes") -> str:
         f"{other_anom} · {_sev(csum_text, csum_sev)}" if ws.n_bad_csum > 0 else other_anom
     )
 
+    segs_cell = f"{_format_count(ws.n_segs)} segs"
+    if getattr(ws, "n_fabricated", 0):
+        segs_cell += f" · {_format_count(ws.n_fabricated)} reconstructed"
+
     rows = [
         (
             "Volume",
-            f"{_format_count(ws.n_segs)} segs",
+            segs_cell,
             f"{_format_bytes(ws.bytes_sent)} sent",
             f"{_format_rate(ws.throughput_eff_Bps, rate_unit)} eff",
             f"{_format_count(ws.n_sack_regions)} SACK",
@@ -1153,6 +1244,8 @@ def build_page() -> None:
             parts = [f"cache: {_format_size(total_cache_size(cwd))}"]
             if state.decap_encaps:
                 parts.append(f"decap: {'+'.join(sorted(state.decap_encaps))}")
+            if state.desegment_kinds:
+                parts.append(f"desegment: {'+'.join(sorted(state.desegment_kinds))}")
             cache_label.set_text(" · ".join(parts))
 
         def refresh_warnings() -> None:
@@ -1595,6 +1688,9 @@ def build_page() -> None:
 
             dialog = ui.dialog()
             with dialog, ui.card().classes("tcptrace-output-card p-0"):
+                banner = _desegment_banner_text()
+                if banner:
+                    ui.html(f'<div class="tcptrace-desegment-banner">{_escape_html(banner)}</div>')
                 ui.html(legend_html)
                 ui.html(pre_html)
             return dialog
@@ -1775,6 +1871,50 @@ def build_page() -> None:
             state.decap_encaps = res.encaps
             return decap_path
 
+        async def _ensure_desegmented(src: Path, layout: CacheLayout) -> Path:
+            """Split offload-coalesced segments; return a cached de-coalesced copy.
+
+            Mirrors `_ensure_decapped`: cheap offload probe, fresh-cache check,
+            run, write the `desegment.json` sidecar (meta + manifest), set state,
+            fall back to `src` on any error so a flaky pass never breaks analysis.
+            """
+            state.desegment_kinds = set()
+            state.desegment_coalesces = []
+            try:
+                rep = await run.io_bound(detect_offload, src)
+            except Exception:
+                return src
+            if rep.oversized_segments == 0:
+                return src
+            out = layout.desegment_pcap
+            if is_fresh(out, src, _cache_version(), layout.version_file):
+                try:
+                    meta = json.loads(layout.desegment_meta.read_text())
+                    state.desegment_kinds = set(meta.get("kinds", []))
+                    state.desegment_coalesces = meta.get("coalesces", [])
+                    return out
+                except (OSError, json.JSONDecodeError):
+                    pass
+            layout.ensure_root()
+            try:
+                res = await run.io_bound(desegment_pcap, src, out)
+            except Exception as exc:
+                ui.notify(f"desegment failed, analyzing original: {exc}", type="warning")
+                return src
+            state.desegment_kinds = res.kinds
+            state.desegment_coalesces = [_coalesce_to_dict(c) for c in res.coalesces]
+            layout.desegment_meta.write_text(
+                json.dumps(
+                    {
+                        "kinds": sorted(res.kinds),
+                        "frames_split": res.frames_split,
+                        "pieces_emitted": res.pieces_emitted,
+                        "coalesces": state.desegment_coalesces,
+                    }
+                )
+            )
+            return out
+
         async def _scan_for_warnings(pcap: Path) -> None:
             """Populate `state.pcap_warnings` with pre-flight findings.
 
@@ -1815,10 +1955,16 @@ def build_page() -> None:
 
             layout = CacheLayout(state.selected_pcap)
             state.effective_pcap = await _ensure_decapped(state.selected_pcap, layout)
+            state.effective_pcap = await _ensure_desegmented(state.effective_pcap, layout)
             refresh_cache_label()
             if state.decap_encaps:
                 ui.notify(
                     f"decap'd outer {'/'.join(sorted(state.decap_encaps))}",
+                    type="info",
+                )
+            if state.desegment_kinds:
+                ui.notify(
+                    f"de-coalesced offload ({'/'.join(sorted(state.desegment_kinds))})",
                     type="info",
                 )
             await _scan_for_warnings(state.effective_pcap)
@@ -1868,6 +2014,9 @@ def build_page() -> None:
                         # Re-run encap detection against the converted pcap; a
                         # pcapng with Geneve inside would otherwise slip past.
                         state.effective_pcap = await _ensure_decapped(state.selected_pcap, layout)
+                        state.effective_pcap = await _ensure_desegmented(
+                            state.effective_pcap, layout
+                        )
                         await _scan_for_warnings(state.effective_pcap)
                         refresh_warnings()
                         state.stats = await run.io_bound(

@@ -21,7 +21,7 @@ from .stats_parser import ConnStats, parse_stats
 from .xpl_parser import Arrow, Line, Text, Tick, XplPlot
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Segment:
     time: float
     seq_start: int
@@ -30,6 +30,10 @@ class Segment:
     paired_ack_time: float | None
     paired_rtt_ms: float | None
     in_flight_after: int
+    # True when this segment was fabricated by the desegment pass (one piece of
+    # a split offload-coalesced super-segment). Its timing is reconstructed, not
+    # observed. Default False so every other construction site is unaffected.
+    fabricated: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,10 @@ class TsgModel:
     # to know whether the precise `coalesced` anomaly was possible.
     mss: int | None = None
     summary: ConnStats | None = None
+    # The desegment coalesce manifest entries (dicts) whose pieces live in this
+    # direction's `segments`. Populated by synthesize() from the desegment.json
+    # manifest; empty when the capture had no offload coalescing.
+    coalesces: list = field(default_factory=list)
 
     def window_stats(self, t0: float | None, t1: float | None) -> WindowStats:
         """Aggregate model contents into a WindowStats for the time range.
@@ -176,6 +184,7 @@ class TsgModel:
         n_bad_csum = sum(1 for a in anomalies if a.kind.startswith("bad_csum"))
         n_bad_csum_acked = sum(1 for a in anomalies if a.kind == "bad_csum_acked")
         n_bad_csum_lost = sum(1 for a in anomalies if a.kind == "bad_csum_lost")
+        n_fabricated = sum(1 for s in segs if s.fabricated)
 
         rtts = [s.paired_rtt_ms for s in segs if s.paired_rtt_ms is not None]
         rtt_p50 = _percentile(rtts, 50)
@@ -218,6 +227,7 @@ class TsgModel:
             n_bad_csum=n_bad_csum,
             n_bad_csum_acked=n_bad_csum_acked,
             n_bad_csum_lost=n_bad_csum_lost,
+            n_fabricated=n_fabricated,
         )
 
 
@@ -252,6 +262,7 @@ class WindowStats:
     n_bad_csum_lost: int = 0
     n_partial_ack: int = 0
     n_coalesced: int = 0
+    n_fabricated: int = 0
 
 
 _TITLE_ENDPOINTS_RE = re.compile(r"^\s*(\S+?)\s*(?:_==>_|==>|_<==_|<==)\s*(\S+?)\s*(?:\(|$)")
@@ -433,15 +444,7 @@ def _compute_in_flight(
         series.append((t, in_flight))
         if kind == "send":
             s = segments[idx]
-            new_segs[idx] = Segment(
-                time=s.time,
-                seq_start=s.seq_start,
-                seq_end=s.seq_end,
-                rtx=s.rtx,
-                paired_ack_time=s.paired_ack_time,
-                paired_rtt_ms=s.paired_rtt_ms,
-                in_flight_after=in_flight,
-            )
+            new_segs[idx] = replace(s, in_flight_after=in_flight)
     return series, [s for s in new_segs if s is not None]
 
 
@@ -469,17 +472,7 @@ def _pair_rtt(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
             out.append(s)
             continue
         rtt_ms = (matched.time - s.time) * 1000.0
-        out.append(
-            Segment(
-                time=s.time,
-                seq_start=s.seq_start,
-                seq_end=s.seq_end,
-                rtx=s.rtx,
-                paired_ack_time=matched.time,
-                paired_rtt_ms=rtt_ms,
-                in_flight_after=s.in_flight_after,
-            )
-        )
+        out.append(replace(s, paired_ack_time=matched.time, paired_rtt_ms=rtt_ms))
     return out
 
 
@@ -519,17 +512,7 @@ def _classify_retx(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
             dup_sum = sum(a.dup_count for a in acks if s.time - rtt_window < a.time < s.time)
             new_rtx = "fast" if dup_sum >= 3 else "rto"
 
-        out.append(
-            Segment(
-                time=s.time,
-                seq_start=s.seq_start,
-                seq_end=s.seq_end,
-                rtx=new_rtx,  # type: ignore[arg-type]
-                paired_ack_time=s.paired_ack_time,
-                paired_rtt_ms=s.paired_rtt_ms,
-                in_flight_after=s.in_flight_after,
-            )
-        )
+        out.append(replace(s, rtx=new_rtx))  # type: ignore[arg-type]
     return out
 
 
@@ -1027,6 +1010,29 @@ def _bad_csum_anomalies(
     return out
 
 
+def _tag_fabricated(segments: list[Segment], coalesces: list) -> list[Segment]:
+    """Mark each Segment that is a piece of a split offload-coalesced super-segment.
+
+    Primary key: the exact parent timestamp — every piece of one coalesce shares
+    it (same pcap-epoch float `_classify_bad_csum` matches on). Secondary: the
+    piece's seq range lies within the parent's span, which disambiguates the rare
+    case of two distinct coalesces captured at the same microsecond. Both the
+    model's segment seqs and the manifest's parent seqs are absolute pcap basis
+    (verified), so no rebasing is needed; the relative-seq toggle is render-only.
+    """
+    if not coalesces:
+        return segments
+    by_time: dict[float, list[tuple[int, int]]] = {}
+    for c in coalesces:
+        by_time.setdefault(c["time"], []).append((c["parent_seq_start"], c["parent_seq_end"]))
+    out: list[Segment] = []
+    for s in segments:
+        spans = by_time.get(s.time)
+        fab = bool(spans) and any(lo <= s.seq_start and s.seq_end <= hi for lo, hi in spans)
+        out.append(replace(s, fabricated=True) if fab else s)
+    return out
+
+
 def _build_model(
     xpl: XplPlot,
     direction: str,
@@ -1035,6 +1041,7 @@ def _build_model(
     mss: int | None = None,
     window_scale: int | None = None,
     summary: ConnStats | None = None,
+    coalesces: list | None = None,
 ) -> TsgModel:
     src, dst = _parse_endpoints(xpl.title)
     segs = _extract_segments(xpl)
@@ -1049,6 +1056,7 @@ def _build_model(
     fin_retx_times = {a.time for a in flag_events if a.kind == "fin_retx"}
     anomalies = _suppress_overlapping_retx(anomalies, fin_retx_times)
     segs = _clear_suppressed_retx(segs, fin_retx_times)
+    segs = _tag_fabricated(segs, coalesces or [])  # provenance: mark split pieces
     anomalies = sorted(
         anomalies
         + flag_events
@@ -1069,6 +1077,7 @@ def _build_model(
         window_scale=window_scale,
         mss=mss,
         summary=summary,
+        coalesces=coalesces or [],
     )
 
 
@@ -1079,6 +1088,8 @@ def synthesize(
     *,
     bad_csum_times_fwd: list[float] | None = None,
     bad_csum_times_bwd: list[float] | None = None,
+    coalesces_fwd: list | None = None,
+    coalesces_bwd: list | None = None,
 ) -> TsgModelPair:
     """Build a TsgModelPair from parsed xpl(s) and tcptrace -l text.
 
@@ -1092,6 +1103,10 @@ def synthesize(
     (typically `csum.scan_pcap` post-filtered to the connection's endpoint
     pair). Each time becomes a `bad_csum` anomaly on the matching direction's
     TSG.
+
+    `coalesces_fwd`/`coalesces_bwd` carry the desegment manifest for each
+    direction so split pieces of offload-coalesced super-segments are flagged
+    `fabricated` on the resulting Segment objects.
 
     Dup-ACK / partial-ACK classification needs both directions: the ACK
     *field* of a pure-ACK packet from side X is X's cumack of Y's data,
@@ -1118,6 +1133,7 @@ def synthesize(
             mss=mss_b,
             window_scale=wscale_b,
             summary=summary,
+            coalesces=coalesces_fwd,
         )
         if xpl_fwd is not None
         else None
@@ -1130,6 +1146,7 @@ def synthesize(
             mss=mss_a,
             window_scale=wscale_a,
             summary=summary,
+            coalesces=coalesces_bwd,
         )
         if xpl_bwd is not None
         else None

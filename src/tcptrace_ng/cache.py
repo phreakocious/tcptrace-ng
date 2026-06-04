@@ -55,6 +55,16 @@ class CacheLayout:
         """JSON sidecar describing what was decapped: encaps, frame counts."""
         return self.root / "decap.json"
 
+    @property
+    def desegment_pcap(self) -> Path:
+        """De-coalesced copy of the (already-decapped) pcap, if offload was split."""
+        return self.root / "desegment.pcap"
+
+    @property
+    def desegment_meta(self) -> Path:
+        """JSON sidecar: split frame counts + the coalesce manifest."""
+        return self.root / "desegment.json"
+
     def conn_dir(self, n: int) -> Path:
         return self.root / f"conn-{n}"
 

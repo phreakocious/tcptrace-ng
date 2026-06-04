@@ -117,16 +117,18 @@ def test_e2e_keepalive_is_not_loss(tmp_path):
     assert "loss_storm" not in _codes(findings)
 
 
-def test_e2e_loss_storm_capped_under_offload(tmp_path):
-    # Heavy loss AND an oversized (coalesced) segment: detect_offload fires, so
-    # loss_storm must cap at 'interesting' rather than assert 'bad' on a capture
-    # whose retransmit counts are corrupted by NIC offload.
+def test_e2e_loss_storm_reports_bad_after_desegment(tmp_path):
+    # Heavy loss AND an oversized (coalesced) segment, but WITH a known MSS
+    # (handshake): run_pipeline de-coalesces the offload before tcptrace, so the
+    # retransmit counts are trustworthy and loss_storm reports 'bad' (NOT capped).
+    # This is the flip from the old offload-capping behavior; the residual
+    # (un-splittable) cap case is covered separately.
     p = _bulk_transfer(tmp_path, "lossoff.pcap", n_drops=12, coalesce=True)
     findings = run_pipeline(p)
     storm = [f for f in findings if f.code == "loss_storm"]
     assert storm, f"expected loss_storm, got {_codes(findings)}"
-    assert storm[0].severity == "interesting"
-    assert storm[0].evidence.get("offload_capped") is True
+    assert storm[0].severity == "bad"
+    assert storm[0].evidence.get("offload_capped") is False
 
 
 # --- real-capture regression anchor (local-only; np.pcap is gitignored) ---
@@ -143,3 +145,43 @@ def test_np_pcap_keepalive_not_flagged_as_loss(tmp_path):
     # And its asymmetric RTT should read as client-side vantage.
     vant = [f for f in findings if f.code == "capture_vantage"]
     assert vant and vant[0].evidence["vantage"] == "client"
+
+
+def _residual_offload_storm(tmp_path, name):
+    """Oversized segments, NO handshake (so MSS is unknowable — tcptrace reports
+    `mss requested: 0`), VARIED sizes (no modal inference) so the desegment pass
+    leaves the connection residual (un-split). Heavy end-of-stream loss makes
+    loss_storm want 'bad', but the MSS-unavailable + oversized-span gate must cap
+    it at 'interesting': retransmit counts are untrustworthy under offload we
+    can't de-coalesce."""
+    fl = TcpFlow()
+    n = 25
+    sizes = [2000, 2400, 2800, 3200, 3600]  # all > 1500, varied -> no dominant mode
+    drop_idx = set(range(n - 6, n))  # drops at the END -> rto (not spurious)
+    seq_lo: dict[int, int] = {}
+    seq_hi: dict[int, int] = {}
+    t = 0.001
+    for i in range(n):
+        lo, hi = fl.send(t, "s", sizes[i % len(sizes)])
+        seq_lo[i], seq_hi[i] = lo, hi
+        if i not in drop_idx:
+            _partial_ack(fl, t + 0.040, hi)
+        t += 0.010
+    for i in sorted(drop_idx):
+        fl.retransmit(t, "s", seq_lo[i], sizes[i % len(sizes)])
+        _partial_ack(fl, t + 0.040, seq_hi[i])
+        t += 0.020
+    fl.fin(t + 0.001, "s")
+    return fl.write(tmp_path / name)
+
+
+def test_e2e_loss_storm_capped_under_residual_offload(tmp_path):
+    # Oversized segments we CANNOT de-coalesce (no SYN MSS, no inferable mode):
+    # run_pipeline leaves them residual, so retransmit counts stay offload-
+    # corrupted and loss_storm must cap at 'interesting', not assert 'bad'.
+    p = _residual_offload_storm(tmp_path, "residual.pcap")
+    findings = run_pipeline(p)
+    storm = [f for f in findings if f.code == "loss_storm"]
+    assert storm, f"expected loss_storm, got {_codes(findings)}"
+    assert storm[0].severity == "interesting"
+    assert storm[0].evidence.get("offload_capped") is True

@@ -270,3 +270,105 @@ def test_diagnose_accepts_none_tsg_runs_capture_vantage_only():
 
 def test_diagnose_all_none_returns_empty():
     assert diagnose(None, None, None) == []
+
+
+# ---------------------------------------------------------------------------
+# _sack_confirmed_loss
+# ---------------------------------------------------------------------------
+
+
+def _ack(t, ack_seq, sack_blocks=(), dup_count=0):
+    from tcptrace_ng.tcp_inspect import Ack
+
+    return Ack(
+        time=t,
+        ack_seq=ack_seq,
+        rwin=65535,
+        rwin_scaled=65535,
+        sack_blocks=tuple(sack_blocks),
+        dup_count=dup_count,
+        rwin_known=True,
+    )
+
+
+def _seg(t, lo, hi, rtx=None):
+    from tcptrace_ng.tcp_inspect import Segment
+
+    return Segment(t, lo, hi, rtx, None, None, 0)
+
+
+def _fwd_only(segments, acks):
+    from tcptrace_ng.tcp_inspect import TsgModel, TsgModelPair
+
+    return TsgModelPair(
+        fwd=TsgModel(
+            src="10.0.0.1:50000", dst="10.0.0.2:80", direction="a2b", segments=segments, acks=acks
+        ),
+        bwd=None,
+    )
+
+
+def test_sack_confirmed_loss_fires_bad_on_three_retx_gaps():
+    from tcptrace_ng.diagnose import diagnose
+
+    acks, segs = [], []
+    for i in range(3):
+        base = 1000 + i * 10_000
+        acks.append(_ack(1.0 + i, base, sack_blocks=((base + 1000, base + 2000),)))
+        segs.append(_seg(2.0 + i, base, base + 1000, rtx="rto"))  # retransmits the gap, later
+    findings = diagnose(None, _fwd_only(segs, acks), None)
+    hit = [f for f in findings if f.code == "sack_confirmed_loss"]
+    assert hit and hit[0].severity == "bad" and hit[0].evidence["sack_confirmed"] == 3
+
+
+def test_sack_gap_resolved_without_retx_is_reordering_not_loss():
+    from tcptrace_ng.diagnose import diagnose
+
+    acks = [_ack(1.0, 1000, sack_blocks=((2000, 3000),), dup_count=1)]  # gap, but...
+    segs = [_seg(1.0, 1000, 2000, rtx=None)]  # ...no retransmit, <3 dup
+    findings = diagnose(None, _fwd_only(segs, acks), None)
+    assert not any(f.code == "sack_confirmed_loss" for f in findings)
+
+
+def test_sack_confirmed_loss_single_gap_is_interesting_not_bad():
+    from tcptrace_ng.diagnose import diagnose
+
+    acks = [_ack(1.0, 1000, sack_blocks=((2000, 3000),))]
+    segs = [_seg(2.0, 1000, 2000, rtx="rto")]  # one confirmed gap
+    findings = diagnose(None, _fwd_only(segs, acks), None)
+    hit = [f for f in findings if f.code == "sack_confirmed_loss"]
+    assert hit and hit[0].severity == "interesting"
+
+
+def test_sack_confirmed_loss_via_three_dup_acks():
+    from tcptrace_ng.diagnose import diagnose
+
+    acks = [_ack(1.0, 1000, sack_blocks=((2000, 3000),), dup_count=3)]  # 3 dup-ACKs, no retx needed
+    findings = diagnose(None, _fwd_only([], acks), None)
+    assert any(f.code == "sack_confirmed_loss" for f in findings)
+
+
+def test_direction_is_coalesced_treats_mss_zero_as_unavailable():
+    # mss==0 is tcptrace's no-SYN sentinel; an oversized segment then reads as coalesced
+    from tcptrace_ng.diagnose import _direction_is_coalesced
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    m = TsgModel(mss=0, segments=[Segment(1.0, 0, 3000, None, None, None, 0)])
+    assert _direction_is_coalesced(m) is True
+
+
+def test_direction_is_coalesced_false_for_known_jumbo_mss():
+    # a real jumbo MSS with an in-MSS segment and no coalesced anomaly is NOT coalesced
+    from tcptrace_ng.diagnose import _direction_is_coalesced
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    m = TsgModel(mss=8960, segments=[Segment(1.0, 0, 8000, None, None, None, 0)])
+    assert _direction_is_coalesced(m) is False
+
+
+def test_direction_is_coalesced_none_mss_backstop():
+    from tcptrace_ng.diagnose import _direction_is_coalesced
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    m = TsgModel(mss=None, segments=[Segment(1.0, 0, 3000, None, None, None, 0)])
+    assert _direction_is_coalesced(m) is True

@@ -1368,3 +1368,110 @@ def test_window_stats_returns_throughput_in_Bps():
     ws = m.window_stats(1.0, 3.0)
     # 300 bytes over (3.0 - 1.0) = 2.0 s → 150 Bps.
     assert ws.throughput_eff_Bps == pytest.approx(150.0)
+
+
+def test_segment_has_fabricated_flag_default_false():
+    from tcptrace_ng.tcp_inspect import Segment
+
+    s = Segment(
+        time=1.0,
+        seq_start=0,
+        seq_end=1448,
+        rtx=None,
+        paired_ack_time=None,
+        paired_rtt_ms=None,
+        in_flight_after=0,
+    )
+    assert s.fabricated is False
+
+
+def test_segment_fabricated_can_be_set():
+    from tcptrace_ng.tcp_inspect import Segment
+
+    s = Segment(1.0, 0, 1448, None, None, None, 0, True)
+    assert s.fabricated is True
+
+
+def test_tsgmodel_coalesces_defaults_empty():
+    from tcptrace_ng.tcp_inspect import TsgModel
+
+    assert TsgModel().coalesces == []
+
+
+def test_tag_fabricated_by_timestamp_and_seq():
+    from tcptrace_ng.tcp_inspect import Segment, _tag_fabricated
+
+    segs = [
+        Segment(1.0, 1000, 2448, None, None, None, 0),  # piece 1 of the coalesce
+        Segment(1.0, 2448, 3896, None, None, None, 0),  # piece 2
+        Segment(2.0, 3896, 5344, None, None, None, 0),  # unrelated, real (other ts)
+    ]
+    coalesces = [
+        {
+            "time": 1.0,
+            "parent_seq_start": 1000,
+            "parent_seq_end": 3896,
+            "pieces": 2,
+            "mss": 1448,
+            "mss_source": "syn",
+            "src": "a",
+            "dst": "b",
+        }
+    ]
+    tagged = _tag_fabricated(segs, coalesces)
+    assert [s.fabricated for s in tagged] == [True, True, False]
+
+
+def test_tag_fabricated_timestamp_collision_disambiguated_by_seq():
+    from tcptrace_ng.tcp_inspect import Segment, _tag_fabricated
+
+    segs = [
+        Segment(1.0, 1000, 2000, None, None, None, 0),  # coalesce A
+        Segment(1.0, 5000, 6000, None, None, None, 0),  # coalesce B
+        Segment(1.0, 9000, 9500, None, None, None, 0),  # real: same ts, outside both spans
+    ]
+    coalesces = [
+        {
+            "time": 1.0,
+            "parent_seq_start": 1000,
+            "parent_seq_end": 2000,
+            "pieces": 1,
+            "mss": 1000,
+            "mss_source": "syn",
+            "src": "a",
+            "dst": "b",
+        },
+        {
+            "time": 1.0,
+            "parent_seq_start": 5000,
+            "parent_seq_end": 6000,
+            "pieces": 1,
+            "mss": 1000,
+            "mss_source": "syn",
+            "src": "a",
+            "dst": "b",
+        },
+    ]
+    assert [s.fabricated for s in _tag_fabricated(segs, coalesces)] == [True, True, False]
+
+
+def test_tag_fabricated_empty_is_noop():
+    from tcptrace_ng.tcp_inspect import Segment, _tag_fabricated
+
+    segs = [Segment(1.0, 0, 1448, None, None, None, 0)]
+    assert _tag_fabricated(segs, []) is segs
+
+
+def test_window_stats_counts_fabricated():
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    m = TsgModel(
+        segments=[
+            Segment(1.0, 0, 1460, None, None, None, 0, True),
+            Segment(1.0, 1460, 2920, None, None, None, 0, True),
+            Segment(2.0, 2920, 4380, None, None, None, 0, False),
+        ]
+    )
+    ws = m.window_stats(None, None)
+    assert ws.n_fabricated == 2
+    assert ws.n_segs == 3

@@ -229,3 +229,11 @@ def test_load_stats_returns_none_when_stale_version(tmp_path):
     write_version(layout, "old")
     save_stats(layout, _stats())
     assert load_stats(layout, "new") is None
+
+
+def test_desegment_paths(tmp_path: Path):
+    pcap = tmp_path / "foo.pcap"
+    pcap.write_bytes(b"")
+    layout = CacheLayout(pcap)
+    assert layout.desegment_pcap == layout.root / "desegment.pcap"
+    assert layout.desegment_meta == layout.root / "desegment.json"

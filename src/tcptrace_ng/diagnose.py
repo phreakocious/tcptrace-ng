@@ -169,7 +169,10 @@ def _direction_is_coalesced(model) -> bool:
     # jumbo-frame paths (MSS up to ~8960) as coalesced — capping a real loss
     # storm and appending a fabricated offload note. Jumbo is common in
     # DC/storage, the target audience's turf.
-    if model.mss is not None:
+    # `mss == 0` is tcptrace's "no SYN seen" sentinel (`mss requested: 0`), which
+    # is as MSS-unavailable as None — both must reach the backstop. A real (incl.
+    # jumbo) MSS is truthy, so jumbo paths still skip it.
+    if model.mss:
         return False
     return any((s.seq_end - s.seq_start) > _OVERSIZED_SEG_BYTES for s in model.segments)
 
@@ -226,6 +229,55 @@ def _loss_storm(tsg: TsgModelPair | None) -> list[Finding]:
     return out
 
 
+def _sack_confirmed_loss(tsg: TsgModelPair | None) -> list[Finding]:
+    """Offload-immune loss: a SACK gap (a selective-ack block above an un-acked
+    hole) that is later retransmitted, or that coincides with >=3 dup-ACKs. A gap
+    that resolves (the cumack passes it) without a retransmit is reordering, not
+    loss. SACKs travel on the reverse-direction pure-ACKs, which offload
+    coalescing leaves intact, so this stays valid even when retransmit *counts*
+    are corrupted by LRO/GRO/TSO.
+    """
+    if tsg is None:
+        return []
+    out: list[Finding] = []
+    for model, scope in ((tsg.fwd, "a2b"), (tsg.bwd, "b2a")):
+        if model is None:
+            continue
+        confirmed = 0
+        gap_bytes = 0
+        for a in model.acks:
+            for lo, _hi in a.sack_blocks:
+                if lo <= a.ack_seq:
+                    continue  # SACK at/below cumack — not a forward gap
+                retx = any(
+                    s.rtx is not None
+                    and s.time > a.time
+                    and s.seq_start < lo
+                    and s.seq_end > a.ack_seq
+                    for s in model.segments
+                )
+                if retx or a.dup_count >= 3:
+                    confirmed += 1
+                    gap_bytes += lo - a.ack_seq
+        if confirmed == 0:
+            continue
+        out.append(
+            Finding(
+                code="sack_confirmed_loss",
+                severity="bad" if confirmed >= 3 else "interesting",
+                scope=scope,  # type: ignore[arg-type]
+                headline="SACK-confirmed loss",
+                detail=(
+                    f"{confirmed} SACK gap(s) ({gap_bytes:,} B) were retransmitted "
+                    f"or triple-dup-ACKed — loss proven independent of any offload "
+                    f"coalescing."
+                ),
+                evidence={"sack_confirmed": confirmed, "gap_bytes": gap_bytes},
+            )
+        )
+    return out
+
+
 def diagnose(
     stats: ConnStats | None,
     tsg: TsgModelPair | None,
@@ -246,5 +298,6 @@ def diagnose(
     findings: list[Finding] = []
     findings += _capture_vantage(stats)
     findings += _loss_storm(tsg)
+    findings += _sack_confirmed_loss(tsg)
     findings.sort(key=lambda f: _SEVERITY_RANK[f.severity], reverse=True)
     return findings

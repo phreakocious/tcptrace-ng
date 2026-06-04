@@ -447,12 +447,8 @@ def test_to_tsg_figure_emits_endpoints_in_panel_label():
     (top-left of the subplot) that worked even with the title in place."""
     model = TsgModel(src="1.2.3.4:80", dst="5.6.7.8:51234", direction="a2b")
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    paper_anns = [
-        a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") == "paper"
-    ]
-    assert any(
-        "1.2.3.4:80" in (t or "") and "5.6.7.8:51234" in (t or "") for t in paper_anns
-    )
+    paper_anns = [a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") == "paper"]
+    assert any("1.2.3.4:80" in (t or "") and "5.6.7.8:51234" in (t or "") for t in paper_anns)
 
 
 def _model_with_segments() -> TsgModel:
@@ -554,7 +550,8 @@ def test_tsg_figure_has_no_top_title():
     assert fig["layout"].get("title", {}).get("text", "") == ""
     # The per-panel label must remain — that's what conveys direction now.
     panel_labels = [
-        a.get("text") for a in fig["layout"]["annotations"]
+        a.get("text")
+        for a in fig["layout"]["annotations"]
         if a.get("xref") == "paper" and a.get("yref") == "paper" and " → " in (a.get("text") or "")
     ]
     assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
@@ -588,7 +585,8 @@ def test_throughput_figure_has_no_top_title():
     fig = to_throughput_figure(ThroughputModelPair(fwd=fwd))
     assert fig["layout"].get("title", {}).get("text", "") == ""
     panel_labels = [
-        a.get("text") for a in fig["layout"]["annotations"]
+        a.get("text")
+        for a in fig["layout"]["annotations"]
         if a.get("xref") == "paper" and a.get("yref") == "paper" and " → " in (a.get("text") or "")
     ]
     assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
@@ -1221,7 +1219,8 @@ def test_info_strip_summarizes_hidden_kinds_above_subplot():
     # Paper-anchored annotations include the direction label (top-left) and
     # the info strip; filter out the label so the strip stands alone.
     paper_anns = [
-        a for a in fig["layout"]["annotations"]
+        a
+        for a in fig["layout"]["annotations"]
         if a.get("yref") == "paper" and " → " not in (a.get("text") or "")
     ]
     assert len(paper_anns) == 1
@@ -1386,9 +1385,7 @@ def test_anomaly_hovertext_respects_rel_seq_mode():
             Anomaly(
                 time=1.8,
                 kind="partial_ack",
-                one_liner=(
-                    f"partial ACK at seq {baseline + 800:,} (max sent {baseline + 1500:,})"
-                ),
+                one_liner=(f"partial ACK at seq {baseline + 800:,} (max sent {baseline + 1500:,})"),
                 seq_lo=baseline + 800,
                 seq_hi=baseline + 800,
             ),
@@ -1879,3 +1876,70 @@ class TestThroughputFigure:
         ceil = next(t for t in fig["data"] if t.get("name") == "ceiling")
         assert ceil["y"] == [20000.0, 20000.0]
         assert list(ceil["customdata"]) == [20000.0, 20000.0]
+
+
+def test_fabricated_pieces_render_as_distinct_dotted_trace():
+    from tcptrace_ng.plotly_adapter import _build_direction_traces
+    from tcptrace_ng.tcp_inspect import Segment, TsgModel
+
+    coalesce = {
+        "time": 1.0,
+        "src": "a",
+        "dst": "b",
+        "parent_seq_start": 1000,
+        "parent_seq_end": 1000 + 3 * 1460,
+        "pieces": 3,
+        "mss": 1460,
+        "mss_source": "syn",
+    }
+    segs = [
+        Segment(1.0, 1000, 2460, None, None, None, 0, True),  # piece 1
+        Segment(1.0, 2460, 3920, None, None, None, 0, True),  # piece 2
+        Segment(1.0, 3920, 5380, None, None, None, 0, True),  # piece 3
+        Segment(2.0, 5380, 6828, None, None, None, 0, False),  # a real segment
+    ]
+    model = TsgModel(src="a", dst="b", direction="a2b", segments=segs, coalesces=[coalesce])
+    traces = _build_direction_traces(model, xaxis_ref="x", yaxis_ref="y")
+    by_name = {t["name"]: t for t in traces}
+    assert "reconstructed" in by_name and "data" in by_name
+    fab = by_name["reconstructed"]
+    assert fab["line"].get("dash") == "dot"
+    assert len(fab["x"]) == 9  # 3 pieces x (start, end, None)
+    assert len(by_name["data"]["x"]) == 3  # the lone real segment
+    joined = " ".join(h for h in fab["hovertext"] if h)
+    assert "reconstructed piece 1/3" in joined and "reconstructed piece 3/3" in joined
+
+
+def test_anomaly_hovertext_flags_reconstructed_timing():
+    from tcptrace_ng.plotly_adapter import _anomaly_hovertext
+    from tcptrace_ng.tcp_inspect import Anomaly, Segment, TsgModel
+
+    fab_seg = Segment(1.0, 1000, 2460, None, None, None, 0, True)
+    a = Anomaly(time=1.0, kind="ooo", one_liner="out-of-order seq 1,000", seq_lo=1000, seq_hi=2460)
+    model = TsgModel(segments=[fab_seg], anomalies=[a])
+    assert "timing reconstructed" in _anomaly_hovertext(a, model)
+
+    real_seg = Segment(2.0, 1000, 2460, None, None, None, 0, False)
+    a2 = Anomaly(time=2.0, kind="ooo", one_liner="out-of-order seq 1,000", seq_lo=1000, seq_hi=2460)
+    model2 = TsgModel(segments=[real_seg], anomalies=[a2])
+    assert "timing reconstructed" not in _anomaly_hovertext(a2, model2)
+
+
+def test_fabricated_hovertext_flags_inferred_mss_confidence():
+    # Spec §3: a tier-2 (modal-inferred) MSS is a guess, so the hover must read as
+    # lower-confidence; a SYN-sourced MSS must not.
+    from tcptrace_ng.plotly_adapter import _fabricated_hovertext
+    from tcptrace_ng.tcp_inspect import Segment
+
+    seg = Segment(1.0, 1000, 2460, None, None, None, 0, True)
+    base = {
+        "time": 1.0,
+        "parent_seq_start": 1000,
+        "parent_seq_end": 2460,
+        "pieces": 1,
+        "mss": 1460,
+        "src": "a",
+        "dst": "b",
+    }
+    assert "MSS inferred" in _fabricated_hovertext(seg, [{**base, "mss_source": "inferred"}])
+    assert "MSS inferred" not in _fabricated_hovertext(seg, [{**base, "mss_source": "syn"}])

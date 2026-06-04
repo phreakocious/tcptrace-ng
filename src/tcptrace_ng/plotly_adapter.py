@@ -582,7 +582,11 @@ def _data_segment_trace(
     "Seg #N · 0.0 ms" tooltips. Their semantic info lives on the matching
     handshake/keepalive annotation, which we enrich with seq/RTT below.
     """
-    segs = [s for s in model.segments if s.rtx is None and s.seq_end - s.seq_start > 1]
+    segs = [
+        s
+        for s in model.segments
+        if s.rtx is None and not s.fabricated and s.seq_end - s.seq_start > 1
+    ]
     if not segs:
         return None
     xs: list[Any] = []
@@ -602,6 +606,79 @@ def _data_segment_trace(
         "line": {"color": color, "width": 2},
         "customdata": cd,
         "hovertemplate": _TSG_SEG_TEMPLATE,
+        "name": name,
+        "legendgroup": legendgroup or name,
+        "showlegend": showlegend,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
+
+
+_TSG_FAB_TEMPLATE = "%{hovertext}<extra></extra>"
+
+
+def _fabricated_hovertext(seg: Segment, coalesces: list) -> str:
+    """Provenance for one fabricated piece: which coalesce it came from and that
+    its per-piece timing was reconstructed (all pieces share the parent's stamp)."""
+    for c in coalesces:
+        if (
+            c["time"] == seg.time
+            and c["parent_seq_start"] <= seg.seq_start
+            and seg.seq_end <= c["parent_seq_end"]
+        ):
+            mss = c.get("mss") or 1
+            i = (seg.seq_start - c["parent_seq_start"]) // mss + 1
+            kb = (c["parent_seq_end"] - c["parent_seq_start"]) / 1024.0
+            # Tier-2 (modal-inferred) MSS is a guess, not the negotiated value, so
+            # the piece boundaries are approximate — flag the lower confidence.
+            confidence = (
+                "<br>MSS inferred (no SYN) — piece boundaries approximate"
+                if c.get("mss_source") == "inferred"
+                else ""
+            )
+            return (
+                f"<b>reconstructed piece {i}/{c['pieces']}</b><br>"
+                f"from a {kb:.1f} KB de-coalesced offload segment<br>"
+                f"timing inferred — all pieces share the captured timestamp"
+                f"{confidence}"
+            )
+    return "<b>reconstructed segment</b><br>timing inferred (de-coalesced offload)"
+
+
+def _fabricated_segment_trace(
+    model: TsgModel,
+    *,
+    name: str,
+    color: str,
+    xaxis_ref: str = "x",
+    yaxis_ref: str = "y",
+    baseline: int = 0,
+    showlegend: bool = True,
+    legendgroup: str | None = None,
+) -> dict[str, Any] | None:
+    """One scattergl trace for fabricated (de-coalesced) data pieces, drawn
+    dotted + muted so it's unmistakable their per-piece timing was reconstructed
+    rather than observed."""
+    segs = [s for s in model.segments if s.fabricated and s.seq_end - s.seq_start > 1]
+    if not segs:
+        return None
+    xs: list[Any] = []
+    ys: list[float | None] = []
+    ht: list[str] = []
+    for s in segs:
+        t_iso = _epoch_to_iso(s.time)
+        label = _fabricated_hovertext(s, model.coalesces)
+        xs.extend([t_iso, t_iso, None])
+        ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
+        ht.extend([label, label, ""])
+    return {
+        "type": "scattergl",
+        "mode": "lines",
+        "x": xs,
+        "y": ys,
+        "line": {"color": color, "width": 1, "dash": "dot"},
+        "hovertext": ht,
+        "hovertemplate": _TSG_FAB_TEMPLATE,
         "name": name,
         "legendgroup": legendgroup or name,
         "showlegend": showlegend,
@@ -947,7 +1024,15 @@ def _anomaly_hovertext(a: Anomaly, model: TsgModel, baseline: int = 0) -> str:
     those seqs to the baseline so the popup matches the on-chart axis when
     seq_mode="rel". Kinds whose one_liner carries no seqs (or only non-seq
     numbers like byte counts) pass through unchanged.
+
+    When the anomaly coincides with a fabricated (de-coalesced) segment, the
+    popup notes that the timing was reconstructed.
     """
+    caveat = (
+        "<br>timing reconstructed"
+        if any(s.fabricated and s.time == a.time for s in model.segments)
+        else ""
+    )
     if a.kind in _SEG_BACKED_KINDS:
         for s in model.segments:
             if s.time != a.time:
@@ -955,11 +1040,11 @@ def _anomaly_hovertext(a: Anomaly, model: TsgModel, baseline: int = 0) -> str:
             parts = [a.one_liner, f"seq {s.seq_start - baseline:,}"]
             if s.paired_rtt_ms is not None:
                 parts.append(f"ACKed {s.paired_rtt_ms:.1f} ms later")
-            return "<br>".join(parts)
+            return "<br>".join(parts) + caveat
     text = a.one_liner
     if baseline and a.kind in _KINDS_WITH_EMBEDDED_SEQS:
         text = _rebase_embedded_seqs(text, baseline)
-    return text.replace(" · ", "<br>")
+    return text.replace(" · ", "<br>") + caveat
 
 
 def _anomaly_annotations(
@@ -1221,6 +1306,19 @@ def _build_direction_traces(
             baseline=baseline,
             showlegend=False,
             legendgroup="data",
+        ),
+    )
+    _commit(
+        "reconstructed",
+        _fabricated_segment_trace(
+            model,
+            name="reconstructed",
+            color="#7fb3c8",
+            xaxis_ref=xaxis_ref,
+            yaxis_ref=yaxis_ref,
+            baseline=baseline,
+            showlegend=False,
+            legendgroup="reconstructed",
         ),
     )
     _commit(

@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tcptrace_ng.csum import scan_pcap
+from tcptrace_ng.desegment import desegment_pcap
 from tcptrace_ng.diagnose import Finding, diagnose
 from tcptrace_ng.offload import detect_offload
 from tcptrace_ng.runner import analyze_connection, list_connections
@@ -29,6 +30,14 @@ from tcptrace_ng.xpl_parser import parse_xpl
 
 def run_pipeline(pcap: Path, conn_n: int = 1, *, out_dir: Path | None = None) -> list[Finding]:
     out_dir = out_dir or pcap.parent / ".pipeline"
+    # Mirror the app: de-coalesce NIC offload (LRO/GRO/TSO) before tcptrace, so
+    # e2e fixtures exercise the same wire-plausible segments the UI analyzes.
+    # Guarded on detect_offload so non-offload fixtures stay byte-identical.
+    if detect_offload(pcap).oversized_segments > 0:
+        deseg = out_dir / "desegment.pcap"
+        deseg.parent.mkdir(parents=True, exist_ok=True)
+        desegment_pcap(pcap, deseg)
+        pcap = deseg
     res = analyze_connection(pcap, conn_n, out_dir, no_dns=True, with_rtt=True)
 
     tsg = next((g for g in group_xpls(res.xpl_files) if g.metric == "tsg"), None)
