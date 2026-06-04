@@ -126,23 +126,51 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
 
 
 # Full-figure hover crossbar. Plotly's per-axis spike stops at its subplot
-# boundary so the bwd panel goes blank when hovering the fwd panel (and
-# vice versa); this draws a single layout shape spanning the entire figure
-# (yref=paper) at the cursor's x. MutationObserver wires it up on any
-# .js-plotly-plot the app mounts, including ones swapped in by tab changes
-# or update_figure(). Debug counters live on window.tcpNgCrossbar so the
-# console can confirm whether the script loaded and how many plots are wired.
+# boundary, so the bwd panel goes blank when hovering the fwd panel (and
+# vice versa). On every plotly_hover we:
+#   1. draw a single layout shape (yref=paper) at the cursor's x so the
+#      vertical line spans both stacked panels, with a date+time label so
+#      the user can read the absolute timestamp anywhere on the chart;
+#   2. fire Plotly.Fx.hover on the *other* subplot at the same xval so the
+#      per-trace tooltips pop on both panels simultaneously.
+#
+# A re-entry guard prevents the programmatic Fx.hover from triggering an
+# infinite cascade through this same handler.
+#
+# A MutationObserver wires this up on any .js-plotly-plot the app mounts,
+# including ones swapped in by tab changes or update_figure(). Debug
+# counters live on window.tcpNgCrossbar so the console can confirm the
+# script loaded and report what it's seeing.
 _HOVER_CROSSBAR_JS = """
 <script>
 (function() {
   const debug = {loaded: true, attached: 0, hovers: 0, lastX: null, lastErr: null};
   window.tcpNgCrossbar = debug;
+  function fmtDate(x) {
+    const d = (x instanceof Date) ? x : new Date(x);
+    if (isNaN(d.getTime())) return String(x);
+    // YYYY-MM-DD HH:MM:SS.mmm in UTC — matches the xaxis hoverformat.
+    const pad = (n, w) => String(n).padStart(w || 2, '0');
+    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate())
+      + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds())
+      + '.' + pad(d.getUTCMilliseconds(), 3);
+  }
+  function otherSubplot(gd, axId) {
+    // For paired figures the second subplot anchors x2 -> y2; the single-
+    // direction case has only 'xy'. Returns null when there's nothing to
+    // mirror to.
+    if (axId === 'x' && gd._fullLayout.xaxis2) return 'xy2';
+    if (axId === 'x2' && gd._fullLayout.xaxis) return 'xy';
+    return null;
+  }
   function attach(gd) {
     if (gd._tcpNgCrosshair) return;
     if (!gd._fullLayout || typeof gd.on !== 'function') return;
     gd._tcpNgCrosshair = true;
     debug.attached++;
     gd.on('plotly_hover', function(d) {
+      if (gd._tcpNgInHover) return;
+      gd._tcpNgInHover = true;
       try {
         const pt = d.points && d.points[0];
         if (!pt) return;
@@ -156,10 +184,22 @@ _HOVER_CROSSBAR_JS = """
             y0: 0, y1: 1,
             line: {color: '#888888', width: 1, dash: 'dot'},
             layer: 'above',
+            label: {
+              text: fmtDate(pt.x),
+              textposition: 'top center',
+              font: {color: '#aaaaaa', size: 10, family: 'Menlo, monospace'},
+              yanchor: 'bottom',
+            },
           }],
         });
+        const mirror = otherSubplot(gd, pt.xaxis && (pt.xaxis._id || pt.xaxis.id));
+        if (mirror) Plotly.Fx.hover(gd, {xval: pt.x}, mirror);
       } catch (e) {
         debug.lastErr = String(e);
+      } finally {
+        // Clear the guard after Plotly drains the synchronous event queue
+        // from the programmatic Fx.hover call above.
+        setTimeout(function() { gd._tcpNgInHover = false; }, 0);
       }
     });
     gd.on('plotly_unhover', function() {
