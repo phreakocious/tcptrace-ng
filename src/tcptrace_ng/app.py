@@ -125,6 +125,47 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
     }
 
 
+# Full-figure hover crossbar. Plotly's per-axis spike stops at its subplot
+# boundary so the bwd panel goes blank when hovering the fwd panel (and
+# vice versa); this draws a single layout shape spanning the entire figure
+# (yref=paper) at the cursor's x. MutationObserver wires it up on any
+# .js-plotly-plot the app mounts, including ones swapped in by tab changes
+# or update_figure().
+_HOVER_CROSSBAR_JS = """
+<script>
+(function() {
+  const BAR = {
+    type: 'line',
+    xref: 'x',
+    yref: 'paper',
+    y0: 0, y1: 1,
+    line: {color: '#3a3a3a', width: 1, dash: 'dot'},
+    layer: 'above',
+  };
+  function attach(gd) {
+    if (gd._tcpNgCrosshair) return;
+    if (!gd._fullLayout || typeof gd.on !== 'function') return;
+    gd._tcpNgCrosshair = true;
+    gd.on('plotly_hover', function(d) {
+      const pt = d.points && d.points[0];
+      if (!pt) return;
+      const shape = Object.assign({}, BAR, {x0: pt.x, x1: pt.x});
+      Plotly.relayout(gd, {shapes: [shape]});
+    });
+    gd.on('plotly_unhover', function() {
+      Plotly.relayout(gd, {shapes: []});
+    });
+  }
+  function scan() {
+    document.querySelectorAll('.js-plotly-plot').forEach(attach);
+  }
+  new MutationObserver(scan).observe(document.body, {childList: true, subtree: true});
+  setInterval(scan, 1000);
+})();
+</script>
+"""
+
+
 class _State:
     """Module-level state. NiceGUI page is rebuilt per-client; state stays here."""
 
@@ -909,6 +950,16 @@ def _render_throughput_stats_panel(
         ui.html(f'<div class="tsg-stats">{"".join(html_parts)}</div>')
 
 
+def _is_shape_only_relayout(args: dict) -> bool:
+    """True iff the relayout payload only contains shape changes — the
+    client-side hover crossbar (attach_hover_crossbar JS) updates a layout
+    shape on every hover, which fires plotly_relayout for what's really just
+    a cursor move. Stats panels shouldn't re-render for that."""
+    if not args:
+        return False
+    return all(k.startswith("shapes") for k in args)
+
+
 def _xrange_from_relayout(args: dict) -> tuple[float | None, float | None]:
     """Extract (t0, t1) in epoch seconds from a plotly_relayout event payload.
 
@@ -971,6 +1022,7 @@ def build_page() -> None:
     @ui.page("/")
     def index() -> None:
         ui.add_head_html(f"<style>{DARK_CSS}</style>")
+        ui.add_head_html(_HOVER_CROSSBAR_JS)
 
         cwd = Path.cwd()
         pcaps = _scan_pcaps(cwd)
@@ -1306,7 +1358,10 @@ def build_page() -> None:
                             )
 
                             def _on_relayout(e) -> None:
-                                t0, t1 = _xrange_from_relayout(e.args or {})
+                                args = e.args or {}
+                                if _is_shape_only_relayout(args):
+                                    return
+                                t0, t1 = _xrange_from_relayout(args)
                                 _render_stats_panel(
                                     stats_box, model_pair, fwd_label, bwd_label, t0, t1
                                 )
@@ -1342,7 +1397,10 @@ def build_page() -> None:
                             )
 
                             def _on_tput_relayout(e) -> None:
-                                t0, t1 = _xrange_from_relayout(e.args or {})
+                                args = e.args or {}
+                                if _is_shape_only_relayout(args):
+                                    return
+                                t0, t1 = _xrange_from_relayout(args)
                                 _render_throughput_stats_panel(
                                     tput_stats_box, tput_pair, fwd_label, bwd_label, t0, t1
                                 )

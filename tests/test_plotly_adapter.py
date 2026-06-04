@@ -560,28 +560,27 @@ def test_tsg_figure_has_no_top_title():
     assert "1.1.1.1:1 → 2.2.2.2:2" in panel_labels
 
 
-def test_tsg_xaxis_has_full_height_hover_spike():
-    """A full-height vertical line at the cursor's x position helps correlate
-    events between the fwd/bwd panels. Plotly's `showspikes`+`spikemode:
-    across` does this; the layout's `hovermode` must be x-locked so the spike
-    follows the cursor instead of snapping per-point per-trace."""
+def test_tsg_layout_arms_plotly_hover_for_crossbar_script():
+    """Plotly's per-axis spike stops at its subplot boundary, so the crossbar
+    is drawn client-side as a full-figure layout shape (see
+    attach_hover_crossbar in app.py). For that to fire smoothly we still
+    need hovermode=x at the layout level; the spike config itself is gone
+    so it doesn't overlap the JS-drawn line."""
     fwd = TsgModel(src="1.1.1.1:1", dst="2.2.2.2:2", direction="a2b")
     bwd = TsgModel(src="2.2.2.2:2", dst="1.1.1.1:1", direction="b2a")
     fig = to_tsg_figure(TsgModelPair(fwd=fwd, bwd=bwd))
+    assert fig["layout"].get("hovermode") == "x"
     for ax in ("xaxis", "xaxis2"):
-        assert fig["layout"][ax].get("showspikes") is True, f"{ax} missing spike"
-        assert fig["layout"][ax].get("spikemode") == "across"
-    assert fig["layout"].get("hovermode") in ("x", "x unified")
+        assert "showspikes" not in fig["layout"][ax]
 
 
-def test_throughput_xaxis_has_full_height_hover_spike():
+def test_throughput_layout_arms_plotly_hover_for_crossbar_script():
     fwd = _tput_model(samples=(_sample(1.0),))
     bwd = _tput_model(samples=(_sample(2.0),), src="2.2.2.2:2", dst="1.1.1.1:1")
     fig = to_throughput_figure(ThroughputModelPair(fwd=fwd, bwd=bwd))
+    assert fig["layout"].get("hovermode") == "x"
     for ax in ("xaxis", "xaxis2"):
-        assert fig["layout"][ax].get("showspikes") is True, f"{ax} missing spike"
-        assert fig["layout"][ax].get("spikemode") == "across"
-    assert fig["layout"].get("hovermode") in ("x", "x unified")
+        assert "showspikes" not in fig["layout"][ax]
 
 
 def test_throughput_figure_has_no_top_title():

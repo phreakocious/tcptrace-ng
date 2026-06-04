@@ -1239,7 +1239,12 @@ def _build_direction_traces(
 
 
 def _tsg_xaxis(*, show_ticks: bool) -> dict[str, Any]:
-    xaxis: dict[str, Any] = {
+    # Hover crossbar isn't a Plotly spike — Plotly's spike stops at its own
+    # subplot boundary, which leaves the bwd panel empty when hovering fwd
+    # (and vice versa). A client-side script (see app.attach_hover_crossbar)
+    # draws a full-figure layout shape on plotly_hover instead, spanning
+    # both panels. hovermode=x at the layout level is what arms plotly_hover.
+    return {
         "title": {"text": "time" if show_ticks else ""},
         "type": "date",
         "tickformat": "%H:%M:%S.%L",
@@ -1247,19 +1252,7 @@ def _tsg_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "gridcolor": GRID_COLOR,
         "zerolinecolor": ZERO_LINE_COLOR,
         "showticklabels": show_ticks,
-        # Full-height vertical hover crossbar — helps correlate events between
-        # the fwd/bwd panels. spikemode=across spans the plot area;
-        # spikesnap=cursor follows the mouse instead of snapping to the
-        # nearest data point. Needs hovermode=x at the layout level so the
-        # spike activates between data points, not only on top of them.
-        "showspikes": True,
-        "spikemode": "across",
-        "spikesnap": "cursor",
-        "spikethickness": 1,
-        "spikecolor": "#3a3a3a",
-        "spikedash": "dot",
     }
-    return xaxis
 
 
 def _tsg_yaxis() -> dict[str, Any]:
@@ -1350,10 +1343,7 @@ def to_tsg_figure(
     # was just duplicated text occupying the room the legend bar needs.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
-    # x unified extends the x-axis spike across every subplot that shares the
-    # x range (fwd+bwd panels here) instead of stopping at the active panel's
-    # bottom edge — and collapses per-trace hover labels into one card.
-    layout["hovermode"] = "x unified"  # arms the full-height x-axis spike crossbar
+    layout["hovermode"] = "x"  # arms the full-height x-axis spike crossbar
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1500,13 +1490,6 @@ def _tput_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "zerolinecolor": ZERO_LINE_COLOR,
         "showticklabels": show_ticks,
         "title": {"text": "time" if show_ticks else ""},
-        # See _tsg_xaxis for spike rationale.
-        "showspikes": True,
-        "spikemode": "across",
-        "spikesnap": "cursor",
-        "spikethickness": 1,
-        "spikecolor": "#3a3a3a",
-        "spikedash": "dot",
     }
 
 
@@ -1877,10 +1860,7 @@ def to_throughput_figure(
     # Title omitted: per-panel labels carry the direction, see to_tsg_figure.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
-    # x unified extends the x-axis spike across every subplot that shares the
-    # x range (fwd+bwd panels here) instead of stopping at the active panel's
-    # bottom edge — and collapses per-trace hover labels into one card.
-    layout["hovermode"] = "x unified"
+    layout["hovermode"] = "x"
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
