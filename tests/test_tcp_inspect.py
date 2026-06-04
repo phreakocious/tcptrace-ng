@@ -807,6 +807,143 @@ R FIN
     assert ws.n_retx == 0
 
 
+def test_retx_detected_by_coverage_when_body_drawn_white():
+    # tcptrace doesn't always paint a retransmit red (notably a DATA+FIN
+    # resend, whose body it draws white). A full duplicate of already-sent
+    # bytes must still be recognized as a retransmit — not misread as OOO —
+    # from sequence coverage alone, independent of color.
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+line 1.0 1000 1.0 1900
+green
+line 0.0 1000 1.5 1000
+line 1.5 1000 1.5 1900
+yellow
+line 0.0 9000 1.5 9000
+line 1.5 9000 1.5 9900
+white
+line 2.0 1000 2.0 1900
+"""
+    xpl = parse_xpl(xpl_text)
+    pair = synthesize(xpl, None, "")
+    rtx_segs = [s for s in pair.fwd.segments if s.rtx is not None]
+    assert len(rtx_segs) == 1
+    # Already ACKed (cumack 1900) before the resend at t=2.0 → spurious.
+    assert rtx_segs[0].rtx == "spurious"
+    assert rtx_segs[0].seq_start == 1000
+    # The duplicate body must NOT be misread as out-of-order.
+    assert "ooo" not in [a.kind for a in pair.fwd.anomalies]
+
+
+def _data_fin_spurious_retransmit_xpl(body_color: str) -> str:
+    # A DATA+FIN segment [1000,1901) (900 data + 1 FIN), fully ACKed (cumack
+    # 1901), then spuriously retransmitted at t=2.0 — body in `body_color`
+    # (white = unpatched tcptrace; red = patched) with the FIN byte as "R FIN".
+    # The receiver returns a D-SACK [1000,1900) on a non-advancing cumack.
+    return f"""\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+line 1.0 1000 1.0 1900
+orange
+line 1.0 1900 1.0 1901
+box 1.0 1901
+atext 1.0 1901
+FIN
+green
+line 0.0 1000 1.5 1000
+line 1.5 1000 1.5 1901
+yellow
+line 0.0 9000 1.5 9000
+line 1.5 9000 1.5 9901
+{body_color}
+darrow 2.0 1000
+line 2.0 1000 2.0 1900
+red
+line 2.0 1900 2.0 1901
+box 2.0 1901
+atext 2.0 1901
+R FIN
+green
+line 1.5 1901 2.05 1901
+dtick 2.05 1901
+purple
+line 2.05 1000 2.05 1900
+htick 2.05 1000
+htick 2.05 1900
+atext 2.05 1900
+S
+"""
+
+
+@pytest.mark.parametrize("body_color", ["white", "red"])
+def test_data_fin_spurious_retransmit_survives_and_dsacks(body_color):
+    # The crux: a spurious DATA+FIN retransmit must surface as `spurious` (the
+    # data body), the FIN byte as `fin_retx` — and the body must NOT be
+    # swallowed by the fin_retx dedup just because it shares the FIN's
+    # timestamp. The D-SACK that confirms it is captured as a `dsack`. Holds
+    # whether tcptrace drew the body white (coverage path) or red (color path).
+    xpl = parse_xpl(_data_fin_spurious_retransmit_xpl(body_color))
+    pair = synthesize(xpl, None, "")
+    rtx_segs = [s for s in pair.fwd.segments if s.rtx is not None]
+    assert len(rtx_segs) == 1  # the data body only; the 1-byte FIN was cleared
+    assert rtx_segs[0].rtx == "spurious"
+    assert (rtx_segs[0].seq_start, rtx_segs[0].seq_end) == (1000, 1900)
+    kinds = [a.kind for a in pair.fwd.anomalies]
+    assert "spurious" in kinds
+    assert "fin_retx" in kinds
+    assert "dsack" in kinds
+    assert "ooo" not in kinds
+
+
+def test_dsack_block_captured_on_flat_cumack():
+    # A D-SACK rides an ACK that does NOT advance the cumack, so tcptrace draws
+    # the SACK block (purple) over a flat green run with no step. The block must
+    # still be captured — synthesize an ACK at the co-timed cumack level — and
+    # yield a `dsack` anomaly (block entirely at/below the cumack, RFC 2883).
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+green
+line 0.0 1000 1.0 1000
+line 1.0 1000 1.0 1100
+green
+line 1.0 1100 1.5 1100
+dtick 1.5 1100
+purple
+line 1.5 900 1.5 1100
+htick 1.5 900
+htick 1.5 1100
+atext 1.5 1100
+S
+"""
+    xpl = parse_xpl(xpl_text)
+    pair = synthesize(xpl, None, "")
+    sack_acks = [a for a in pair.fwd.acks if a.sack_blocks]
+    assert len(sack_acks) == 1
+    assert sack_acks[0].time == 1.5
+    assert sack_acks[0].ack_seq == 1100
+    assert sack_acks[0].sack_blocks == ((900, 1100),)
+    assert "dsack" in [a.kind for a in pair.fwd.anomalies]
+
+
 def test_bad_csum_times_become_anomalies_anchored_to_cumack():
     # Caller-supplied bad-csum times (from csum.scan_pcap) become bad_csum
     # anomalies on the matching direction's model, anchored to the cumack at

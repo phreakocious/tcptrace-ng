@@ -60,6 +60,7 @@ AnomalyKind = Literal[
     "win_shrink_large",
     "ooo",
     "sack_gap",
+    "dsack",
     "keepalive",
     "syn",
     "syn_ack",
@@ -90,6 +91,10 @@ SEVERITY_BY_KIND: dict[str, AnomalySeverity] = {
     "dup_ack_drove_retx": "warn",
     "ooo": "warn",
     "sack_gap": "warn",
+    # D-SACK is confirmatory, not an alarm: it reports a duplicate the receiver
+    # already had (spurious retransmit / keepalive). The retransmit it confirms
+    # is surfaced separately as `spurious`, so the D-SACK itself stays info.
+    "dsack": "info",
     "bad_csum": "warn",
     "syn": "handshake",
     "syn_ack": "handshake",
@@ -325,6 +330,66 @@ def _extract_segments(xpl: XplPlot) -> list[Segment]:
     ]
 
 
+def _detect_retx_by_coverage(segments: list[Segment]) -> list[Segment]:
+    """Flag retransmits by sequence coverage, independent of xpl coloring.
+
+    tcptrace counts a retransmit in its `-l` text stats but does not always
+    paint it red in the time-sequence plot. The notable case is a retransmit
+    that also carries a FIN/SYN: tcptrace draws the data body in the default
+    (white) color and reddens only the control byte ("R FIN"/"R SYN"). Relying
+    on red alone therefore misses those bodies, and `_detect_anomalies` then
+    misfires `ooo` on them (the body's seq sits below the max already seen).
+
+    We walk segments in time order tracking the byte ranges already transmitted
+    (merged half-open intervals). A data segment whose ``[seq_start, seq_end)``
+    is fully contained in that set and is not already flagged becomes
+    ``rtx="rto"``, which `_classify_retx` then refines to rto/fast/spurious.
+    Partial overlaps are left alone — a re-send that also carries new data is
+    not a pure retransmit — and zero-length segments (keepalives/probes) are
+    skipped. Red-derived flags are preserved; this only adds coverage we'd
+    otherwise miss, so detection no longer depends on tcptrace's coloring.
+    """
+    sent: list[tuple[int, int]] = []  # merged, sorted, half-open [lo, hi)
+    out: list[Segment] = []
+    for s in segments:
+        if (
+            s.rtx is None
+            and s.seq_end > s.seq_start
+            and _range_covered(sent, s.seq_start, s.seq_end)
+        ):
+            s = replace(s, rtx="rto")  # placeholder; refined in _classify_retx
+        _merge_range(sent, s.seq_start, s.seq_end)
+        out.append(s)
+    return out
+
+
+def _range_covered(intervals: list[tuple[int, int]], lo: int, hi: int) -> bool:
+    """True when ``[lo, hi)`` lies entirely within the merged interval set."""
+    for ilo, ihi in intervals:
+        if ilo > lo:
+            break  # sorted; no later interval can start at or before lo
+        if hi <= ihi:
+            return True
+    return False
+
+
+def _merge_range(intervals: list[tuple[int, int]], lo: int, hi: int) -> None:
+    """Insert ``[lo, hi)`` into the sorted merged list, coalescing touching/overlapping
+    ranges (so a retransmit spanning two contiguous original sends is still seen
+    as covered). In place; no-op for empty/zero-length ranges."""
+    if hi <= lo:
+        return
+    intervals.append((lo, hi))
+    intervals.sort()
+    merged: list[tuple[int, int]] = []
+    for ilo, ihi in intervals:
+        if merged and ilo <= merged[-1][1]:  # overlap or adjacency
+            merged[-1] = (merged[-1][0], max(merged[-1][1], ihi))
+        else:
+            merged.append((ilo, ihi))
+    intervals[:] = merged
+
+
 def _extract_acks(xpl: XplPlot) -> list[Ack]:
     """Pull ACK events out of an xpl by matching green vertical (cumack jump)
     steps to the yellow vertical at the same time (rwin top).
@@ -338,6 +403,7 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     """
     green_steps: list[tuple[float, int]] = []  # (time, new_ack_seq)
     green_zero: list[tuple[float, int]] = []  # zero-len verticals — kept for dup-ACK matching
+    green_level_at_time: dict[float, int] = {}  # time -> cumack level (flat runs + ticks)
     yellow_at_time: dict[float, int] = {}  # time -> rwin top seq
     dup_labels: dict[tuple[float, int], int] = {}  # (time, seq) -> N from atext
     sack_by_time: dict[float, list[tuple[int, int]]] = {}  # time -> [(lo, hi), ...]
@@ -350,6 +416,13 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                         green_steps.append((cmd.x1, int(max(cmd.y1, cmd.y2))))
                     else:
                         green_zero.append((cmd.x1, int(cmd.y1)))
+                else:
+                    # Horizontal cumack run: the level is constant across it.
+                    # Record both ends so a SACK reported while the cumack is
+                    # flat (a D-SACK, or a dup-ACK carrying SACK) can recover
+                    # its ack_seq — there's no green step to attach it to.
+                    green_level_at_time.setdefault(cmd.x1, int(cmd.y1))
+                    green_level_at_time.setdefault(cmd.x2, int(cmd.y2))
             elif cmd.color == "yellow":
                 # The rwin track is a step function. tcptrace emits the
                 # vertical as `line x OLD x NEW` (trace.c:2345), so y2 is the
@@ -376,6 +449,11 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
             # time (one is emitted at every ACK, even when the rwin doesn't
             # change). Fallback when no Line endpoint already recorded it.
             yellow_at_time.setdefault(cmd.x, int(cmd.y))
+        elif isinstance(cmd, Tick) and cmd.color == "green":
+            # dtick/utick on the cumack track — emitted at every ACK, including
+            # one that doesn't advance the cumack. Authoritative level source
+            # for synthesizing a D-SACK/dup-ACK that has no green step.
+            green_level_at_time.setdefault(cmd.x, int(cmd.y))
         elif isinstance(cmd, Text) and cmd.color == "green":
             label = cmd.label.strip()
             if label.isdigit():
@@ -402,6 +480,29 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                 rwin_scaled=None,
                 sack_blocks=tuple(sorted(sack_by_time.get(t, []))),
                 dup_count=dup,
+                rwin_known=rwin_known,
+            )
+        )
+    # D-SACK / dup-ACK that didn't advance the cumack: tcptrace drew the SACK
+    # block (purple) but emitted no green step, so the loop above created no Ack
+    # for it and the block would be dropped. Synthesize an Ack at the co-timed
+    # flat-cumack level so the block — and the dsack signal derived from it —
+    # survives.
+    step_times = {t for t, _ in green_steps}
+    for t in sorted(sack_by_time):
+        if t in step_times or t not in green_level_at_time:
+            continue
+        ack_seq = green_level_at_time[t]
+        rwin_top = yellow_at_time.get(t)
+        rwin_known = rwin_top is not None
+        acks.append(
+            Ack(
+                time=t,
+                ack_seq=ack_seq,
+                rwin=rwin_top - ack_seq if rwin_known else 0,
+                rwin_scaled=None,
+                sack_blocks=tuple(sorted(sack_by_time[t])),
+                dup_count=dup_labels.get((t, ack_seq), 0),
                 rwin_known=rwin_known,
             )
         )
@@ -602,6 +703,21 @@ def _detect_anomalies(
                         time=a.time,
                         kind="sack_gap",
                         one_liner=(f"SACK {lo:,}..{hi:,} · gap {a.ack_seq:,}..{lo:,} unacked"),
+                        seq_lo=lo,
+                        seq_hi=hi,
+                    )
+                )
+            elif hi <= a.ack_seq:
+                # Block entirely at/below the cumack — RFC 2883 D-SACK: the
+                # receiver is reporting a duplicate it already had (spurious
+                # retransmit or keepalive probe), not a hole.
+                out.append(
+                    Anomaly(
+                        time=a.time,
+                        kind="dsack",
+                        one_liner=(
+                            f"D-SACK {lo:,}..{hi:,}; receiver already had these {hi - lo:,} B"
+                        ),
                         seq_lo=lo,
                         seq_hi=hi,
                     )
@@ -889,33 +1005,55 @@ def _detect_coalesced(segments: list[Segment], mss: int | None) -> list[Anomaly]
     return out
 
 
+def _is_control_byte(seq_lo: int | None, seq_hi: int | None) -> bool:
+    """True for the 1-byte FIN/SYN control span (or a degenerate zero-length).
+
+    The fin_retx dedup must target only the retransmitted control byte, not a
+    data-bearing segment that happens to share its timestamp: a DATA+FIN
+    retransmit lands two retx spans at the same instant — the multi-byte data
+    body and the 1-byte FIN — and only the latter is the "R FIN".
+    """
+    return seq_lo is not None and seq_hi is not None and seq_hi - seq_lo <= 1
+
+
 def _suppress_overlapping_retx(
     anomalies: list[Anomaly], fin_retx_times: set[float]
 ) -> list[Anomaly]:
-    """Drop rto/spurious/fast anomalies whose time matches a fin_retx — those
-    segments are FIN retransmits, better labeled as such. Without this we'd
-    double-paint "⚠ RTO" and "R FIN" on the same point.
+    """Drop the rto/spurious/fast anomaly for a retransmitted FIN/SYN control
+    byte whose time matches a fin_retx — that byte is better labeled "R FIN",
+    and double-painting "⚠ RTO" on it is noise.
+
+    Keyed on the 1-byte control span, not the timestamp alone: a co-timed
+    multi-byte data-body retransmit (the DATA half of a DATA+FIN resend) is a
+    real spurious/rto event and must survive.
     """
     return [
         a
         for a in anomalies
-        if not (a.kind in ("rto", "fast", "spurious") and a.time in fin_retx_times)
+        if not (
+            a.kind in ("rto", "fast", "spurious")
+            and a.time in fin_retx_times
+            and _is_control_byte(a.seq_lo, a.seq_hi)
+        )
     ]
 
 
 def _clear_suppressed_retx(segments: list[Segment], fin_retx_times: set[float]) -> list[Segment]:
-    """Clear the generic retx flag on segments reclassified as fin_retx.
+    """Clear the generic retx flag on the control-byte segment reclassified as
+    fin_retx, so window_stats (n_rto/n_retx) and throughput's retx-overhead
+    don't also count it as a generic retransmit (which would contradict the
+    chart's fin_retx marker).
 
-    A FIN retransmit is surfaced as a `fin_retx` anomaly, not an rto/fast. If we
-    leave Segment.rtx set, window_stats (n_rto/n_retx) and throughput's
-    retx-overhead still count it as a generic retransmit — so the stats panel
-    shows a bad-colored "1 RTO" that the chart's fin_retx marker contradicts.
+    Mirrors `_suppress_overlapping_retx`: only the 1-byte FIN/SYN segment is
+    cleared; a co-timed multi-byte data-body retransmit keeps its rtx flag.
     """
     if not fin_retx_times:
         return segments
     return [
         replace(s, rtx=None)
-        if s.rtx in ("rto", "fast", "spurious") and s.time in fin_retx_times
+        if s.rtx in ("rto", "fast", "spurious")
+        and s.time in fin_retx_times
+        and _is_control_byte(s.seq_start, s.seq_end)
         else s
         for s in segments
     ]
@@ -1045,6 +1183,7 @@ def _build_model(
 ) -> TsgModel:
     src, dst = _parse_endpoints(xpl.title)
     segs = _extract_segments(xpl)
+    segs = _detect_retx_by_coverage(segs)  # catch retransmits tcptrace drew white
     acks = _extract_acks(xpl)
     # tcptrace pre-scales the yellow rwin line in xpl when it has parsed the
     # peer's wscale option, so rwin extracted here is already scaled. Tag each

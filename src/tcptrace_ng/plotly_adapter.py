@@ -1009,6 +1009,7 @@ _ANOMALY_GLYPH = {
     "win_shrink_large": "↓rwin",
     "ooo": "ooo",
     "sack_gap": "sack gap",
+    "dsack": "D-SACK",
     "keepalive": "keepalive",
     "syn": "S",
     "syn_ack": "SA",
