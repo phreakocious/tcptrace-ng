@@ -1348,8 +1348,17 @@ def _in_flight_overlay(
     iso = [_epoch_to_iso(t) for t in times]
     xs = iso + iso[::-1]
     ys = top + cumack[::-1]
+    # SVG (`scatter`), not WebGL (`scattergl`): plotly's scattergl path
+    # tessellates `fill: toself` polygons recursively and blows the JS stack
+    # once the vertex count grows past a few thousand (cleanPlot then errors
+    # on `sizeBuffer`, which kills the socket.io session). De-coalesced LRO
+    # captures routinely produce 10K+ in-flight vertices, well past that
+    # threshold. SVG handles the same count without complaint at a slower
+    # first paint — acceptable for an overlay the user can't interact with
+    # (hoverinfo is skipped). The sibling `data` trace stays on scattergl
+    # since it's lines, not a closed fill.
     return {
-        "type": "scattergl",
+        "type": "scatter",
         "mode": "lines",
         "x": xs,
         "y": ys,
