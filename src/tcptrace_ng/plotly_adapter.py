@@ -34,6 +34,7 @@ from .theme import (
     PLOTLY_MONO_FAMILY,
     SUBPLOT_LABEL_COLOR,
     ZERO_LINE_COLOR,
+    rgba,
 )
 from .throughput import RateSample, ThroughputModel, ThroughputModelPair
 from .xpl_parser import (
@@ -71,17 +72,6 @@ COLOR_MAP: dict[str, str] = {
 
 def _color(name: str) -> str:
     return COLOR_MAP.get(name, name)
-
-
-def _rgba(hex6: str, alpha: float) -> str:
-    """Local mirror of theme._rgba so this module can derive its own alpha-bearing
-    fills (in-flight ribbon, stall band, throughput overlay) from PALETTE
-    without hard-coding rgba literals. Keeps PALETTE as single source of truth
-    even where Plotly needs an alpha channel."""
-    r = int(hex6[1:3], 16)
-    g = int(hex6[3:5], 16)
-    b = int(hex6[5:7], 16)
-    return f"rgba({r},{g},{b},{alpha})"
 
 
 _ARROW_SYMBOL = {
@@ -1027,10 +1017,10 @@ _SEVERITY_COLOR = {
 # Dim backgrounds for hover popovers — saturated severity tint at low alpha
 # so the popover identifies its tier without overpowering the label text.
 _SEVERITY_HOVER_BG = {
-    "severe": _rgba(PALETTE.crit, 0.13),
-    "warn": _rgba(PALETTE.notable, 0.13),
-    "handshake": _rgba(PALETTE.accent, 0.13),
-    "info": _rgba(PALETTE.text_dim, 0.10),
+    "severe": rgba(PALETTE.crit, 0.13),
+    "warn": rgba(PALETTE.notable, 0.13),
+    "handshake": rgba(PALETTE.accent, 0.13),
+    "info": rgba(PALETTE.text_dim, 0.10),
 }
 
 _ANOMALY_CLUSTER_S = 0.050
@@ -1364,8 +1354,8 @@ def _in_flight_overlay(
         "x": xs,
         "y": ys,
         "fill": "toself",
-        "fillcolor": _rgba(PALETTE.accent, 0.10),
-        "line": {"color": _rgba(PALETTE.accent, 0.0), "width": 0},
+        "fillcolor": rgba(PALETTE.accent, 0.10),
+        "line": {"color": rgba(PALETTE.accent, 0.0), "width": 0},
         "name": name,
         "legendgroup": legendgroup or name,
         "showlegend": showlegend,
@@ -1467,12 +1457,14 @@ def _build_direction_traces(
             legendgroup="data",
         ),
     )
+    # text_muted: fabricated piece — dotted line style carries the "synthetic"
+    # semantic; color just stays out of the way of real data traces.
     _commit(
         "reconstructed",
         _fabricated_segment_trace(
             model,
             name="reconstructed",
-            color=PALETTE.text_body,
+            color=PALETTE.text_muted,
             xaxis_ref=xaxis_ref,
             yaxis_ref=yaxis_ref,
             baseline=baseline,
@@ -1482,7 +1474,7 @@ def _build_direction_traces(
     )
     fab_hover = _fabricated_hover_trace(
         model,
-        color=PALETTE.text_body,
+        color=PALETTE.text_muted,
         xaxis_ref=xaxis_ref,
         yaxis_ref=yaxis_ref,
         baseline=baseline,
@@ -1859,7 +1851,7 @@ def _stall_traces(
                 "x": [t0, t1, t1, t0, t0, None],
                 "y": [y0, y0, y1, y1, y0, None],
                 "fill": "toself",
-                "fillcolor": _rgba(PALETTE.magenta, alpha),
+                "fillcolor": rgba(PALETTE.magenta, alpha),
                 "line": {"color": "rgba(0,0,0,0)", "width": 0},
                 "text": text,
                 "hoverinfo": "text",
@@ -1956,7 +1948,7 @@ def _wire_trace(
         "x": xs,
         "y": ys,
         "fill": "tozeroy",
-        "fillcolor": _rgba(PALETTE.info, 0.25),
+        "fillcolor": rgba(PALETTE.info, 0.25),
         "line": {"color": PALETTE.info, "width": 1},
         "hovertemplate": f"wire %{{y:.3s}}{suffix}<extra></extra>",
         "name": "wire",
@@ -1991,7 +1983,7 @@ def _goodput_trace(
         "x": xs,
         "y": ys,
         "fill": "tozeroy",
-        "fillcolor": _rgba(PALETTE.good, 0.45),
+        "fillcolor": rgba(PALETTE.good, 0.45),
         "line": {"color": PALETTE.good, "width": 1},
         "hovertemplate": f"goodput %{{y:.3s}}{suffix}<extra></extra>",
         "name": "goodput",

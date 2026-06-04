@@ -15,7 +15,7 @@ from tcptrace_ng.tcp_inspect import (
     TsgModel,
     TsgModelPair,
 )
-from tcptrace_ng.theme import LINE_DIM_COLOR
+from tcptrace_ng.theme import LINE_DIM_COLOR, PALETTE
 from tcptrace_ng.throughput import (
     Cliff,
     DirectionSummary,
@@ -388,7 +388,6 @@ def test_high_cardinality_labels_collapse_to_one_trace_per_color():
     assert len(label_traces) == 2
     # No legend entries — the labels are per-event data, not categories.
     assert all(t.get("showlegend") is False for t in label_traces)
-    from tcptrace_ng.theme import PALETTE
     green = next(t for t in label_traces if t["marker"]["color"] != PALETTE.bad)
     # Every original label survives as hovertext on the right point.
     assert len(green["hovertext"]) == _LABEL_LEGEND_THRESHOLD + 1
@@ -1761,8 +1760,6 @@ class TestThroughputFigure:
         assert cliff_anns[0]["text"] == "cliff -75% (rwin-shrink)"
 
     def test_cliff_color_by_severity(self):
-        from tcptrace_ng.theme import PALETTE
-
         model = _tput_model(
             samples=(_sample(1.0), _sample(1.1)),
             cliffs=(

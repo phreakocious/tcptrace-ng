@@ -113,7 +113,7 @@ HOVER_BG = PALETTE.bg_surface
 HOVER_BORDER = PALETTE.border
 HOVER_TEXT = PALETTE.text_body
 
-def _rgba(hex6: str, alpha: float) -> str:
+def rgba(hex6: str, alpha: float) -> str:
     """Convert `#rrggbb` + alpha to `rgba(r,g,b,a)`. Used for the few places
     Plotly needs an alpha channel (legend bg) — keeps those derived from
     Palette rather than hand-mirrored."""
@@ -125,7 +125,7 @@ def _rgba(hex6: str, alpha: float) -> str:
 
 # Legend bg — Plotly needs an alpha channel for the semi-transparent overlay,
 # so we derive an rgba from PALETTE.bg_surface rather than store a literal.
-LEGEND_BG = _rgba(PALETTE.bg_surface, 0.4)
+LEGEND_BG = rgba(PALETTE.bg_surface, 0.4)
 LEGEND_BORDER = PALETTE.border
 
 PLOTLY_MONO_FAMILY = '"DejaVu Sans Mono", monospace'
