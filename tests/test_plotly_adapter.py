@@ -1014,9 +1014,11 @@ def test_tsg_figure_capping_applies_per_direction_in_stacked_subplots():
     assert bwd_hi <= 3_000_000_210
 
 
-def test_tsg_figure_single_direction_uses_one_subplot():
-    """When only fwd is populated, no subplot splitting — fall back to the
-    single-axis layout so simple plots stay simple."""
+def test_tsg_figure_single_direction_keeps_dual_panes_with_empty_strip():
+    """A unidirectional capture still renders both panes — the missing
+    direction shrinks to a thin strip with a '(no traffic this direction)'
+    label so the asymmetry is visually obvious instead of silently collapsing
+    to single-subplot."""
     model = TsgModel(
         src="1.1.1.1:1",
         dst="2.2.2.2:2",
@@ -1035,11 +1037,17 @@ def test_tsg_figure_single_direction_uses_one_subplot():
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
     layout = fig["layout"]
-    # No yaxis2 when single direction.
-    assert "yaxis2" not in layout
-    assert "xaxis2" not in layout
-    # No domain set on yaxis (full-height single subplot).
-    assert "domain" not in layout["yaxis"]
+    # Both subplots present, populated side gets the tall slice.
+    assert "yaxis2" in layout
+    assert "xaxis2" in layout
+    assert layout["yaxis"]["domain"][1] - layout["yaxis"]["domain"][0] > 0.5
+    assert layout["yaxis2"]["domain"][1] - layout["yaxis2"]["domain"][0] < 0.2
+    # The bwd pane carries the no-traffic overlay.
+    no_traffic = [
+        a for a in layout["annotations"]
+        if "no traffic" in a.get("text", "") and a.get("yref") == "y2"
+    ]
+    assert len(no_traffic) == 1
 
 
 def test_tsg_anomaly_annotations_bind_to_subplot_axes():
@@ -1816,15 +1824,25 @@ class TestThroughputFigure:
         fig = to_throughput_figure(ThroughputModelPair(fwd=model))
         assert fig["data"] == []
         ann_texts = [a["text"] for a in fig["layout"]["annotations"]]
-        assert any("no data sent" in t for t in ann_texts)
+        # An empty fwd is now annotated by the compressed-pane overlay rather
+        # than the old direction-specific "no data sent X" message.
+        assert any("no traffic" in t for t in ann_texts)
 
-    def test_single_direction_pair_has_one_subplot(self):
+    def test_single_direction_pair_keeps_dual_panes_with_empty_strip(self):
+        """Unidirectional throughput keeps both panes; the absent direction
+        shrinks to a thin strip with a no-traffic overlay."""
         model = _tput_model(samples=(_sample(1.0),))
         fig = to_throughput_figure(ThroughputModelPair(fwd=model, bwd=None))
-        assert "xaxis" in fig["layout"]
-        assert "yaxis" in fig["layout"]
-        assert "xaxis2" not in fig["layout"]
-        assert "yaxis2" not in fig["layout"]
+        layout = fig["layout"]
+        assert "xaxis2" in layout
+        assert "yaxis2" in layout
+        assert layout["yaxis"]["domain"][1] - layout["yaxis"]["domain"][0] > 0.5
+        assert layout["yaxis2"]["domain"][1] - layout["yaxis2"]["domain"][0] < 0.2
+        no_traffic = [
+            a for a in layout["annotations"]
+            if "no traffic" in a.get("text", "") and a.get("yref") == "y2"
+        ]
+        assert len(no_traffic) == 1
 
     def test_both_none_returns_no_data(self):
         fig = to_throughput_figure(ThroughputModelPair())

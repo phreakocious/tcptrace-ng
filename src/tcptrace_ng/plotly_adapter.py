@@ -413,6 +413,28 @@ def to_plotly_figure(plot: XplPlot) -> dict[str, Any]:
 # subplot's x-axis ticks (which we hide anyway).
 _FWD_DOMAIN = (0.55, 1.0)
 _BWD_DOMAIN = (0.0, 0.45)
+# When one direction carries no traffic, render its pane as a thin strip so the
+# populated direction expands. The strip stays tall enough for one centered
+# "no traffic" annotation; the populated side takes the rest of the canvas.
+_FWD_DOMAIN_TALL = (0.15, 1.0)
+_BWD_DOMAIN_THIN = (0.0, 0.10)
+_FWD_DOMAIN_THIN = (0.90, 1.0)
+_BWD_DOMAIN_TALL = (0.0, 0.85)
+
+
+def _subplot_domains(
+    fwd_empty: bool, bwd_empty: bool
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Pick (fwd, bwd) y-axis domains based on which pane carries no data.
+
+    Both empty / both populated → the symmetric 45/45 split. One side empty →
+    that pane shrinks to a strip wide enough for the no-data annotation.
+    """
+    if fwd_empty and not bwd_empty:
+        return _FWD_DOMAIN_THIN, _BWD_DOMAIN_TALL
+    if bwd_empty and not fwd_empty:
+        return _FWD_DOMAIN_TALL, _BWD_DOMAIN_THIN
+    return _FWD_DOMAIN, _BWD_DOMAIN
 
 
 def to_paired_plotly_figure(
@@ -1526,6 +1548,24 @@ def _direction_label(model: TsgModel) -> str:
     return ""
 
 
+def _reversed_direction_label(other: TsgModel | None) -> str:
+    """Direction label for the *missing* side, derived by reversing the
+    populated side's endpoints. tcptrace emits an xpl per observed
+    direction; for a unidirectional capture the absent direction has no
+    model of its own, so we pivot off whoever's there."""
+    if other is None or not other.src or not other.dst:
+        return ""
+    return f"{other.dst} → {other.src}"
+
+
+def _is_tsg_model_empty(model: TsgModel | None) -> bool:
+    """`True` when the pane will render nothing: either the model never
+    materialised (no xpl for that direction) or it materialised with no
+    segments, no acks, AND no anomalies. An anomaly-only model is still
+    visually populated — the glyphs and hover targets need their pane."""
+    return model is None or (not model.segments and not model.acks and not model.anomalies)
+
+
 def _baseline_seq(model: TsgModel | None, seq_mode: str) -> int:
     """Per-direction baseline for relative-seq display.
 
@@ -1615,83 +1655,59 @@ def to_tsg_figure(
     bwd_base = _baseline_seq(bwd, seq_mode)
 
     if fwd is None and bwd is None:
+        # No xpl on either side — degenerate; keep a single-axis empty figure
+        # for callers that special-case this (analyses with no synthesised
+        # TSG at all). Anything with a model on either direction goes through
+        # the dual-subplot path below.
         layout["xaxis"] = _tsg_xaxis(show_ticks=True)
         layout["yaxis"] = _tsg_yaxis()
         layout["annotations"] = []
         return {"data": [], "layout": layout}
 
-    if fwd is None or bwd is None:
-        only = fwd if fwd is not None else bwd
-        baseline = fwd_base if fwd is not None else bwd_base
-        layout["xaxis"] = _tsg_xaxis(show_ticks=True)
-        yaxis = _tsg_yaxis()
-        only_range = _capped_yaxis_range(only)
-        y_max: float | None = None
-        if only_range is not None:
-            yaxis["range"] = [only_range[0] - baseline, only_range[1] - baseline]
-            yaxis["autorange"] = False
-            y_max = only_range[1] - baseline
-        layout["yaxis"] = yaxis
-        traces = _build_direction_traces(
-            only,
-            xaxis_ref="x",
-            yaxis_ref="y",
-            baseline=baseline,
-            y_max=y_max,
-            show_info=show_info,
-        )
-        annotations = _anomaly_annotations(
-            only, xref="x", yref="y", show_info=show_info, baseline=baseline
-        )
-        strip = _info_strip(only, xref="x", y_domain_top=1.0)
-        if strip is not None:
-            annotations.append(strip)
-        # Direction label (top-left). The figure title used to carry this for
-        # single-direction figures; with the title gone, the per-panel label
-        # is the only direction indicator.
-        only_label = _direction_label(only)
-        if only_label:
-            annotations.append(
-                {
-                    "text": only_label,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "x": 0,
-                    "y": 1.0,
-                    "xanchor": "left",
-                    "yanchor": "bottom",
-                    "showarrow": False,
-                    "font": _SUBPLOT_LABEL_FONT,
-                }
-            )
-        layout["annotations"] = annotations
-        return {"data": traces, "layout": layout}
+    fwd_empty = _is_tsg_model_empty(fwd)
+    bwd_empty = _is_tsg_model_empty(bwd)
+
+    # Dual-subplot layout. When one direction carries no data, that pane is
+    # compressed (`_subplot_domains`) into a thin strip with a no-traffic
+    # annotation; the populated direction expands. Symmetric 45/45 split is
+    # the both-populated case.
+    fwd_domain, bwd_domain = _subplot_domains(fwd_empty, bwd_empty)
 
     fwd_xaxis = _tsg_xaxis(show_ticks=False)
     fwd_xaxis["anchor"] = "y"
     fwd_yaxis = _tsg_yaxis()
-    fwd_yaxis["domain"] = list(_FWD_DOMAIN)
+    fwd_yaxis["domain"] = list(fwd_domain)
     fwd_yaxis["anchor"] = "x"
-    fwd_range = _capped_yaxis_range(fwd)
     fwd_y_max: float | None = None
-    if fwd_range is not None:
-        fwd_yaxis["range"] = [fwd_range[0] - fwd_base, fwd_range[1] - fwd_base]
+    if not fwd_empty:
+        fwd_range = _capped_yaxis_range(fwd)
+        if fwd_range is not None:
+            fwd_yaxis["range"] = [fwd_range[0] - fwd_base, fwd_range[1] - fwd_base]
+            fwd_yaxis["autorange"] = False
+            fwd_y_max = fwd_range[1] - fwd_base
+    else:
+        fwd_yaxis["range"] = [0, 1]
         fwd_yaxis["autorange"] = False
-        fwd_y_max = fwd_range[1] - fwd_base
+        fwd_yaxis["showticklabels"] = False
 
     bwd_xaxis = _tsg_xaxis(show_ticks=True)
     bwd_xaxis["matches"] = "x"
     bwd_xaxis["anchor"] = "y2"
     bwd_xaxis["side"] = "bottom"
     bwd_yaxis = _tsg_yaxis()
-    bwd_yaxis["domain"] = list(_BWD_DOMAIN)
+    bwd_yaxis["domain"] = list(bwd_domain)
     bwd_yaxis["anchor"] = "x2"
-    bwd_range = _capped_yaxis_range(bwd)
     bwd_y_max: float | None = None
-    if bwd_range is not None:
-        bwd_yaxis["range"] = [bwd_range[0] - bwd_base, bwd_range[1] - bwd_base]
+    if not bwd_empty:
+        bwd_range = _capped_yaxis_range(bwd)
+        if bwd_range is not None:
+            bwd_yaxis["range"] = [bwd_range[0] - bwd_base, bwd_range[1] - bwd_base]
+            bwd_yaxis["autorange"] = False
+            bwd_y_max = bwd_range[1] - bwd_base
+    else:
+        bwd_yaxis["range"] = [0, 1]
         bwd_yaxis["autorange"] = False
-        bwd_y_max = bwd_range[1] - bwd_base
+        bwd_yaxis["showticklabels"] = False
 
     layout["xaxis"] = fwd_xaxis
     layout["yaxis"] = fwd_yaxis
@@ -1699,37 +1715,57 @@ def to_tsg_figure(
     layout["yaxis2"] = bwd_yaxis
 
     legend_seen: set[str] = set()
-    traces = _build_direction_traces(
-        fwd,
-        xaxis_ref="x",
-        yaxis_ref="y",
-        baseline=fwd_base,
-        legend_seen=legend_seen,
-        y_max=fwd_y_max,
-        show_info=show_info,
-    ) + _build_direction_traces(
-        bwd,
-        xaxis_ref="x2",
-        yaxis_ref="y2",
-        baseline=bwd_base,
-        legend_seen=legend_seen,
-        y_max=bwd_y_max,
-        show_info=show_info,
-    )
+    traces: list[dict[str, Any]] = []
+    if not fwd_empty:
+        traces.extend(
+            _build_direction_traces(
+                fwd,
+                xaxis_ref="x",
+                yaxis_ref="y",
+                baseline=fwd_base,
+                legend_seen=legend_seen,
+                y_max=fwd_y_max,
+                show_info=show_info,
+            )
+        )
+    if not bwd_empty:
+        traces.extend(
+            _build_direction_traces(
+                bwd,
+                xaxis_ref="x2",
+                yaxis_ref="y2",
+                baseline=bwd_base,
+                legend_seen=legend_seen,
+                y_max=bwd_y_max,
+                show_info=show_info,
+            )
+        )
 
-    annotations = _anomaly_annotations(
-        fwd, xref="x", yref="y", show_info=show_info, baseline=fwd_base
-    ) + _anomaly_annotations(bwd, xref="x2", yref="y2", show_info=show_info, baseline=bwd_base)
-    for strip in (
-        _info_strip(fwd, xref="x", y_domain_top=_FWD_DOMAIN[1]),
-        _info_strip(bwd, xref="x2", y_domain_top=_BWD_DOMAIN[1]),
-    ):
+    annotations: list[dict[str, Any]] = []
+    if not fwd_empty:
+        annotations.extend(
+            _anomaly_annotations(fwd, xref="x", yref="y", show_info=show_info, baseline=fwd_base)
+        )
+        strip = _info_strip(fwd, xref="x", y_domain_top=fwd_domain[1])
         if strip is not None:
             annotations.append(strip)
-    # Subplot direction labels (top-left corner of each pane).
+    if not bwd_empty:
+        annotations.extend(
+            _anomaly_annotations(bwd, xref="x2", yref="y2", show_info=show_info, baseline=bwd_base)
+        )
+        strip = _info_strip(bwd, xref="x2", y_domain_top=bwd_domain[1])
+        if strip is not None:
+            annotations.append(strip)
+
+    # Direction labels (top-left of each pane). When a side has a model we use
+    # its src/dst even if no traffic landed on the pane. When the model itself
+    # is absent (no xpl for that direction) we reverse the other side's
+    # endpoints — tcptrace gives us nothing else to read it from.
+    fwd_label = _direction_label(fwd) if fwd is not None else _reversed_direction_label(bwd)
+    bwd_label = _direction_label(bwd) if bwd is not None else _reversed_direction_label(fwd)
     for text, y in (
-        (_direction_label(fwd), _FWD_DOMAIN[1]),
-        (_direction_label(bwd), _BWD_DOMAIN[1]),
+        (fwd_label, fwd_domain[1]),
+        (bwd_label, bwd_domain[1]),
     ):
         if not text:
             continue
@@ -1746,8 +1782,35 @@ def to_tsg_figure(
                 "font": _SUBPLOT_LABEL_FONT,
             }
         )
+
+    # "no traffic this direction" overlay anchored at the empty pane's mid-y.
+    if fwd_empty:
+        annotations.append(_no_traffic_annotation("x", "y"))
+    if bwd_empty:
+        annotations.append(_no_traffic_annotation("x2", "y2"))
+
     layout["annotations"] = annotations
     return {"data": traces, "layout": layout}
+
+
+def _no_traffic_annotation(xref: str, yref: str) -> dict[str, Any]:
+    """Centered '(no traffic this direction)' label for a compressed empty
+    subplot. y=0.5 against the placeholder [0, 1] yref puts it mid-pane."""
+    return {
+        "text": "(no traffic this direction)",
+        "xref": f"{xref} domain",
+        "yref": yref,
+        "x": 0.5,
+        "y": 0.5,
+        "xanchor": "center",
+        "yanchor": "middle",
+        "showarrow": False,
+        "font": {
+            "color": SUBPLOT_LABEL_COLOR,
+            "size": 10,
+            "family": PLOTLY_MONO_FAMILY,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2165,90 +2228,84 @@ def to_throughput_figure(
         layout["annotations"] = [_no_data_annotation("no throughput data")]
         return {"data": [], "layout": layout}
 
-    if fwd is None or bwd is None:
-        only = fwd if fwd is not None else bwd
-        legend_seen: set[str] = set()
-        yax = _tput_yaxis(rate_unit)
-        yax["range"] = _scaled_range(only.samples)
-        yax["autorange"] = False
-        layout["xaxis"] = _tput_xaxis(show_ticks=True)
-        layout["yaxis"] = yax
-        traces, anns = _build_tput_direction(
-            only,
-            xaxis_ref="x",
-            yaxis_ref="y",
-            show_info=show_info,
-            legend_seen=legend_seen,
-            rate_unit=rate_unit,
-        )
-        # Direction label (top-left). See to_tsg_figure's matching branch.
-        only_label = _throughput_direction_label(only)
-        if only_label:
-            anns.append(
-                {
-                    "text": only_label,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "x": 0,
-                    "y": 1.0,
-                    "xanchor": "left",
-                    "yanchor": "bottom",
-                    "showarrow": False,
-                    "font": _SUBPLOT_LABEL_FONT,
-                }
-            )
-        layout["annotations"] = anns
-        return {"data": traces, "layout": layout}
-
-    # Both directions.
-    legend_seen = set()
+    fwd_empty = fwd is None or not fwd.samples
+    bwd_empty = bwd is None or not bwd.samples
+    fwd_domain, bwd_domain = _subplot_domains(fwd_empty, bwd_empty)
 
     fwd_xaxis = _tput_xaxis(show_ticks=False)
     fwd_xaxis["anchor"] = "y"
     fwd_yax = _tput_yaxis(rate_unit)
-    fwd_yax["domain"] = list(_FWD_DOMAIN)
+    fwd_yax["domain"] = list(fwd_domain)
     fwd_yax["anchor"] = "x"
-    fwd_yax["range"] = _scaled_range(fwd.samples)
-    fwd_yax["autorange"] = False
+    if not fwd_empty:
+        fwd_yax["range"] = _scaled_range(fwd.samples)
+        fwd_yax["autorange"] = False
+    else:
+        fwd_yax["range"] = [0, 1]
+        fwd_yax["autorange"] = False
+        fwd_yax["showticklabels"] = False
 
     bwd_xaxis = _tput_xaxis(show_ticks=True)
     bwd_xaxis["matches"] = "x"
     bwd_xaxis["anchor"] = "y2"
     bwd_xaxis["side"] = "bottom"
     bwd_yax = _tput_yaxis(rate_unit)
-    bwd_yax["domain"] = list(_BWD_DOMAIN)
+    bwd_yax["domain"] = list(bwd_domain)
     bwd_yax["anchor"] = "x2"
-    bwd_yax["range"] = _scaled_range(bwd.samples)
-    bwd_yax["autorange"] = False
+    if not bwd_empty:
+        bwd_yax["range"] = _scaled_range(bwd.samples)
+        bwd_yax["autorange"] = False
+    else:
+        bwd_yax["range"] = [0, 1]
+        bwd_yax["autorange"] = False
+        bwd_yax["showticklabels"] = False
 
     layout["xaxis"] = fwd_xaxis
     layout["yaxis"] = fwd_yax
     layout["xaxis2"] = bwd_xaxis
     layout["yaxis2"] = bwd_yax
 
-    fwd_traces, fwd_anns = _build_tput_direction(
-        fwd,
-        xaxis_ref="x",
-        yaxis_ref="y",
-        show_info=show_info,
-        legend_seen=legend_seen,
-        y_paper=(_FWD_DOMAIN[0] + _FWD_DOMAIN[1]) / 2,
-        rate_unit=rate_unit,
-    )
-    bwd_traces, bwd_anns = _build_tput_direction(
-        bwd,
-        xaxis_ref="x2",
-        yaxis_ref="y2",
-        show_info=show_info,
-        legend_seen=legend_seen,
-        y_paper=(_BWD_DOMAIN[0] + _BWD_DOMAIN[1]) / 2,
-        rate_unit=rate_unit,
-    )
+    legend_seen: set[str] = set()
+    fwd_traces: list[dict[str, Any]] = []
+    bwd_traces: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
 
-    annotations = fwd_anns + bwd_anns
+    if not fwd_empty:
+        fwd_traces, fwd_anns = _build_tput_direction(
+            fwd,
+            xaxis_ref="x",
+            yaxis_ref="y",
+            show_info=show_info,
+            legend_seen=legend_seen,
+            y_paper=(fwd_domain[0] + fwd_domain[1]) / 2,
+            rate_unit=rate_unit,
+        )
+        annotations.extend(fwd_anns)
+    if not bwd_empty:
+        bwd_traces, bwd_anns = _build_tput_direction(
+            bwd,
+            xaxis_ref="x2",
+            yaxis_ref="y2",
+            show_info=show_info,
+            legend_seen=legend_seen,
+            y_paper=(bwd_domain[0] + bwd_domain[1]) / 2,
+            rate_unit=rate_unit,
+        )
+        annotations.extend(bwd_anns)
+
+    fwd_label = (
+        _throughput_direction_label(fwd)
+        if fwd is not None
+        else _throughput_reversed_direction_label(bwd)
+    )
+    bwd_label = (
+        _throughput_direction_label(bwd)
+        if bwd is not None
+        else _throughput_reversed_direction_label(fwd)
+    )
     for text, y in (
-        (_throughput_direction_label(fwd), _FWD_DOMAIN[1]),
-        (_throughput_direction_label(bwd), _BWD_DOMAIN[1]),
+        (fwd_label, fwd_domain[1]),
+        (bwd_label, bwd_domain[1]),
     ):
         if not text:
             continue
@@ -2265,5 +2322,18 @@ def to_throughput_figure(
                 "font": _SUBPLOT_LABEL_FONT,
             }
         )
+
+    if fwd_empty:
+        annotations.append(_no_traffic_annotation("x", "y"))
+    if bwd_empty:
+        annotations.append(_no_traffic_annotation("x2", "y2"))
+
     layout["annotations"] = annotations
     return {"data": fwd_traces + bwd_traces, "layout": layout}
+
+
+def _throughput_reversed_direction_label(other: ThroughputModel | None) -> str:
+    """Reverse the populated direction's endpoints for the absent side."""
+    if other is None or not other.src or not other.dst:
+        return ""
+    return f"{other.dst} → {other.src}"
