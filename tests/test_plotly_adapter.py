@@ -388,7 +388,8 @@ def test_high_cardinality_labels_collapse_to_one_trace_per_color():
     assert len(label_traces) == 2
     # No legend entries — the labels are per-event data, not categories.
     assert all(t.get("showlegend") is False for t in label_traces)
-    green = next(t for t in label_traces if t["marker"]["color"] != "#ff5555")
+    from tcptrace_ng.theme import PALETTE
+    green = next(t for t in label_traces if t["marker"]["color"] != PALETTE.bad)
     # Every original label survives as hovertext on the right point.
     assert len(green["hovertext"]) == _LABEL_LEGEND_THRESHOLD + 1
     assert "seq 0" in green["hovertext"]
@@ -1760,6 +1761,8 @@ class TestThroughputFigure:
         assert cliff_anns[0]["text"] == "cliff -75% (rwin-shrink)"
 
     def test_cliff_color_by_severity(self):
+        from tcptrace_ng.theme import PALETTE
+
         model = _tput_model(
             samples=(_sample(1.0), _sample(1.1)),
             cliffs=(
@@ -1770,8 +1773,8 @@ class TestThroughputFigure:
         fig = to_throughput_figure(ThroughputModelPair(fwd=model))
         cliff_anns = [a for a in fig["layout"]["annotations"] if "cliff" in a.get("text", "")]
         colors = {a["font"]["color"] for a in cliff_anns}
-        assert "#ff5555" in colors  # severe
-        assert "#ffaa00" in colors  # warn — unified with _SEVERITY_COLOR
+        assert PALETTE.crit in colors  # severe — findings-layer alarm
+        assert PALETTE.notable in colors  # warn — symptoms worth attention
 
     def test_legend_dedup_across_directions(self):
         samples = (_sample(1.0), _sample(1.1))

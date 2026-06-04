@@ -22,7 +22,19 @@ from .tcp_inspect import (
     TsgModel,
     TsgModelPair,
 )
-from .theme import GRID_COLOR, LINE_DIM_COLOR, ZERO_LINE_COLOR
+from .theme import (
+    GRID_COLOR,
+    HOVER_BG,
+    HOVER_BORDER,
+    HOVER_TEXT,
+    LEGEND_BG,
+    LEGEND_BORDER,
+    LINE_DIM_COLOR,
+    PALETTE,
+    PLOTLY_MONO_FAMILY,
+    SUBPLOT_LABEL_COLOR,
+    ZERO_LINE_COLOR,
+)
 from .throughput import RateSample, ThroughputModel, ThroughputModelPair
 from .xpl_parser import (
     Arrow,
@@ -37,24 +49,39 @@ from .xpl_parser import (
     XplPlot,
 )
 
-# Map xplot named colors to hex that reads on a dark background.
+# Map xplot named colors to palette hexes. See theme.Palette / design doc §5.
+# xplot 'red' = per-event trouble; mapped to PALETTE.bad (orange) so individual
+# ticks don't read as alarms — clusters do. PALETTE.crit (red) is reserved for
+# findings-layer confirmations.
 COLOR_MAP: dict[str, str] = {
-    "white": "#e6e6e6",
-    "red": "#ff5555",
-    "green": "#55ff55",
-    "yellow": "#ffff55",
-    "blue": "#5599ff",
-    "magenta": "#ff77ff",
-    "cyan": "#55ffff",
-    "orange": "#ffaa55",
-    "purple": "#bb99ff",
-    "pink": "#ff99cc",
-    "black": "#888888",  # black on black is invisible; lift to mid-gray
+    "white":   PALETTE.text_emph,
+    "red":     PALETTE.bad,
+    "green":   PALETTE.good,
+    "yellow":  PALETTE.notable,
+    "blue":    PALETTE.info,
+    "magenta": PALETTE.magenta,
+    "cyan":    PALETTE.accent,
+    "orange":  PALETTE.bad,
+    "purple":  PALETTE.rare,
+    "pink":    PALETTE.magenta,
+    # black-on-dark is invisible — lift to dim.
+    "black":   PALETTE.text_dim,
 }
 
 
 def _color(name: str) -> str:
     return COLOR_MAP.get(name, name)
+
+
+def _rgba(hex6: str, alpha: float) -> str:
+    """Local mirror of theme._rgba so this module can derive its own alpha-bearing
+    fills (in-flight ribbon, stall band, throughput overlay) from PALETTE
+    without hard-coding rgba literals. Keeps PALETTE as single source of truth
+    even where Plotly needs an alpha channel."""
+    r = int(hex6[1:3], 16)
+    g = int(hex6[3:5], 16)
+    b = int(hex6[5:7], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 _ARROW_SYMBOL = {
@@ -73,7 +100,11 @@ _TICK_SYMBOL = {
     "v": "line-ns",
 }
 
-_SUBPLOT_LABEL_FONT = {"color": "#888888", "size": 11, "family": "Menlo, monospace"}
+_SUBPLOT_LABEL_FONT = {
+    "color": SUBPLOT_LABEL_COLOR,
+    "size": 11,
+    "family": PLOTLY_MONO_FAMILY,
+}
 
 # Threshold above which label-per-trace mode (one legend entry per label)
 # collapses into one-trace-per-color with the label exposed only via hovertext.
@@ -345,10 +376,10 @@ def _base_layout(
             "x": 1,
             "yanchor": "top",
             "y": 0.98,
-            "bgcolor": "rgba(0,0,0,0.4)",
-            "bordercolor": "#1f1f1f",
+            "bgcolor": LEGEND_BG,
+            "bordercolor": LEGEND_BORDER,
             "borderwidth": 1,
-            "font": {"size": 11, "family": "Menlo, monospace"},
+            "font": {"size": 11, "family": PLOTLY_MONO_FAMILY, "color": HOVER_TEXT},
         },
         "margin": {"l": 60, "r": 20, "t": 70, "b": 50},
         "annotations": [],
@@ -357,11 +388,11 @@ def _base_layout(
         # tooltip doesn't punch a bright box through the dim grid. align=left
         # keeps multi-line hovertext (e.g. tline's per-packet labels) tidy.
         "hoverlabel": {
-            "bgcolor": "#0a0a0a",
-            "bordercolor": "#1f1f1f",
+            "bgcolor": HOVER_BG,
+            "bordercolor": HOVER_BORDER,
             "font": {
-                "family": "Menlo, monospace",
-                "color": "#ddd",
+                "family": PLOTLY_MONO_FAMILY,
+                "color": HOVER_TEXT,
                 "size": 11,
             },
             "align": "left",
@@ -985,19 +1016,21 @@ _ANOMALY_GLYPH = {
 
 # Color per severity tier. Drives chart annotation color; kind→severity lives
 # in tcp_inspect.SEVERITY_BY_KIND so the data model is the source of truth.
+# These are findings-layer confirmations (RTO/fast/spurious/zero_win, …), not
+# per-event ticks — so `severe` maps to PALETTE.crit (red) rather than bad.
 _SEVERITY_COLOR = {
-    "severe": "#ff5555",  # red — alarms (rto, fast, spurious, zero_win, …)
-    "warn": "#ffaa00",  # amber — symptoms worth attention
-    "handshake": "#55ddff",  # cyan — protocol markers (SYN/SA/A/FA/R FA)
-    "info": "#888888",  # grey — diagnostic noise; hidden unless toggled
+    "severe": PALETTE.crit,        # red — alarms (rto, fast, spurious, zero_win, …)
+    "warn": PALETTE.notable,       # amber — symptoms worth attention
+    "handshake": PALETTE.accent,   # cyan — protocol markers (SYN/SA/A/FA/R FA)
+    "info": PALETTE.text_dim,      # grey — diagnostic noise; hidden unless toggled
 }
 # Dim backgrounds for hover popovers — saturated severity tint at low alpha
 # so the popover identifies its tier without overpowering the label text.
 _SEVERITY_HOVER_BG = {
-    "severe": "#220000",
-    "warn": "#221800",
-    "handshake": "#001b22",
-    "info": "#1a1a1a",
+    "severe": _rgba(PALETTE.crit, 0.13),
+    "warn": _rgba(PALETTE.notable, 0.13),
+    "handshake": _rgba(PALETTE.accent, 0.13),
+    "info": _rgba(PALETTE.text_dim, 0.10),
 }
 
 _ANOMALY_CLUSTER_S = 0.050
@@ -1169,7 +1202,7 @@ def _anomaly_annotations(
                 "yref": yref,
                 "text": text,
                 "showarrow": False,
-                "font": {"color": color, "size": 10, "family": "Menlo, monospace"},
+                "font": {"color": color, "size": 10, "family": PLOTLY_MONO_FAMILY},
                 "xshift": xshift,
                 "yshift": yshift,
             }
@@ -1272,7 +1305,7 @@ def _info_strip(
         "yref": "paper",
         "text": "info: " + " · ".join(parts),
         "showarrow": False,
-        "font": {"color": _SEVERITY_COLOR["info"], "size": 10, "family": "Menlo, monospace"},
+        "font": {"color": _SEVERITY_COLOR["info"], "size": 10, "family": PLOTLY_MONO_FAMILY},
         "xanchor": "right",
         "yanchor": "bottom",
         "yshift": 2,
@@ -1331,8 +1364,8 @@ def _in_flight_overlay(
         "x": xs,
         "y": ys,
         "fill": "toself",
-        "fillcolor": "rgba(85, 255, 255, 0.10)",
-        "line": {"color": "rgba(85, 255, 255, 0.0)", "width": 0},
+        "fillcolor": _rgba(PALETTE.accent, 0.10),
+        "line": {"color": _rgba(PALETTE.accent, 0.0), "width": 0},
         "name": name,
         "legendgroup": legendgroup or name,
         "showlegend": showlegend,
@@ -1439,7 +1472,7 @@ def _build_direction_traces(
         _fabricated_segment_trace(
             model,
             name="reconstructed",
-            color="#7fb3c8",
+            color=PALETTE.text_body,
             xaxis_ref=xaxis_ref,
             yaxis_ref=yaxis_ref,
             baseline=baseline,
@@ -1449,7 +1482,7 @@ def _build_direction_traces(
     )
     fab_hover = _fabricated_hover_trace(
         model,
-        color="#7fb3c8",
+        color=PALETTE.text_body,
         xaxis_ref=xaxis_ref,
         yaxis_ref=yaxis_ref,
         baseline=baseline,
@@ -1593,7 +1626,7 @@ def to_tsg_figure(
         "yanchor": "bottom",
         "y": 1.02,
         "bgcolor": "rgba(0,0,0,0)",
-        "font": {"size": 11, "family": "Menlo, monospace"},
+        "font": {"size": 11, "family": PLOTLY_MONO_FAMILY, "color": HOVER_TEXT},
     }
 
     fwd_base = _baseline_seq(fwd, seq_mode)
@@ -1826,7 +1859,7 @@ def _stall_traces(
                 "x": [t0, t1, t1, t0, t0, None],
                 "y": [y0, y0, y1, y1, y0, None],
                 "fill": "toself",
-                "fillcolor": f"rgba(255,119,255,{alpha})",
+                "fillcolor": _rgba(PALETTE.magenta, alpha),
                 "line": {"color": "rgba(0,0,0,0)", "width": 0},
                 "text": text,
                 "hoverinfo": "text",
@@ -1923,8 +1956,8 @@ def _wire_trace(
         "x": xs,
         "y": ys,
         "fill": "tozeroy",
-        "fillcolor": "rgba(85,153,255,0.25)",
-        "line": {"color": "#5599ff", "width": 1},
+        "fillcolor": _rgba(PALETTE.info, 0.25),
+        "line": {"color": PALETTE.info, "width": 1},
         "hovertemplate": f"wire %{{y:.3s}}{suffix}<extra></extra>",
         "name": "wire",
         "legendgroup": "wire",
@@ -1958,8 +1991,8 @@ def _goodput_trace(
         "x": xs,
         "y": ys,
         "fill": "tozeroy",
-        "fillcolor": "rgba(85,255,85,0.45)",
-        "line": {"color": "#55ff55", "width": 1},
+        "fillcolor": _rgba(PALETTE.good, 0.45),
+        "line": {"color": PALETTE.good, "width": 1},
         "hovertemplate": f"goodput %{{y:.3s}}{suffix}<extra></extra>",
         "name": "goodput",
         "legendgroup": "goodput",
@@ -2135,7 +2168,7 @@ def to_throughput_figure(
         "yanchor": "bottom",
         "y": 1.02,
         "bgcolor": "rgba(0,0,0,0)",
-        "font": {"size": 11, "family": "Menlo, monospace"},
+        "font": {"size": 11, "family": PLOTLY_MONO_FAMILY, "color": HOVER_TEXT},
     }
 
     scale, _ = _rate_scale_suffix(rate_unit)
