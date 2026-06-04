@@ -74,6 +74,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         title="tcptrace-ng",
         dark=True,
         show_welcome_message=False,
+        # NiceGUI's default reconnect_timeout=3s yields a 2s socket.io
+        # ping_timeout — a single heavy CPU step (synthesize + figure build
+        # on dense conns) overruns that and the browser declares the server
+        # dead. 30s gives the threadpool room to finish even the worst pcap.
+        reconnect_timeout=30.0,
     )
 
 

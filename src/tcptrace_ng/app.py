@@ -11,6 +11,7 @@ Analyzed connections stay in `state.analyses` so re-clicking is instant.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -668,62 +669,118 @@ def _coalesce_to_dict(c) -> dict:
     }
 
 
-def _build_metric_figure(
+def _safe_parse_xpl(xpl: Path) -> tuple[XplPlot | None, str | None]:
+    """Single try/except wrapper around parse_xpl. Returns (plot, None) on
+    success or (None, message) on failure so callers can pick recovery."""
+    try:
+        return parse_xpl(xpl), None
+    except Exception as exc:
+        return None, f"{xpl.name}: {exc}"
+
+
+def _csum_times_directed_pure(
+    src: str, dst: str, bad_csum_events: list[CsumEvent]
+) -> list[float]:
+    s = _split_endpoint(src)
+    d = _split_endpoint(dst)
+    if s is None or d is None:
+        return []
+    return [
+        ev.time
+        for ev in bad_csum_events
+        if (ev.src_ip, ev.src_port) == s and (ev.dst_ip, ev.dst_port) == d
+    ]
+
+
+def _coalesces_directed_pure(src: str, dst: str, coalesces: list[dict]) -> list[dict]:
+    s = _split_endpoint(src)
+    d = _split_endpoint(dst)
+    if s is None or d is None:
+        return []
+    return [
+        c
+        for c in coalesces
+        if _split_endpoint(c.get("src", "")) == s and _split_endpoint(c.get("dst", "")) == d
+    ]
+
+
+def _build_tsg_model_pure(
     forward: Path | None,
     backward: Path | None,
-    combined: Path | None,
-    fwd_label: str,
-    bwd_label: str,
-    metric: str | None = None,
-    details_text: str = "",
-    show_info: bool = False,
-    rate_unit: str = "bytes",
-    seq_mode: str = "abs",
-) -> dict | None:
-    """Parse xpl(s) and build a plotly figure dict. Returns None if no data.
+    details_text: str,
+    bad_csum_events: list[CsumEvent],
+    desegment_coalesces: list[dict],
+):
+    """Parse xpls + filter csum/coalesces from passed events + synthesize.
 
-    The TSG metric routes through tcp_inspect.synthesize() + to_tsg_figure()
-    for semantic tooltips, anomaly annotations, and the in-flight overlay.
-    All other metrics use the generic paired path unchanged.
+    Pickleable (no module-state reads), so `run.cpu_bound` can ship this off
+    to a worker process — synthesize is the heaviest CPU step per conn click
+    (hundreds of ms on dense captures), and the process pool sidesteps GIL
+    contention with NiceGUI's event loop and outbox.
     """
-    if metric == "tsg":
-        fwd_plot = None
-        bwd_plot = None
-        if forward is not None:
-            plot, _err = _safe_parse_xpl(forward)
-            if plot is not None and plot.commands:
-                fwd_plot = plot
-        if backward is not None:
-            plot, _err = _safe_parse_xpl(backward)
-            if plot is not None and plot.commands:
-                bwd_plot = plot
-        if fwd_plot is None and bwd_plot is None:
-            return None
-        fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
-        fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
-        pair = synthesize_tsg(
-            fwd_plot,
-            bwd_plot,
-            details_text,
-            bad_csum_times_fwd=fwd_csum,
-            bad_csum_times_bwd=bwd_csum,
-            coalesces_fwd=fwd_co,
-            coalesces_bwd=bwd_co,
-        )
-        return to_tsg_figure(pair, show_info=show_info, seq_mode=seq_mode)
+    from .tcp_inspect import _parse_endpoints  # avoid widening tcp_inspect's API
 
-    if metric == "tput":
-        tput_pair = _build_tput_model(forward, backward, details_text)
-        if tput_pair is None:
-            return None
-        return to_throughput_figure(tput_pair, show_info=show_info, rate_unit=rate_unit)
+    fwd_plot = None
+    bwd_plot = None
+    if forward is not None:
+        plot, _err = _safe_parse_xpl(forward)
+        if plot is not None and plot.commands:
+            fwd_plot = plot
+    if backward is not None:
+        plot, _err = _safe_parse_xpl(backward)
+        if plot is not None and plot.commands:
+            bwd_plot = plot
+    if fwd_plot is None and bwd_plot is None:
+        return None
 
-    if combined is not None:
-        plot, _err = _safe_parse_xpl(combined)
-        if plot is None or not plot.commands:
-            return None
-        return to_plotly_figure(plot)
+    def _csum_for(plot):
+        if plot is None:
+            return []
+        src, dst = _parse_endpoints(plot.title)
+        if not (src and dst):
+            return []
+        return _csum_times_directed_pure(src, dst, bad_csum_events)
 
+    def _co_for(plot):
+        if plot is None:
+            return []
+        src, dst = _parse_endpoints(plot.title)
+        if not (src and dst):
+            return []
+        return _coalesces_directed_pure(src, dst, desegment_coalesces)
+
+    return synthesize_tsg(
+        fwd_plot,
+        bwd_plot,
+        details_text,
+        bad_csum_times_fwd=_csum_for(fwd_plot),
+        bad_csum_times_bwd=_csum_for(bwd_plot),
+        coalesces_fwd=_co_for(fwd_plot),
+        coalesces_bwd=_co_for(bwd_plot),
+    )
+
+
+def _build_tput_pair_pure(tsg_pair):
+    """Pickleable: build a ThroughputModelPair from an already-synthesized TSG
+    pair. Avoids the second `synthesize_tsg` call that the old _build_tput_model
+    did — the model the user is staring at on the TSG tab is identical to the
+    input the throughput synthesis needs."""
+    if tsg_pair is None:
+        return None
+    stats = (
+        tsg_pair.fwd.summary
+        if tsg_pair.fwd is not None
+        else tsg_pair.bwd.summary
+        if tsg_pair.bwd is not None
+        else None
+    )
+    return synthesize_throughput(tsg_pair, stats)
+
+
+def _build_paired_figure_pure(
+    forward: Path | None, backward: Path | None, fwd_label: str, bwd_label: str
+) -> dict | None:
+    """Generic two-direction figure for non-tsg/tput metrics (rtt/owin/ssize)."""
     fwd_plot = None
     bwd_plot = None
     if forward is not None:
@@ -739,95 +796,28 @@ def _build_metric_figure(
     return to_paired_plotly_figure(fwd_plot, bwd_plot, fwd_label, bwd_label)
 
 
-def _safe_parse_xpl(xpl: Path) -> tuple[XplPlot | None, str | None]:
-    """Single try/except wrapper around parse_xpl. Returns (plot, None) on
-    success or (None, message) on failure so callers can pick recovery."""
-    try:
-        return parse_xpl(xpl), None
-    except Exception as exc:
-        return None, f"{xpl.name}: {exc}"
-
-
-def _csum_for_plots(
-    fwd_plot: XplPlot | None, bwd_plot: XplPlot | None
-) -> tuple[list[float], list[float]]:
-    """Map per-direction csum times by parsing endpoints out of the xpl titles.
-
-    Each tsg xpl carries a `<src:port> ==> <dst:port>` title; we use that as
-    the directional filter rather than the connection's `ConnStats` row, so
-    this also works for the raw-xpl preview path where stats aren't loaded.
-    """
-    from .tcp_inspect import _parse_endpoints  # avoid widening tcp_inspect's API
-
-    fwd_times: list[float] = []
-    bwd_times: list[float] = []
-    if fwd_plot is not None:
-        src, dst = _parse_endpoints(fwd_plot.title)
-        if src and dst:
-            fwd_times = _csum_times_directed(src, dst)
-    if bwd_plot is not None:
-        src, dst = _parse_endpoints(bwd_plot.title)
-        if src and dst:
-            bwd_times = _csum_times_directed(src, dst)
-    return fwd_times, bwd_times
-
-
-def _coalesces_for_plots(
-    fwd_plot: XplPlot | None, bwd_plot: XplPlot | None
-) -> tuple[list[dict], list[dict]]:
-    """Per-direction desegment manifest, keyed off the xpl titles (the same
-    directional filter `_csum_for_plots` uses)."""
-    from .tcp_inspect import _parse_endpoints  # avoid widening tcp_inspect's API
-
-    fwd: list[dict] = []
-    bwd: list[dict] = []
-    if fwd_plot is not None:
-        src, dst = _parse_endpoints(fwd_plot.title)
-        if src and dst:
-            fwd = _coalesces_directed(src, dst)
-    if bwd_plot is not None:
-        src, dst = _parse_endpoints(bwd_plot.title)
-        if src and dst:
-            bwd = _coalesces_directed(src, dst)
-    return fwd, bwd
-
-
-def _build_tput_model(
-    forward: Path | None,
-    backward: Path | None,
-    details_text: str,
-) -> ThroughputModelPair | None:
-    fwd_plot = None
-    bwd_plot = None
-    if forward is not None:
-        plot, _err = _safe_parse_xpl(forward)
-        if plot is not None and plot.commands:
-            fwd_plot = plot
-    if backward is not None:
-        plot, _err = _safe_parse_xpl(backward)
-        if plot is not None and plot.commands:
-            bwd_plot = plot
-    if fwd_plot is None and bwd_plot is None:
+def _build_combined_figure_pure(combined: Path) -> dict | None:
+    """Combined-single-direction figure (the tline metric)."""
+    plot, _err = _safe_parse_xpl(combined)
+    if plot is None or not plot.commands:
         return None
-    fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
-    fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
-    tsg_pair = synthesize_tsg(
-        fwd_plot,
-        bwd_plot,
-        details_text,
-        bad_csum_times_fwd=fwd_csum,
-        bad_csum_times_bwd=bwd_csum,
-        coalesces_fwd=fwd_co,
-        coalesces_bwd=bwd_co,
-    )
-    stats = (
-        tsg_pair.fwd.summary
-        if tsg_pair.fwd is not None
-        else tsg_pair.bwd.summary
-        if tsg_pair.bwd is not None
-        else None
-    )
-    return synthesize_throughput(tsg_pair, stats)
+    return to_plotly_figure(plot)
+
+
+def _compute_findings_pure(
+    n: int,
+    result: AnalyzeResult,
+    stats: ConnStats | None,
+    tsg_pair,
+) -> list[Finding]:
+    """Pickleable: run diagnose() against the pre-built TSG model.
+
+    Mirrors the old `_compute_findings` but takes inputs as args instead of
+    reading module state, so it can run in `run.cpu_bound`. tsg may be None
+    when no TSG xpl was emitted (stats-only findings). `result` and `n` are
+    accepted for parity / future detectors that may want details_text or
+    the conn number."""
+    return diagnose(stats, tsg_pair, None)
 
 
 _LRO_WARNING_PREFIX = "NIC offload (LRO/GRO): "
@@ -868,46 +858,62 @@ def _sync_lro_warning(state: _State) -> None:
     )
 
 
+# Backward-compat shims. The hot path (build_page → _on_conn_click → _populate)
+# uses the `*_pure` variants directly with state slices passed as args. These
+# state-reading wrappers exist for tests and for any out-of-page caller that
+# may rely on the historical signatures.
+
+
 def _build_tsg_model(
     forward: Path | None,
     backward: Path | None,
     details_text: str,
 ):
-    """Parse + synthesize a TsgModelPair without building the figure.
-    Module-level so callers can run it through run.io_bound separately
-    from the figure build."""
-    fwd_plot = None
-    bwd_plot = None
-    if forward is not None:
-        plot, _err = _safe_parse_xpl(forward)
-        if plot is not None and plot.commands:
-            fwd_plot = plot
-    if backward is not None:
-        plot, _err = _safe_parse_xpl(backward)
-        if plot is not None and plot.commands:
-            bwd_plot = plot
-    if fwd_plot is None and bwd_plot is None:
-        return None
-    fwd_csum, bwd_csum = _csum_for_plots(fwd_plot, bwd_plot)
-    fwd_co, bwd_co = _coalesces_for_plots(fwd_plot, bwd_plot)
-    return synthesize_tsg(
-        fwd_plot,
-        bwd_plot,
+    return _build_tsg_model_pure(
+        forward,
+        backward,
         details_text,
-        bad_csum_times_fwd=fwd_csum,
-        bad_csum_times_bwd=bwd_csum,
-        coalesces_fwd=fwd_co,
-        coalesces_bwd=bwd_co,
+        state.bad_csum_events,
+        state.desegment_coalesces,
     )
 
 
-def _compute_findings(n: int) -> list[Finding]:
-    """Build connection n's TSG model and run diagnose(). Pure read of state.
+def _build_tput_model(
+    forward: Path | None,
+    backward: Path | None,
+    details_text: str,
+):
+    return _build_tput_pair_pure(_build_tsg_model(forward, backward, details_text))
 
-    Runs off the event loop (callers wrap it in run.io_bound). diagnose() today
-    consumes only stats + tsg; tput/offload/csum are reserved, so we pass None /
-    defaults. A connection with no TSG xpl yields tsg=None (stats-only findings).
-    """
+
+def _build_metric_figure(
+    forward: Path | None,
+    backward: Path | None,
+    combined: Path | None,
+    fwd_label: str,
+    bwd_label: str,
+    metric: str | None = None,
+    details_text: str = "",
+    show_info: bool = False,
+    rate_unit: str = "bytes",
+    seq_mode: str = "abs",
+) -> dict | None:
+    if metric == "tsg":
+        pair = _build_tsg_model(forward, backward, details_text)
+        return None if pair is None else to_tsg_figure(
+            pair, show_info=show_info, seq_mode=seq_mode
+        )
+    if metric == "tput":
+        pair = _build_tput_model(forward, backward, details_text)
+        return None if pair is None else to_throughput_figure(
+            pair, show_info=show_info, rate_unit=rate_unit
+        )
+    if combined is not None:
+        return _build_combined_figure_pure(combined)
+    return _build_paired_figure_pure(forward, backward, fwd_label, bwd_label)
+
+
+def _compute_findings(n: int) -> list[Finding]:
     result = state.analyses.get(n)
     if result is None:
         return []
@@ -918,7 +924,7 @@ def _compute_findings(n: int) -> list[Finding]:
         if g_tsg is not None
         else None
     )
-    return diagnose(stats, tsg, None)
+    return _compute_findings_pure(n, result, stats, tsg)
 
 
 def _format_bytes(n: float | int | None) -> str:
@@ -1589,27 +1595,51 @@ def build_page() -> None:
                             _render_stats_panel(
                                 stats_box, model_pair, fwd_label, bwd_label, None, None
                             )
+                            # Debounced relayout: plotly fires bursts of these
+                            # during a pan/zoom; cancel the pending task and
+                            # reschedule, so the stats panel rebuilds once
+                            # ~150 ms after the user stops moving instead of
+                            # once per intermediate event.
+                            pending_relayout: dict[str, asyncio.Task | None] = {"task": None}
+
+                            async def _do_relayout(t0, t1):
+                                try:
+                                    await asyncio.sleep(0.15)
+                                except asyncio.CancelledError:
+                                    return
+                                if state.selected_conn != conn_n:
+                                    return
+                                _render_stats_panel(
+                                    stats_box, model_pair, fwd_label, bwd_label, t0, t1
+                                )
 
                             def _on_relayout(e) -> None:
                                 args = e.args or {}
                                 if _is_shape_only_relayout(args):
                                     return
                                 t0, t1 = _xrange_from_relayout(args)
-                                _render_stats_panel(
-                                    stats_box, model_pair, fwd_label, bwd_label, t0, t1
+                                prev = pending_relayout["task"]
+                                if prev is not None and not prev.done():
+                                    prev.cancel()
+                                pending_relayout["task"] = background_tasks.create(
+                                    _do_relayout(t0, t1)
                                 )
 
                             plotly_el.on("plotly_relayout", _on_relayout)
 
-                            def _on_info_toggle(e) -> None:
+                            async def _on_info_toggle(e) -> None:
                                 state.show_info = bool(e.value)
-                                new_fig = to_tsg_figure(
-                                    model_pair, show_info=state.show_info, seq_mode=state.seq_mode
+                                new_fig = await run.io_bound(
+                                    to_tsg_figure,
+                                    model_pair,
+                                    show_info=state.show_info,
+                                    seq_mode=state.seq_mode,
                                 )
                                 state.figure_cache[
                                     _figure_cache_key(conn_n, metric, state.show_info)
                                 ] = new_fig
-                                plotly_el.update_figure(new_fig)
+                                if state.selected_conn == conn_n:
+                                    plotly_el.update_figure(new_fig)
 
                             info_switch.on_value_change(_on_info_toggle)
                     if metric == "tput":
@@ -1628,27 +1658,48 @@ def build_page() -> None:
                             _render_throughput_stats_panel(
                                 tput_stats_box, tput_pair, fwd_label, bwd_label, None, None
                             )
+                            pending_tput_relayout: dict[str, asyncio.Task | None] = {
+                                "task": None
+                            }
+
+                            async def _do_tput_relayout(t0, t1):
+                                try:
+                                    await asyncio.sleep(0.15)
+                                except asyncio.CancelledError:
+                                    return
+                                if state.selected_conn != conn_n:
+                                    return
+                                _render_throughput_stats_panel(
+                                    tput_stats_box, tput_pair, fwd_label, bwd_label, t0, t1
+                                )
 
                             def _on_tput_relayout(e) -> None:
                                 args = e.args or {}
                                 if _is_shape_only_relayout(args):
                                     return
                                 t0, t1 = _xrange_from_relayout(args)
-                                _render_throughput_stats_panel(
-                                    tput_stats_box, tput_pair, fwd_label, bwd_label, t0, t1
+                                prev = pending_tput_relayout["task"]
+                                if prev is not None and not prev.done():
+                                    prev.cancel()
+                                pending_tput_relayout["task"] = background_tasks.create(
+                                    _do_tput_relayout(t0, t1)
                                 )
 
                             plotly_el.on("plotly_relayout", _on_tput_relayout)
 
-                            def _on_tput_info_toggle(e) -> None:
+                            async def _on_tput_info_toggle(e) -> None:
                                 state.show_info = bool(e.value)
-                                new_fig = to_throughput_figure(
-                                    tput_pair, show_info=state.show_info, rate_unit=state.rate_unit
+                                new_fig = await run.io_bound(
+                                    to_throughput_figure,
+                                    tput_pair,
+                                    show_info=state.show_info,
+                                    rate_unit=state.rate_unit,
                                 )
                                 state.figure_cache[
                                     _figure_cache_key(conn_n, metric, state.show_info)
                                 ] = new_fig
-                                plotly_el.update_figure(new_fig)
+                                if state.selected_conn == conn_n:
+                                    plotly_el.update_figure(new_fig)
 
                             tput_info_switch.on_value_change(_on_tput_info_toggle)
 
@@ -1668,41 +1719,49 @@ def build_page() -> None:
                 container = panel_containers[metric]
                 with container:
                     ui.spinner(size="md").classes("self-center").style("margin-top: 32px;")
-                tsg_g = group_by_metric.get("tsg") if metric == "tput" else None
-                src_fwd = tsg_g.forward if tsg_g is not None else g.forward
-                src_bwd = tsg_g.backward if tsg_g is not None else g.backward
-                details = state.analyses[conn_n].details_text
                 try:
-                    if metric == "tput":
-                        # Run synthesis once: build the model, store it, render
-                        # the figure from it — avoids a second synthesize_tsg call.
-                        tput_pair = await run.io_bound(
-                            _build_tput_model,
-                            src_fwd,
-                            src_bwd,
-                            details,
+                    if metric == "tsg":
+                        # Model is built (or already cached) by `_on_conn_click`.
+                        # Tab activation is figure-build only — cheap; io_bound
+                        # is the right tool (cpu_bound would pickle the whole
+                        # model pair and pay overhead exceeding the work).
+                        pair = await _ensure_tsg_pair(conn_n)
+                        fig = (
+                            await run.io_bound(
+                                to_tsg_figure,
+                                pair,
+                                show_info=state.show_info,
+                                seq_mode=state.seq_mode,
+                            )
+                            if pair is not None
+                            else None
                         )
+                    elif metric == "tput":
+                        # Throughput tab reuses the cached TSG pair (the model
+                        # the user is staring at on the TSG tab), then derives
+                        # the throughput model. Two cheap pure ops.
+                        tsg_pair = await _ensure_tsg_pair(conn_n)
+                        tput_pair = await run.io_bound(_build_tput_pair_pure, tsg_pair)
                         state.figure_cache[(conn_n, metric, "model")] = tput_pair
                         fig = (
-                            to_throughput_figure(
-                                tput_pair, show_info=state.show_info, rate_unit=state.rate_unit
+                            await run.io_bound(
+                                to_throughput_figure,
+                                tput_pair,
+                                show_info=state.show_info,
+                                rate_unit=state.rate_unit,
                             )
                             if tput_pair is not None
                             else None
                         )
+                    elif g.combined is not None:
+                        fig = await run.io_bound(_build_combined_figure_pure, g.combined)
                     else:
                         fig = await run.io_bound(
-                            _build_metric_figure,
-                            src_fwd,
-                            src_bwd,
-                            g.combined,
+                            _build_paired_figure_pure,
+                            g.forward,
+                            g.backward,
                             fwd_label,
                             bwd_label,
-                            g.metric,
-                            details,
-                            state.show_info,
-                            state.rate_unit,
-                            state.seq_mode,
                         )
                 except Exception as exc:
                     if state.selected_conn != conn_n:
@@ -1712,18 +1771,6 @@ def build_page() -> None:
                         ui.label(f"[render error: {exc}]").classes("text-bad")
                     return
                 state.figure_cache[cache_key] = fig
-                if metric == "tsg":
-                    model_pair = await run.io_bound(
-                        _build_tsg_model,
-                        g.forward,
-                        g.backward,
-                        details,
-                    )
-                    state.figure_cache[(conn_n, metric, "model")] = model_pair
-                    if _has_lro_anomaly(model_pair) and conn_n not in state.conns_with_lro:
-                        state.conns_with_lro.add(conn_n)
-                        _sync_lro_warning(state)
-                        refresh_warnings()
                 if state.selected_conn != conn_n:
                     return
                 _show_figure(metric, fig)
@@ -1830,6 +1877,56 @@ def build_page() -> None:
                                 f'<div class="conn-host">↔ {_escape_html(row.host_b)}</div>'
                             )
 
+        async def _ensure_tsg_pair(n: int):
+            """Compute (or fetch) the cached TSG model for conn n.
+
+            Heavy synthesis runs in `run.cpu_bound` (process pool) so the event
+            loop and outbox keep ticking — synthesize is the biggest single
+            CPU step in the conn-click flow (hundreds of ms on dense captures),
+            and a thread-pool worker would hold the GIL long enough to drop
+            socket.io pongs.
+
+            Cached in `state.figure_cache[(n, 'tsg', 'model')]` so the
+            findings, the TSG tab, and the throughput tab all reuse one pair
+            instead of synthesizing three times. Returns None when there's no
+            TSG xpl (degenerate captures) — caller treats that as 'no model'.
+            """
+            cache_key = (n, "tsg", "model")
+            if cache_key in state.figure_cache:
+                return state.figure_cache[cache_key]
+            result = state.analyses.get(n)
+            if result is None:
+                return None
+            g_tsg = next(
+                (g for g in group_xpls(result.xpl_files) if g.metric == "tsg"), None
+            )
+            if g_tsg is None:
+                state.figure_cache[cache_key] = None
+                return None
+            try:
+                pair = await run.cpu_bound(
+                    _build_tsg_model_pure,
+                    g_tsg.forward,
+                    g_tsg.backward,
+                    result.details_text,
+                    state.bad_csum_events,
+                    state.desegment_coalesces,
+                )
+            except Exception:
+                pair = None
+            state.figure_cache[cache_key] = pair
+            # Mid-analysis LRO surfacing — the bounded pre-flight scan misses
+            # offload that begins after its frame budget, so check the model.
+            if (
+                pair is not None
+                and _has_lro_anomaly(pair)
+                and n not in state.conns_with_lro
+            ):
+                state.conns_with_lro.add(n)
+                _sync_lro_warning(state)
+                refresh_warnings()
+            return pair
+
         async def _on_conn_click(n: int) -> None:
             if state.selected_pcap is None:
                 return
@@ -1893,9 +1990,18 @@ def build_page() -> None:
                 state.analyses[n] = result
             refresh_cache_label()
             _refresh_download_btn()
+            # Build the TSG model once, here — both findings and the lazy tab
+            # populate read from `state.figure_cache[(n, 'tsg', 'model')]`.
+            tsg_pair = await _ensure_tsg_pair(n)
             if n not in state.findings:
+                stats_row = next(
+                    (r for r in state.stats if isinstance(r, ConnStats) and r.n == n), None
+                )
+                result = state.analyses.get(n)
                 try:
-                    state.findings[n] = await run.io_bound(_compute_findings, n)
+                    state.findings[n] = await run.cpu_bound(
+                        _compute_findings_pure, n, result, stats_row, tsg_pair
+                    )
                 except Exception:
                     state.findings[n] = []
             # Analysis + findings are cached above regardless; only repaint if
@@ -2184,11 +2290,15 @@ def build_page() -> None:
             await _on_pcap_pick(SimpleNamespace(value=str(state.selected_pcap)))
 
         def _on_display_change(field: str, value: str) -> None:
-            """Display-only flag change: clear the figure cache and re-render
-            the current connection. Analyses on disk are untouched because
-            these toggles never reach tcptrace's CLI."""
+            """Display-only flag change: drop cached *figures* (they depend on
+            rate_unit/seq_mode) but preserve cached *models* (toggle-independent).
+            Without this distinction, the toggle re-triggers `synthesize_tsg`
+            on the next render, undoing the whole point of caching the model.
+            """
             setattr(state, field, value)
-            state.figure_cache.clear()
+            state.figure_cache = {
+                k: v for k, v in state.figure_cache.items() if k[-1] == "model"
+            }
             if state.selected_conn is not None:
                 render_main()
 

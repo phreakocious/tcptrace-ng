@@ -81,6 +81,10 @@ async def test_conn_click_renders_classified_text(user: User, tmp_path, monkeypa
         async def io_bound(fn, *a, **k):
             return fn(*a, **k)
 
+        @staticmethod
+        async def cpu_bound(fn, *a, **k):
+            return fn(*a, **k)
+
     with (
         patch.object(app_mod, "analyze_all", side_effect=RunnerError("stub")),
         patch.object(app_mod, "list_connections", return_value=fake_rows),
@@ -738,6 +742,10 @@ async def test_conn_click_renders_findings_panel(user: User, tmp_path, monkeypat
     class _InlineRun:
         @staticmethod
         async def io_bound(fn, *a, **k):
+            return fn(*a, **k)
+
+        @staticmethod
+        async def cpu_bound(fn, *a, **k):
             return fn(*a, **k)
 
     with (
