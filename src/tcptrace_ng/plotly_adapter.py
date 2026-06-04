@@ -658,30 +658,104 @@ def _fabricated_segment_trace(
 ) -> dict[str, Any] | None:
     """One scattergl trace for fabricated (de-coalesced) data pieces, drawn
     dotted + muted so it's unmistakable their per-piece timing was reconstructed
-    rather than observed."""
+    rather than observed. Hover is delegated to a paired marker trace built by
+    `_fabricated_hover_trace` — sharing an x across N pieces, scattergl-line
+    hovermode=x would always pick the first piece's vertex (`1/N` for every
+    hover) instead of selecting by cursor-y."""
     segs = [s for s in model.segments if s.fabricated and s.seq_end - s.seq_start > 1]
     if not segs:
         return None
     xs: list[Any] = []
     ys: list[float | None] = []
-    ht: list[str] = []
     for s in segs:
         t_iso = _epoch_to_iso(s.time)
-        label = _fabricated_hovertext(s, model.coalesces)
         xs.extend([t_iso, t_iso, None])
         ys.extend([s.seq_start - baseline, s.seq_end - baseline, None])
-        ht.extend([label, label, ""])
     return {
         "type": "scattergl",
         "mode": "lines",
         "x": xs,
         "y": ys,
         "line": {"color": color, "width": 1, "dash": "dot"},
-        "hovertext": ht,
-        "hovertemplate": _TSG_FAB_TEMPLATE,
+        "hoverinfo": "skip",
         "name": name,
         "legendgroup": legendgroup or name,
         "showlegend": showlegend,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
+
+
+def _fabricated_hover_trace(
+    model: TsgModel,
+    *,
+    color: str,
+    xaxis_ref: str = "x",
+    yaxis_ref: str = "y",
+    baseline: int = 0,
+) -> dict[str, Any] | None:
+    """One invisible marker per de-coalesced parent (NOT per piece), placed at
+    the parent's seq-midpoint. Hover shows the whole coalesce — its byte span
+    and piece count — because hovermode=x picks a single point per trace at the
+    cursor's xval and N coincident piece markers would always resolve to the
+    same one (the user-reported `always 1/N` bug). One marker per parent makes
+    the popup informative regardless of which slot the cursor lands on."""
+    if not model.coalesces:
+        return None
+    fab_segs = [s for s in model.segments if s.fabricated and s.seq_end - s.seq_start > 1]
+    if not fab_segs:
+        return None
+    # Group fabricated segments by their parent coalesce (matched on identical
+    # timestamp + containment, the same key _tag_fabricated uses). MSS-inferred
+    # coalesces are flagged with lower confidence in the hover.
+    by_parent: dict[tuple[float, int, int], list[Segment]] = {}
+    parent_meta: dict[tuple[float, int, int], dict] = {}
+    for c in model.coalesces:
+        key = (c["time"], c["parent_seq_start"], c["parent_seq_end"])
+        parent_meta[key] = c
+        by_parent.setdefault(key, [])
+    for s in fab_segs:
+        for key in by_parent:
+            t, lo, hi = key
+            if s.time == t and lo <= s.seq_start and s.seq_end <= hi:
+                by_parent[key].append(s)
+                break
+    xs: list[Any] = []
+    ys: list[float] = []
+    ht: list[str] = []
+    for key, segs in by_parent.items():
+        if not segs:
+            continue
+        c = parent_meta[key]
+        lo, hi = c["parent_seq_start"], c["parent_seq_end"]
+        kb = (hi - lo) / 1024.0
+        confidence = (
+            "<br>MSS inferred (no SYN) — piece boundaries approximate"
+            if c.get("mss_source") == "inferred"
+            else ""
+        )
+        xs.append(_epoch_to_iso(c["time"]))
+        ys.append(((lo + hi) / 2) - baseline)
+        ht.append(
+            f"<b>de-coalesced offload segment</b><br>"
+            f"{kb:.1f} KB · {c['pieces']} pieces (MSS {c.get('mss', 0):,})<br>"
+            f"timing inferred — all pieces share the captured timestamp"
+            f"{confidence}"
+        )
+    if not xs:
+        return None
+    return {
+        "type": "scattergl",
+        "mode": "markers",
+        "x": xs,
+        "y": ys,
+        "marker": {"size": 1, "color": "rgba(0,0,0,0)", "opacity": 0},
+        "hovertext": ht,
+        "hovertemplate": _TSG_FAB_TEMPLATE,
+        "hoverlabel": {"bordercolor": color},
+        "name": "reconstructed",
+        "legendgroup": "reconstructed",
+        "showlegend": False,
         "xaxis": xaxis_ref,
         "yaxis": yaxis_ref,
     }
@@ -841,6 +915,7 @@ def _rwin_trace(
     baseline: int = 0,
     showlegend: bool = True,
     legendgroup: str | None = None,
+    y_max: float | None = None,
 ) -> dict[str, Any] | None:
     if not model.acks:
         return None
@@ -850,11 +925,15 @@ def _rwin_trace(
     prev_top: int | None = None
     prev_time: float | None = None
     rows = _ack_customdata(model.acks, baseline=baseline)
+    # Clamp the drawn rwin top to the subplot's y_max so a window that dwarfs
+    # the data band can't overflow into the adjacent subplot (scattergl's WebGL
+    # rendering doesn't honor the subplot clipPath that SVG mode would). Hover
+    # still reports the true rwnd via customdata[1].
     for a, row in zip(model.acks, rows, strict=True):
-        # Plot the scaled window (what the hover shows via _ack_customdata), not
-        # the raw a.rwin — keep the line and tooltip consistent (L7).
         rwin = a.rwin_scaled if a.rwin_scaled is not None else a.rwin
         top = a.ack_seq + rwin - baseline
+        if y_max is not None and top > y_max:
+            top = y_max
         if prev_top is not None and prev_time is not None:
             xs.extend([_epoch_to_iso(prev_time), _epoch_to_iso(a.time), None])
             ys.extend([prev_top, prev_top, None])
@@ -1055,6 +1134,12 @@ def _anomaly_annotations(
     show_info: bool = False,
     baseline: int = 0,
 ) -> list[dict[str, Any]]:
+    """Visible glyph annotations only. Hover popovers ride on the paired
+    invisible marker trace built by `_anomaly_hover_trace`, because Plotly
+    annotations don't respond to programmatic `Plotly.Fx.hover` — and the
+    shared-cursor crossbar (see app.attach_hover_crossbar) fires hover via that
+    API on every panel. Direct mouseover the glyph still pops the tooltip
+    because the crossbar's mousemove listener is active across the plot."""
     visible = [
         a for a in model.anomalies if show_info or SEVERITY_BY_KIND.get(a.kind, "info") != "info"
     ]
@@ -1076,11 +1161,6 @@ def _anomaly_annotations(
         xshift = rank * _COLLISION_XSHIFT_PX
         severity = SEVERITY_BY_KIND.get(a.kind, "info")
         color = _SEVERITY_COLOR[severity]
-        # Hovertext lives directly on the annotation so the popover fires on
-        # the visible glyph (xshift/yshift applied) instead of 14 px below at
-        # the bare data point — which is what the separate invisible-marker
-        # trace used to do. With no competing scatter trace at the same spot,
-        # the doubled-popover issue from the previous attempt doesn't recur.
         anns.append(
             {
                 "x": _epoch_to_iso(a.time),
@@ -1092,14 +1172,57 @@ def _anomaly_annotations(
                 "font": {"color": color, "size": 10, "family": "Menlo, monospace"},
                 "xshift": xshift,
                 "yshift": yshift,
-                "hovertext": _anomaly_hovertext(a, model, baseline=baseline),
-                "hoverlabel": {
-                    "bgcolor": _SEVERITY_HOVER_BG[severity],
-                    "bordercolor": color,
-                },
             }
         )
     return anns
+
+
+def _anomaly_hover_trace(
+    model: TsgModel,
+    *,
+    xaxis_ref: str = "x",
+    yaxis_ref: str = "y",
+    show_info: bool = False,
+    baseline: int = 0,
+) -> dict[str, Any] | None:
+    """Invisible markers co-located with each anomaly cluster, carrying the
+    hover popover. Drives both direct-mouseover hover AND the shared-cursor
+    `Plotly.Fx.hover` xval call (annotations alone don't fire the latter, so
+    SYN/SA/A/FA/R FA tooltips otherwise stay dark when the cursor isn't on the
+    glyph itself)."""
+    visible = [
+        a for a in model.anomalies if show_info or SEVERITY_BY_KIND.get(a.kind, "info") != "info"
+    ]
+    clusters = _cluster_anomalies(visible)
+    if not clusters:
+        return None
+    xs: list[Any] = []
+    ys: list[float] = []
+    htexts: list[str] = []
+    border: list[str] = []
+    bg: list[str] = []
+    for a, _count in clusters:
+        y = (a.seq_lo - baseline) if a.seq_lo is not None else 0
+        severity = SEVERITY_BY_KIND.get(a.kind, "info")
+        xs.append(_epoch_to_iso(a.time))
+        ys.append(y)
+        htexts.append(_anomaly_hovertext(a, model, baseline=baseline))
+        border.append(_SEVERITY_COLOR[severity])
+        bg.append(_SEVERITY_HOVER_BG[severity])
+    return {
+        "type": "scattergl",
+        "mode": "markers",
+        "x": xs,
+        "y": ys,
+        "marker": {"size": 1, "color": "rgba(0,0,0,0)", "opacity": 0},
+        "hovertext": htexts,
+        "hovertemplate": "%{hovertext}<extra></extra>",
+        "hoverlabel": {"bgcolor": bg, "bordercolor": border},
+        "name": "anomalies",
+        "showlegend": False,
+        "xaxis": xaxis_ref,
+        "yaxis": yaxis_ref,
+    }
 
 
 def _info_strip(
@@ -1226,6 +1349,8 @@ def _build_direction_traces(
     yaxis_ref: str,
     baseline: int = 0,
     legend_seen: set[str] | None = None,
+    y_max: float | None = None,
+    show_info: bool = False,
 ) -> list[dict[str, Any]]:
     """Assemble all per-direction traces bound to the given subplot axes.
 
@@ -1281,6 +1406,7 @@ def _build_direction_traces(
             baseline=baseline,
             showlegend=False,
             legendgroup="rwin",
+            y_max=y_max,
         ),
     )
     _commit(
@@ -1321,6 +1447,15 @@ def _build_direction_traces(
             legendgroup="reconstructed",
         ),
     )
+    fab_hover = _fabricated_hover_trace(
+        model,
+        color="#7fb3c8",
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        baseline=baseline,
+    )
+    if fab_hover is not None:
+        out.append(fab_hover)
     _commit(
         "retx",
         _retx_segment_trace(
@@ -1333,6 +1468,15 @@ def _build_direction_traces(
             legendgroup="retx",
         ),
     )
+    hover = _anomaly_hover_trace(
+        model,
+        xaxis_ref=xaxis_ref,
+        yaxis_ref=yaxis_ref,
+        show_info=show_info,
+        baseline=baseline,
+    )
+    if hover is not None:
+        out.append(hover)
     return out
 
 
@@ -1467,11 +1611,20 @@ def to_tsg_figure(
         layout["xaxis"] = _tsg_xaxis(show_ticks=True)
         yaxis = _tsg_yaxis()
         only_range = _capped_yaxis_range(only)
+        y_max: float | None = None
         if only_range is not None:
             yaxis["range"] = [only_range[0] - baseline, only_range[1] - baseline]
             yaxis["autorange"] = False
+            y_max = only_range[1] - baseline
         layout["yaxis"] = yaxis
-        traces = _build_direction_traces(only, xaxis_ref="x", yaxis_ref="y", baseline=baseline)
+        traces = _build_direction_traces(
+            only,
+            xaxis_ref="x",
+            yaxis_ref="y",
+            baseline=baseline,
+            y_max=y_max,
+            show_info=show_info,
+        )
         annotations = _anomaly_annotations(
             only, xref="x", yref="y", show_info=show_info, baseline=baseline
         )
@@ -1505,9 +1658,11 @@ def to_tsg_figure(
     fwd_yaxis["domain"] = list(_FWD_DOMAIN)
     fwd_yaxis["anchor"] = "x"
     fwd_range = _capped_yaxis_range(fwd)
+    fwd_y_max: float | None = None
     if fwd_range is not None:
         fwd_yaxis["range"] = [fwd_range[0] - fwd_base, fwd_range[1] - fwd_base]
         fwd_yaxis["autorange"] = False
+        fwd_y_max = fwd_range[1] - fwd_base
 
     bwd_xaxis = _tsg_xaxis(show_ticks=True)
     bwd_xaxis["matches"] = "x"
@@ -1517,9 +1672,11 @@ def to_tsg_figure(
     bwd_yaxis["domain"] = list(_BWD_DOMAIN)
     bwd_yaxis["anchor"] = "x2"
     bwd_range = _capped_yaxis_range(bwd)
+    bwd_y_max: float | None = None
     if bwd_range is not None:
         bwd_yaxis["range"] = [bwd_range[0] - bwd_base, bwd_range[1] - bwd_base]
         bwd_yaxis["autorange"] = False
+        bwd_y_max = bwd_range[1] - bwd_base
 
     layout["xaxis"] = fwd_xaxis
     layout["yaxis"] = fwd_yaxis
@@ -1528,9 +1685,21 @@ def to_tsg_figure(
 
     legend_seen: set[str] = set()
     traces = _build_direction_traces(
-        fwd, xaxis_ref="x", yaxis_ref="y", baseline=fwd_base, legend_seen=legend_seen
+        fwd,
+        xaxis_ref="x",
+        yaxis_ref="y",
+        baseline=fwd_base,
+        legend_seen=legend_seen,
+        y_max=fwd_y_max,
+        show_info=show_info,
     ) + _build_direction_traces(
-        bwd, xaxis_ref="x2", yaxis_ref="y2", baseline=bwd_base, legend_seen=legend_seen
+        bwd,
+        xaxis_ref="x2",
+        yaxis_ref="y2",
+        baseline=bwd_base,
+        legend_seen=legend_seen,
+        y_max=bwd_y_max,
+        show_info=show_info,
     )
 
     annotations = _anomaly_annotations(

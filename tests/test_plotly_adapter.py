@@ -1301,9 +1301,9 @@ def test_syn_segment_excluded_from_data_trace_to_avoid_orphan_hover():
 
 
 def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
-    """Hover lives directly on the annotation so the popover lands on the
-    visible glyph (xshift/yshift applied) instead of the bare data point
-    14 px below. Verifies the annotation carries the enriched hovertext."""
+    """Hover rides on the paired invisible-marker trace (name='anomalies') so
+    the shared-cursor crossbar's Plotly.Fx.hover xval call fires the popup on
+    every panel — annotations alone don't respond to that programmatic API."""
     model = TsgModel(
         src="1.1.1.1:1",
         dst="2.2.2.2:2",
@@ -1324,17 +1324,18 @@ def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    anns = [a for a in fig["layout"]["annotations"] if a.get("text") == "S"]
-    assert len(anns) == 1
-    tip = anns[0]["hovertext"]
+    glyph_anns = [a for a in fig["layout"]["annotations"] if a.get("text") == "S"]
+    assert len(glyph_anns) == 1
+    # Annotation is visible-only — no hovertext attached.
+    assert "hovertext" not in glyph_anns[0]
+    hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
+    tip = hover["hovertext"][0]
     assert "SYN (initiator)" in tip
     # Seq is comma-formatted so it matches the segment/ack popovers.
     assert "seq 12,345" in tip
     assert "23.4 ms" in tip
     # Multi-line so dense detail doesn't sprawl horizontally.
     assert "<br>" in tip
-    # No separate scatter hover trace — annotation owns the popover.
-    assert not any(t.get("name") == "anomalies" for t in fig["data"])
 
 
 def test_anomaly_hovertext_respects_rel_seq_mode():
@@ -1426,11 +1427,19 @@ def test_anomaly_hovertext_respects_rel_seq_mode():
 
     def _tips(seq_mode):
         fig = to_tsg_figure(TsgModelPair(fwd=model), show_info=True, seq_mode=seq_mode)
-        return {
-            a.get("text"): a.get("hovertext", "")
-            for a in fig["layout"]["annotations"]
-            if a.get("hovertext") and a.get("yref") != "paper"
-        }
+        # Hover popovers now ride on the invisible-marker trace; clusters there
+        # appear in the same order as the visible glyph annotations, so pair by
+        # cluster index back to each annotation's glyph text.
+        glyphs = [
+            a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") != "paper"
+        ]
+        hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
+        # Strip cluster ×N suffix so callers can key on the bare glyph.
+        tips = {}
+        for glyph, tip in zip(glyphs, hover["hovertext"], strict=False):
+            key = glyph.split(" ×", 1)[0] if glyph else glyph
+            tips[key] = tip
+        return tips
 
     abs_tips = _tips("abs")
     rel_tips = _tips("rel")
@@ -1462,10 +1471,10 @@ def test_anomaly_hovertext_respects_rel_seq_mode():
 
 
 def test_anomaly_annotation_border_color_matches_severity():
-    """Hover popovers' bordercolor used to be hardcoded red, so a SYN hover
-    looked like an alarm. Per-annotation hoverlabel makes handshake markers
-    cyan, severe red, warn amber, info grey — matching the on-chart glyph
-    color."""
+    """Hover popovers used to be hardcoded red, so a SYN hover looked like an
+    alarm. The anomaly hover trace's per-point hoverlabel.bordercolor now ties
+    handshake markers to cyan, severe to red, warn to amber, info to grey —
+    matching the on-chart glyph color."""
     from tcptrace_ng.plotly_adapter import _SEVERITY_COLOR
 
     model = TsgModel(
@@ -1479,9 +1488,8 @@ def test_anomaly_annotation_border_color_matches_severity():
         ],
     )
     fig = to_tsg_figure(TsgModelPair(fwd=model))
-    glyph_anns = [a for a in fig["layout"]["annotations"] if a.get("text") in {"S", "⚠ RTO", "ooo"}]
-    borders = [a["hoverlabel"]["bordercolor"] for a in glyph_anns]
-    assert borders == [
+    hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
+    assert hover["hoverlabel"]["bordercolor"] == [
         _SEVERITY_COLOR["handshake"],
         _SEVERITY_COLOR["severe"],
         _SEVERITY_COLOR["warn"],
@@ -1503,11 +1511,8 @@ def test_anomaly_annotations_exclude_info_when_hidden():
     )
 
     def hoverable_count(fig):
-        return sum(
-            1
-            for a in fig["layout"]["annotations"]
-            if a.get("hovertext") and a.get("yref") != "paper"
-        )
+        hover = next((t for t in fig["data"] if t.get("name") == "anomalies"), None)
+        return len(hover["hovertext"]) if hover else 0
 
     assert hoverable_count(to_tsg_figure(TsgModelPair(fwd=model))) == 1
     assert hoverable_count(to_tsg_figure(TsgModelPair(fwd=model), show_info=True)) == 2
@@ -1925,14 +1930,24 @@ def test_fabricated_pieces_render_as_distinct_dotted_trace():
     ]
     model = TsgModel(src="a", dst="b", direction="a2b", segments=segs, coalesces=[coalesce])
     traces = _build_direction_traces(model, xaxis_ref="x", yaxis_ref="y")
+    reconstructed = [t for t in traces if t["name"] == "reconstructed"]
     by_name = {t["name"]: t for t in traces}
-    assert "reconstructed" in by_name and "data" in by_name
-    fab = by_name["reconstructed"]
-    assert fab["line"].get("dash") == "dot"
-    assert len(fab["x"]) == 9  # 3 pieces x (start, end, None)
+    assert reconstructed and "data" in by_name
+    # The reconstructed name resolves to TWO traces: a dotted line per piece
+    # for the visible glyph, and one invisible per-parent marker that carries
+    # the de-coalesced-segment hover. Hovermode=x picks a single point per
+    # trace at the cursor's xval, so one marker per parent (not per piece)
+    # gives an informative popup regardless of which slot the cursor lands on.
+    line_tr = next(t for t in reconstructed if t.get("mode") == "lines")
+    marker_tr = next(t for t in reconstructed if t.get("mode") == "markers")
+    assert line_tr["line"].get("dash") == "dot"
+    assert line_tr.get("hoverinfo") == "skip"
+    assert len(line_tr["x"]) == 9  # 3 pieces x (start, end, None)
     assert len(by_name["data"]["x"]) == 3  # the lone real segment
-    joined = " ".join(h for h in fab["hovertext"] if h)
-    assert "reconstructed piece 1/3" in joined and "reconstructed piece 3/3" in joined
+    assert len(marker_tr["x"]) == 1  # one marker per coalesce parent
+    tip = marker_tr["hovertext"][0]
+    assert "de-coalesced offload segment" in tip
+    assert "3 pieces" in tip
 
 
 def test_anomaly_hovertext_flags_reconstructed_timing():

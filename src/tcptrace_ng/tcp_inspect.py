@@ -545,7 +545,7 @@ def _detect_anomalies(
             Anomaly(
                 time=s.time,
                 kind=s.rtx,  # type: ignore[arg-type]
-                one_liner=f"{s.rtx} retransmit seq {s.seq_start:,}..{s.seq_end:,}",
+                one_liner=f"{s.rtx} retransmit · seq {s.seq_start:,}..{s.seq_end:,}",
                 seq_lo=s.seq_start,
                 seq_hi=s.seq_end,
             )
@@ -601,7 +601,7 @@ def _detect_anomalies(
                     Anomaly(
                         time=a.time,
                         kind="sack_gap",
-                        one_liner=(f"SACK {lo:,}..{hi:,}; gap {a.ack_seq:,}..{lo:,} unacked"),
+                        one_liner=(f"SACK {lo:,}..{hi:,} · gap {a.ack_seq:,}..{lo:,} unacked"),
                         seq_lo=lo,
                         seq_hi=hi,
                     )
@@ -1046,6 +1046,13 @@ def _build_model(
     src, dst = _parse_endpoints(xpl.title)
     segs = _extract_segments(xpl)
     acks = _extract_acks(xpl)
+    # tcptrace pre-scales the yellow rwin line in xpl when it has parsed the
+    # peer's wscale option, so rwin extracted here is already scaled. Tag each
+    # Ack with rwin_scaled = rwin to signal "scale was known", which surfaces
+    # in the per-ack hover ("scale known: 1") and lets _rwin_trace plot the
+    # scaled value verbatim. Without a known wscale, rwin_scaled stays None.
+    if window_scale is not None:
+        acks = [replace(a, rwin_scaled=a.rwin) for a in acks]
     in_flight, segs = _compute_in_flight(segs, acks)
     segs = _pair_rtt(segs, acks)
     segs = _classify_retx(segs, acks)
