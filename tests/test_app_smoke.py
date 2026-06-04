@@ -587,6 +587,41 @@ def test_render_throughput_stats_panel_updates_on_relayout():
     )
 
 
+def test_hover_crossbar_overlay_not_per_frame_relayout():
+    """Regression guard for the hover-crossbar rework.
+
+    Symptoms it locks down: invisible bar, laggy far panel, bouncing
+    timestamp. Root cause was redrawing a Plotly layout shape via
+    Plotly.relayout on every mousemove frame — a full-layout recompute that
+    floods Plotly's async queue, so the bar never settles and the off-cursor
+    panel's tooltip trails. The crossbar must instead be a cheap
+    absolutely-positioned overlay (no relayout in the hot path), while
+    cross-panel value sync (Fx.hover on both subplots) and a single stable
+    timestamp label are retained.
+    """
+    from tcptrace_ng.app import _HOVER_CROSSBAR_JS as JS
+
+    # No per-frame relayout: the regressed code did Plotly.relayout(gd, {shapes:[...]}).
+    assert "relayout" not in JS, "crossbar must not call Plotly.relayout in the hot path"
+    assert "shapes:" not in JS, "crossbar must not draw a per-frame layout shape"
+
+    # Drawn as an overlay element instead, rAF-throttled off mousemove.
+    assert "_tcpNgOverlay" in JS
+    assert "requestAnimationFrame" in JS
+    assert "mousemove" in JS
+
+    # Cross-panel per-trace values still synced across both subplots.
+    assert "Fx.hover" in JS
+    assert "subplotIds" in JS
+
+    # Exactly one timestamp, formatted client-side and shown once.
+    assert "fmtDate" in JS
+
+    # Plotly's compare-mode axis label (g.axistext) repeats the timestamp once
+    # per x-axis; the injected style hides it so the overlay is the only one.
+    assert ".axistext" in JS
+
+
 async def test_picking_geneve_pcap_triggers_decap(user: User, tmp_path, monkeypatch):
     """A pcap with Geneve outer frames is auto-decapped; the runner gets the
     decap'd copy, and state.decap_encaps records what was stripped."""

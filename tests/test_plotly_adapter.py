@@ -559,10 +559,10 @@ def test_tsg_figure_has_no_top_title():
 
 def test_tsg_layout_arms_plotly_hover_for_crossbar_script():
     """Plotly's per-axis spike stops at its subplot boundary, so the crossbar
-    is drawn client-side as a full-figure layout shape (see
-    attach_hover_crossbar in app.py). For that to fire smoothly we still
-    need hovermode=x at the layout level; the spike config itself is gone
-    so it doesn't overlap the JS-drawn line."""
+    is drawn client-side as an absolutely-positioned overlay (see
+    _HOVER_CROSSBAR_JS in app.py). We still need hovermode=x at the layout
+    level so Fx.hover can pop both panels' tooltips; the native spike config
+    is gone so it doesn't double the JS-drawn line."""
     fwd = TsgModel(src="1.1.1.1:1", dst="2.2.2.2:2", direction="a2b")
     bwd = TsgModel(src="2.2.2.2:2", dst="1.1.1.1:1", direction="b2a")
     fig = to_tsg_figure(TsgModelPair(fwd=fwd, bwd=bwd))
@@ -578,6 +578,31 @@ def test_throughput_layout_arms_plotly_hover_for_crossbar_script():
     assert fig["layout"].get("hovermode") == "x"
     for ax in ("xaxis", "xaxis2"):
         assert "showspikes" not in fig["layout"][ax]
+
+
+def test_metric_traces_omit_x_from_hover_for_single_crossbar_timestamp():
+    """The crossbar overlay owns the one timestamp (see _HOVER_CROSSBAR_JS).
+    Per-trace tooltips must not repeat it — extra per-panel timestamps that
+    show/disappear read as flicker. Line and marker traces therefore show y
+    only, never x, and no hovertemplate emits x."""
+    from tcptrace_ng.plotly_adapter import _build_traces
+
+    plot = XplPlot(
+        commands=[
+            Line(color="green", x1=0.0, y1=1.0, x2=1.0, y2=2.0),
+            Dot(color="green", x=0.5, y=1.5),
+        ]
+    )
+    traces = _build_traces(plot, xfmt=lambda v: v)
+    assert traces, "expected at least one trace"
+    for t in traces:
+        hi = t.get("hoverinfo")
+        if hi is not None:
+            flags = set(hi.split("+"))
+            assert "x" not in flags, f"{t.get('name')!r} leaks x into hover ({hi!r})"
+        tmpl = t.get("hovertemplate")
+        if tmpl is not None:
+            assert "%{x" not in tmpl, f"{t.get('name')!r} hovertemplate emits x"
 
 
 def test_throughput_figure_has_no_top_title():
