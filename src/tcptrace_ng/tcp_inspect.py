@@ -267,7 +267,7 @@ def _parse_endpoints(title: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
-_DATA_COLORS = {"white", "orange"}  # white = normal data; orange = SYN/FIN
+_DATA_COLORS = {"white"}  # white = normal data
 _RTX_COLOR = "red"
 
 
@@ -276,10 +276,16 @@ def _is_vertical(cmd: Line) -> bool:
 
 
 def _extract_segments(xpl: XplPlot) -> list[Segment]:
-    """Pull data segments out of an xpl. White & orange verticals are normal
-    data (orange = SYN/FIN, kept as segments — TCP-level classification comes
-    later); red verticals are retransmits with rtx initially set to "rto" as
-    a placeholder that Task 8's sub-classifier will refine.
+    """Pull data segments out of an xpl. White verticals are data; red verticals
+    are retransmits with rtx initially set to "rto" as a placeholder that the
+    retx sub-classifier refines.
+
+    Orange verticals (SYN/FIN) are skipped: they're 1-byte sequence-space
+    control markers, not data. Including them as Segments fed phantom send
+    events into _compute_in_flight (sub-pixel in-flight spikes at SYN/FIN
+    time, polluted pre_first_baseline) and produced bogus SYN→data RTT pairs.
+    The orange diamond/box glyphs still render on the chart from the xpl
+    directly — that path doesn't go through Segments.
     """
     raw: list[tuple[float, int, int, str | None]] = []
     for cmd in xpl.commands:

@@ -153,17 +153,16 @@ def test_segments_extracted_from_white_vertical_lines():
     xpl = parse_xpl(TSG_THREE_SEGS)
     pair = synthesize(xpl, None, "")
     segs = pair.fwd.segments
-    # SYN (orange) and two white data segs. SYN is a 1-byte vertical line too;
-    # we include it (classification refinement comes later) so the count is 3.
-    assert len(segs) == 3
+    # Only the two white data segs — the orange SYN is a 1-byte control
+    # marker, not data, and is filtered out at extraction.
+    assert len(segs) == 2
     # Time-sorted.
     assert all(segs[i].time <= segs[i + 1].time for i in range(len(segs) - 1))
     # First white data seg: 572 -> 700, len 128.
-    data_segs = [s for s in segs if s.seq_end - s.seq_start > 1]
-    assert data_segs[0].seq_start == 3493560572
-    assert data_segs[0].seq_end == 3493560700
-    assert data_segs[0].time == pytest.approx(1538187584.750543)
-    assert data_segs[0].rtx is None
+    assert segs[0].seq_start == 3493560572
+    assert segs[0].seq_end == 3493560700
+    assert segs[0].time == pytest.approx(1538187584.750543)
+    assert segs[0].rtx is None
 
 
 def test_red_vertical_lines_classified_as_rtx_pending():
@@ -561,6 +560,50 @@ line 2.0 7000 2.0 5000
     # appeared unchanged.
     kinds = [a.kind for a in pair.fwd.anomalies]
     assert "win_shrink" in kinds or "win_shrink_large" in kinds
+
+
+def test_in_flight_excludes_syn_fin_orange_verticals():
+    """The orange SYN (and FIN) verticals span 1 byte of sequence space — they
+    are control packets, not data. Previously they were extracted as Segments
+    and fed into _compute_in_flight, so the in-flight series got a sub-pixel
+    spike at SYN time and pre_first_baseline anchored at the SYN's seq instead
+    of the first data segment's. The cyan in-flight fill rendered starting at
+    SYN time, ahead of any data flow.
+
+    Drop them at extraction so the in-flight band anchors at the first real
+    data send."""
+    xpl_text = """\
+timeval double
+title
+1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+orange
+line 0.0 1000 0.0 1001
+white
+line 1.0 1001 1.0 1501
+orange
+line 5.0 1501 5.0 1502
+green
+line 0.0 1001 2.0 1001
+line 2.0 1001 2.0 1501
+yellow
+line 0.0 6000 2.0 6000
+line 2.0 6000 2.0 6500
+"""
+    pair = synthesize(parse_xpl(xpl_text), None, "")
+    m = pair.fwd
+    # Only the white 1001→1501 data segment survives; SYN and FIN are dropped.
+    assert len(m.segments) == 1
+    assert m.segments[0].seq_start == 1001
+    assert m.segments[0].seq_end == 1501
+    # No in-flight series entries at SYN (t=0.0) or FIN (t=5.0) time —
+    # neither contributes a send event to the replay.
+    times = [t for t, _ in m.in_flight]
+    assert 0.0 not in times, f"SYN must not anchor in_flight; got {times}"
+    assert 5.0 not in times, f"FIN must not anchor in_flight; got {times}"
 
 
 def test_anomaly_zero_win_when_rwin_zero_at_ack():
