@@ -1256,7 +1256,7 @@ def _tsg_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "spikemode": "across",
         "spikesnap": "cursor",
         "spikethickness": 1,
-        "spikecolor": "#666",
+        "spikecolor": "#3a3a3a",
         "spikedash": "dot",
     }
     return xaxis
@@ -1350,7 +1350,10 @@ def to_tsg_figure(
     # was just duplicated text occupying the room the legend bar needs.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
-    layout["hovermode"] = "x"  # arms the full-height x-axis spike crossbar
+    # x unified extends the x-axis spike across every subplot that shares the
+    # x range (fwd+bwd panels here) instead of stopping at the active panel's
+    # bottom edge — and collapses per-trace hover labels into one card.
+    layout["hovermode"] = "x unified"  # arms the full-height x-axis spike crossbar
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
@@ -1502,7 +1505,7 @@ def _tput_xaxis(*, show_ticks: bool) -> dict[str, Any]:
         "spikemode": "across",
         "spikesnap": "cursor",
         "spikethickness": 1,
-        "spikecolor": "#666",
+        "spikecolor": "#3a3a3a",
         "spikedash": "dot",
     }
 
@@ -1874,7 +1877,10 @@ def to_throughput_figure(
     # Title omitted: per-panel labels carry the direction, see to_tsg_figure.
     layout = _base_layout("", dragmode="zoom", showlegend=True)
     layout["margin"]["t"] = 40
-    layout["hovermode"] = "x"
+    # x unified extends the x-axis spike across every subplot that shares the
+    # x range (fwd+bwd panels here) instead of stopping at the active panel's
+    # bottom edge — and collapses per-trace hover labels into one card.
+    layout["hovermode"] = "x unified"
     layout["legend"] = {
         "orientation": "h",
         "xanchor": "right",
