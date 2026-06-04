@@ -1,19 +1,23 @@
 """Audit guards from spec §0 doctrine and §1 single-source-of-truth.
 
 After the re-theme, every 6-digit hex in src/tcptrace_ng/ must live in
-theme.py's Palette dataclass (or the documented LEGEND_BG rgba). This test
-runs `grep` over the package and asserts no other file matches.
+theme.py's Palette dataclass (or the documented LEGEND_BG rgba derived
+via `theme._rgba`). This test runs `grep` over the package and asserts
+no other file matches.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
+from tcptrace_ng.theme import LEGEND_BG
+
 PKG = Path(__file__).parent.parent / "src" / "tcptrace_ng"
 HEX_RE = re.compile(rb"#[0-9a-fA-F]{6}")
-# LEGEND_BG uses an rgba (alpha channel) — documented exception. Match its
-# numeric value so the test stays sensitive to *new* rgba literals elsewhere.
-RGBA_RE = re.compile(rb"rgba\(\s*14\s*,\s*17\s*,\s*21\s*,\s*0\.4\s*\)")
+# Match the LEGEND_BG value as currently derived — escape the parens and
+# dots so a regex special doesn't slip past. Keeps the test sensitive to
+# *new* rgba literals appearing anywhere outside theme.py.
+LEGEND_BG_RE = re.compile(re.escape(LEGEND_BG).encode())
 
 
 def test_only_theme_py_holds_literal_hexes():
@@ -38,11 +42,15 @@ def test_dark_css_uses_no_literal_hexes():
     assert not offenders, f"DARK_CSS contains literal hexes: {offenders}"
 
 
-def test_legend_bg_is_only_rgba_in_pkg():
-    """The single allowed rgba (LEGEND_BG alpha) lives in theme.py only."""
+def test_legend_bg_string_only_appears_in_theme_py():
+    """The single allowed rgba (LEGEND_BG, derived via theme._rgba) lives in
+    theme.py only. The literal value is computed from PALETTE.bg_surface so
+    a future hex change there propagates without needing to update this test."""
     for f in PKG.rglob("*.py"):
         if f.name == "theme.py":
             continue
         if "__pycache__" in f.parts:
             continue
-        assert not RGBA_RE.search(f.read_bytes()), f"rgba(14,17,21,0.4) appears outside theme.py: {f}"
+        assert not LEGEND_BG_RE.search(f.read_bytes()), (
+            f"LEGEND_BG value ({LEGEND_BG!r}) appears outside theme.py: {f}"
+        )

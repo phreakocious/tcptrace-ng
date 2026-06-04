@@ -63,19 +63,35 @@ def quasar_colors() -> dict[str, str]:
     best fit; short brand tokens become `--q-<name>` CSS vars on body. The
     utility classes (`.text-good`, `.text-emph`, …) that resolve those vars
     are emitted in DARK_CSS below — Quasar doesn't auto-generate them for
-    custom brand tokens, only for its own slots."""
+    custom brand tokens, only for its own slots.
+
+    Note on the `accent` collision: `Palette.accent` is Solarized cyan and
+    feeds Quasar's `primary` slot (it's the everyday accent — selection
+    bar, active-tab indicator). Quasar's own `accent` slot binds to
+    `Palette.rare` (violet), reserved for the rarer "extra emphasis" tier.
+    So `color="primary"` in app.py paints cyan; `color="accent"` paints
+    violet. The two names look similar but serve opposite frequencies."""
     p = PALETTE
     return {
-        "primary": p.accent, "secondary": p.info, "accent": p.rare,
-        "dark": p.bg_surface, "dark_page": p.bg_page,
-        "positive": p.good, "negative": p.bad, "info": p.info, "warning": p.notable,
-        # semantic brand tokens
+        # Quasar built-in slots — drive every default-Quasar widget surface.
+        "primary": p.accent,     # cyan — everyday accent / selection / active tab
+        "secondary": p.info,     # blue — secondary buttons/badges (rarely used today)
+        "accent": p.rare,        # violet — rare emphasis (NOT the cyan accent)
+        "dark": p.bg_surface,    # surface bg for cards/menus in dark mode
+        "dark_page": p.bg_page,  # body bg in dark mode
+        "positive": p.good,      # Quasar "ok"-semantic widgets
+        "negative": p.bad,       # Quasar "bad"-semantic widgets — orange, NOT crit red
+        "info": p.info,
+        "warning": p.notable,    # warning chip / amber surfaces
+        # Semantic brand tokens — addressable via `color=<name>` and var(--q-<name>).
         "good": p.good, "notable": p.notable, "bad": p.bad, "crit": p.crit,
-        # text-role brand tokens
+        # Text-role brand tokens.
         "emph": p.text_emph, "body": p.text_body, "muted": p.text_muted, "dim": p.text_dim,
-        # surface brand tokens
+        # Surface brand tokens — `panel` is decoupled from Quasar's `dark` slot in case
+        # those two values diverge later (sidebar/header vs cards/menus).
         "panel": p.bg_panel, "border": p.border,
-        # hue-named tokens (for symmetry / rare external consumers)
+        # Hue-named tokens — for symmetry and rare external consumers
+        # (e.g. an out-of-tree xpl colorizer that asks for "sol_cyan" by name).
         "sol_red": p.crit, "sol_orange": p.bad, "sol_yellow": p.notable,
         "sol_green": p.good, "sol_cyan": p.accent, "sol_blue": p.info,
         "sol_violet": p.rare, "sol_magenta": p.magenta,
@@ -97,10 +113,19 @@ HOVER_BG = PALETTE.bg_surface
 HOVER_BORDER = PALETTE.border
 HOVER_TEXT = PALETTE.text_body
 
-# Legend bg keeps its rgba(...) because Plotly needs the alpha channel. This
-# is the one documented hex outside `Palette` — kept in sync with bg_surface
-# manually (mirrors PALETTE.bg_surface = #0e1115 at 0.4 alpha).
-LEGEND_BG = "rgba(14,17,21,0.4)"
+def _rgba(hex6: str, alpha: float) -> str:
+    """Convert `#rrggbb` + alpha to `rgba(r,g,b,a)`. Used for the few places
+    Plotly needs an alpha channel (legend bg) — keeps those derived from
+    Palette rather than hand-mirrored."""
+    r = int(hex6[1:3], 16)
+    g = int(hex6[3:5], 16)
+    b = int(hex6[5:7], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+# Legend bg — Plotly needs an alpha channel for the semi-transparent overlay,
+# so we derive an rgba from PALETTE.bg_surface rather than store a literal.
+LEGEND_BG = _rgba(PALETTE.bg_surface, 0.4)
 LEGEND_BORDER = PALETTE.border
 
 PLOTLY_MONO_FAMILY = '"DejaVu Sans Mono", monospace'
