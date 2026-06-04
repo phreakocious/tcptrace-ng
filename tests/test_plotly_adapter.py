@@ -1252,6 +1252,132 @@ def test_syn_annotation_tooltip_enriched_with_seq_and_handshake_rtt():
     assert not any(t.get("name") == "anomalies" for t in fig["data"])
 
 
+def test_anomaly_hovertext_respects_rel_seq_mode():
+    """The TSG's relative/absolute seq toggle was only honored by SYN/FIN-class
+    popups; rto/ooo/sack_gap/keepalive/dup_ack/partial_ack popups always
+    showed absolute seqs because their one_liner text is baked in tcp_inspect
+    with embedded values. In rel mode those popups should display the
+    baseline-subtracted seqs that match the on-chart axis."""
+    baseline = 1_000_000
+    model = TsgModel(
+        src="1.1.1.1:1",
+        dst="2.2.2.2:2",
+        direction="a2b",
+        # The renderer's baseline is the minimum seq across segments+acks.
+        # Seat a segment exactly at `baseline` so the subtraction math below
+        # is in clean round numbers.
+        segments=[
+            Segment(
+                time=1.0,
+                seq_start=baseline,
+                seq_end=baseline + 1500,
+                rtx=None,
+                paired_ack_time=None,
+                paired_rtt_ms=None,
+                in_flight_after=0,
+            ),
+        ],
+        acks=[
+            Ack(
+                time=1.5,
+                ack_seq=baseline + 1000,
+                rwin=64000,
+                rwin_scaled=None,
+                sack_blocks=(),
+                dup_count=0,
+            ),
+        ],
+        anomalies=[
+            Anomaly(
+                time=1.0,
+                kind="rto",
+                one_liner=f"rto retransmit seq {baseline + 500:,}..{baseline + 1500:,}",
+                seq_lo=baseline + 500,
+                seq_hi=baseline + 1500,
+            ),
+            Anomaly(
+                time=1.2,
+                kind="ooo",
+                one_liner=(
+                    f"out-of-order seq {baseline + 200:,}..{baseline + 300:,} "
+                    f"(below max seen {baseline + 1500:,})"
+                ),
+                seq_lo=baseline + 200,
+                seq_hi=baseline + 300,
+            ),
+            Anomaly(
+                time=1.5,
+                kind="sack_gap",
+                one_liner=(
+                    f"SACK {baseline + 2000:,}..{baseline + 2500:,}; "
+                    f"gap {baseline + 1000:,}..{baseline + 2000:,} unacked"
+                ),
+                seq_lo=baseline + 2000,
+                seq_hi=baseline + 2500,
+            ),
+            Anomaly(
+                time=1.7,
+                kind="dup_ack",
+                one_liner=f"duplicate ACK at seq {baseline + 1000:,}",
+                seq_lo=baseline + 1000,
+                seq_hi=baseline + 1000,
+            ),
+            Anomaly(
+                time=1.8,
+                kind="partial_ack",
+                one_liner=(
+                    f"partial ACK at seq {baseline + 800:,} (max sent {baseline + 1500:,})"
+                ),
+                seq_lo=baseline + 800,
+                seq_hi=baseline + 800,
+            ),
+            Anomaly(
+                time=1.9,
+                kind="keepalive",
+                one_liner=f"keepalive at seq {baseline + 1000:,}",
+                seq_lo=baseline + 1000,
+                seq_hi=baseline + 1000,
+            ),
+        ],
+    )
+
+    def _tips(seq_mode):
+        fig = to_tsg_figure(TsgModelPair(fwd=model), show_info=True, seq_mode=seq_mode)
+        return {
+            a.get("text"): a.get("hovertext", "")
+            for a in fig["layout"]["annotations"]
+            if a.get("hovertext") and a.get("yref") != "paper"
+        }
+
+    abs_tips = _tips("abs")
+    rel_tips = _tips("rel")
+
+    # Absolute mode: the un-rewritten text leaks through (baseline=0, no
+    # rewrite). Sanity check that the baseline-bearing seqs are visible.
+    assert f"{baseline + 500:,}" in abs_tips["⚠ RTO"]
+    assert f"{baseline + 200:,}" in abs_tips["ooo"]
+    assert f"{baseline + 2000:,}" in abs_tips["sack gap"]
+    assert f"{baseline + 1000:,}" in abs_tips["DA"]
+    assert f"{baseline + 800:,}" in abs_tips["PA"]
+    assert f"{baseline + 1000:,}" in abs_tips["keepalive"]
+
+    # Relative mode: every seq is rewritten to its baseline-subtracted form.
+    # Critically, NO absolute seq should remain.
+    for key in ("⚠ RTO", "ooo", "sack gap", "DA", "PA", "keepalive"):
+        assert f"{baseline:,}" not in rel_tips[key], (
+            f"{key} popup still shows absolute baseline: {rel_tips[key]!r}"
+        )
+    # Spot-check a few rewrites.
+    assert "500..1,500" in rel_tips["⚠ RTO"]
+    assert "200..300" in rel_tips["ooo"]
+    assert "max seen 1,500" in rel_tips["ooo"]
+    assert "SACK 2,000..2,500" in rel_tips["sack gap"]
+    assert "gap 1,000..2,000" in rel_tips["sack gap"]
+    assert "seq 1,000" in rel_tips["DA"]
+    assert "max sent 1,500" in rel_tips["PA"]
+    assert "seq 1,000" in rel_tips["keepalive"]
+
+
 def test_anomaly_annotation_border_color_matches_severity():
     """Hover popovers' bordercolor used to be hardcoded red, so a SYN hover
     looked like an alarm. Per-annotation hoverlabel makes handshake markers

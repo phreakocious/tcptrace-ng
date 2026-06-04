@@ -8,6 +8,7 @@ segments far better than thousands of single-segment traces.
 from __future__ import annotations
 
 import bisect
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -896,19 +897,56 @@ def _cluster_anomalies(anomalies: list[Anomaly]) -> list[tuple[Anomaly, int]]:
 
 _SEG_BACKED_KINDS = {"syn", "syn_ack", "fin", "fin_retx"}
 
+# Anomaly kinds whose one_liner text embeds absolute sequence numbers (and
+# only sequence numbers — no byte counts, durations, or other comma-formatted
+# values). In rel-seq mode every comma-formatted integer in the one_liner is
+# subtracted by the baseline so the popup matches the on-chart axis. Kinds
+# whose one_liners contain non-seq comma-formatted numbers (win_shrink's
+# shrink_bytes, coalesced's size/mss) are deliberately omitted — rewriting
+# those would corrupt the message.
+_KINDS_WITH_EMBEDDED_SEQS = {
+    "rto",
+    "fast",
+    "spurious",
+    "ooo",
+    "sack_gap",
+    "keepalive",
+    "dup_ack",
+    "dup_ack_drove_retx",
+    "partial_ack",
+}
+
+# Comma-formatted integer: a 1-3 digit group followed by one or more `,DDD`
+# groups. Real TCP seqs are random 32-bit values so formatted via `{n:,}`
+# they always carry at least one comma; small test-fixture seqs (e.g. 1000
+# → "1,000") match the same pattern.
+_COMMA_INT_RE = re.compile(r"\b\d{1,3}(?:,\d{3})+\b")
+
+
+def _rebase_embedded_seqs(text: str, baseline: int) -> str:
+    """Subtract `baseline` from every comma-formatted integer in `text` and
+    re-format with commas. Used to retrofit baseline-awareness onto anomaly
+    one_liners that were authored with absolute seqs.
+    """
+
+    def _sub(m: re.Match[str]) -> str:
+        return f"{int(m.group(0).replace(',', '')) - baseline:,}"
+
+    return _COMMA_INT_RE.sub(_sub, text)
+
 
 def _anomaly_hovertext(a: Anomaly, model: TsgModel, baseline: int = 0) -> str:
     """Render the hover text for one anomaly as multi-line HTML.
 
     Handshake/teardown markers (SYN/SA/FA/R FA) get enriched with the seq +
     ACK-RTT from their backing segment, since we strip those 1-byte segs
-    from the data trace to keep the chart anchor unambiguous. Other kinds
-    fall through to the raw one_liner.
+    from the data trace to keep the chart anchor unambiguous.
 
-    When `baseline` is non-zero the SYN/SA/FA enriched line shows the seq
-    relative to the connection's baseline. The free-form one_liner produced
-    by tcp_inspect.py keeps its absolute seqs — re-parsing it here would
-    couple this module to that text format.
+    For other kinds whose one_liner embeds absolute seqs (rto/fast/spurious,
+    ooo, sack_gap, keepalive, dup_ack[_drove_retx], partial_ack), rebase
+    those seqs to the baseline so the popup matches the on-chart axis when
+    seq_mode="rel". Kinds whose one_liner carries no seqs (or only non-seq
+    numbers like byte counts) pass through unchanged.
     """
     if a.kind in _SEG_BACKED_KINDS:
         for s in model.segments:
@@ -918,7 +956,10 @@ def _anomaly_hovertext(a: Anomaly, model: TsgModel, baseline: int = 0) -> str:
             if s.paired_rtt_ms is not None:
                 parts.append(f"ACKed {s.paired_rtt_ms:.1f} ms later")
             return "<br>".join(parts)
-    return a.one_liner.replace(" · ", "<br>")
+    text = a.one_liner
+    if baseline and a.kind in _KINDS_WITH_EMBEDDED_SEQS:
+        text = _rebase_embedded_seqs(text, baseline)
+    return text.replace(" · ", "<br>")
 
 
 def _anomaly_annotations(
