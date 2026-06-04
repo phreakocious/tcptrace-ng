@@ -4,12 +4,31 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 from collections.abc import Sequence
 
 from nicegui import ui
 
 from . import __version__
 from .app import build_page
+
+_DEFAULT_PORT = 8080
+
+
+def _pick_free_port(preferred: int = _DEFAULT_PORT) -> int:
+    """Pick a TCP port to bind to. Try `preferred` first; if it's busy, ask
+    the kernel for any free port (bind to 0). Small TOCTOU window between
+    this probe and NiceGUI's actual bind; if another process grabs the port
+    in between, NiceGUI surfaces the error normally.
+    """
+    for candidate in (preferred, 0):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", candidate))
+                return s.getsockname()[1]
+        except OSError:
+            continue
+    raise RuntimeError("no free TCP port available")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -41,8 +60,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     os.chdir(args.dir)
     build_page()
+    # An explicit --port respects the user's choice (and fails loudly if
+    # busy); omitting --port auto-picks so the canonical default port being
+    # taken doesn't keep the UI from launching.
+    port = args.port if args.port is not None else _pick_free_port()
     ui.run(
-        port=args.port,
+        port=port,
         show=not args.no_browser,
         reload=False,
         title="tcptrace-ng",
