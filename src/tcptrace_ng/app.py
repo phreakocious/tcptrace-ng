@@ -167,6 +167,12 @@ def _pcap_options(pcaps: list[tuple[Path, os.stat_result]], now: float) -> dict[
 # including ones swapped in by tab changes or update_figure(); the overlay is
 # re-created if Plotly tears it out on rebuild. Debug counters live on
 # window.tcpNgCrossbar so the console can confirm the script loaded.
+#
+# The trailing .replace() chain (not an f-string) injects palette hex values
+# at module-import time. The JS body has ~150 lines with literal `{` / `}`
+# everywhere (object literals, arrow bodies); f-string conversion would
+# require doubling all of them. Each `__XXX__` token is a Python substitution
+# — add a matching .replace() if you add a new color reference.
 _HOVER_CROSSBAR_JS = """
 <style>
   /* Plotly's compare-mode (hovermode:x) common axis label repeats the cursor
@@ -1240,6 +1246,9 @@ def build_page() -> None:
 
     @ui.page("/")
     def index() -> None:
+        # Layer order: Quasar dark baseline → palette CSS vars → fonts → chrome
+        # → behavior. Every later layer reads/overrides values from the earlier
+        # ones (see docs/superpowers/specs/2026-06-04-retheme-design.md §2).
         ui.dark_mode().enable()
         ui.colors(**quasar_colors())
         ui.add_head_html(FONT_FACES)
