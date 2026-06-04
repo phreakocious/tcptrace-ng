@@ -851,34 +851,34 @@ def _retx_segment_trace(
     }
 
 
-def _ack_customdata(acks: list[Ack], baseline: int = 0) -> list[list[float | str]]:
+def _ack_customdata(
+    acks: list[Ack], window_scale: int | None, baseline: int = 0
+) -> list[list[float | str]]:
     """Index layout:
     0: ack_seq  (relative to baseline when baseline != 0)
     1: rwin (scaled if known, else raw) — a length, never baselined
-    2: rwin_scale_known (0/1)
+    2: window_scale shift as a string ("7" when known, "?" when unobserved).
+       Pre-stringified because plotly hovertemplates can't branch between
+       numeric and literal formats from a single field.
     3: dup-ACK hover fragment — "" for a non-dup ACK, "<br>dup-ACK #N" otherwise.
        Prebuilt because plotly hovertemplates can't branch; a literal
        "dup-ACK #%{customdata[3]}" would render "#0" on every healthy ACK.
     """
+    scale_str = str(window_scale) if window_scale is not None else "?"
     out: list[list[float | str]] = []
     for a in acks:
         rwin = float(a.rwin_scaled if a.rwin_scaled is not None else a.rwin)
-        scale_known = 1.0 if a.rwin_scaled is not None else 0.0
         dup = f"<br>dup-ACK #{a.dup_count}" if a.dup_count else ""
-        out.append([float(a.ack_seq - baseline), rwin, scale_known, dup])
+        out.append([float(a.ack_seq - baseline), rwin, scale_str, dup])
     return out
 
 
-_TSG_ACK_TEMPLATE = (
-    "<b>ACK for seq %{customdata[0]:,.0f}</b><br>"
-    "rwnd %{customdata[1]:,.0f}"
-    "%{customdata[3]}"
-    "<extra></extra>"
-)
+# rwnd lives on the yellow rwin line and is redundant on ACKs (TODO.md item 2).
+_TSG_ACK_TEMPLATE = "<b>ACK for seq %{customdata[0]:,.0f}</b>%{customdata[3]}<extra></extra>"
 
 
 _TSG_RWIN_TEMPLATE = (
-    "<b>rwnd %{customdata[1]:,.0f}</b><br>(scale known: %{customdata[2]:.0f})<extra></extra>"
+    "<b>rwnd %{customdata[1]:,.0f}</b><br>(scale: %{customdata[2]})<extra></extra>"
 )
 
 
@@ -899,7 +899,7 @@ def _ack_trace(
     cd: list[list[float | str]] = []
     prev_seq: int | None = None
     prev_time: float | None = None
-    rows = _ack_customdata(model.acks, baseline=baseline)
+    rows = _ack_customdata(model.acks, model.window_scale, baseline=baseline)
     for a, row in zip(model.acks, rows, strict=True):
         ack_seq_disp = a.ack_seq - baseline
         if prev_seq is not None and prev_time is not None:
@@ -945,7 +945,7 @@ def _rwin_trace(
     cd: list[list[float | str]] = []
     prev_top: int | None = None
     prev_time: float | None = None
-    rows = _ack_customdata(model.acks, baseline=baseline)
+    rows = _ack_customdata(model.acks, model.window_scale, baseline=baseline)
     # Clamp the drawn rwin top to the subplot's y_max so a window that dwarfs
     # the data band can't overflow into the adjacent subplot (scattergl's WebGL
     # rendering doesn't honor the subplot clipPath that SVG mode would). Hover
@@ -1014,14 +1014,6 @@ _SEVERITY_COLOR = {
     "handshake": PALETTE.accent,   # cyan — protocol markers (SYN/SA/A/FA/R FA)
     "info": PALETTE.text_dim,      # grey — diagnostic noise; hidden unless toggled
 }
-# Dim backgrounds for hover popovers — saturated severity tint at low alpha
-# so the popover identifies its tier without overpowering the label text.
-_SEVERITY_HOVER_BG = {
-    "severe": rgba(PALETTE.crit, 0.13),
-    "warn": rgba(PALETTE.notable, 0.13),
-    "handshake": rgba(PALETTE.accent, 0.13),
-    "info": rgba(PALETTE.text_dim, 0.10),
-}
 
 _ANOMALY_CLUSTER_S = 0.050
 
@@ -1045,10 +1037,6 @@ _KIND_YSHIFT = {
     "bad_csum_lost": -28,
 }
 _DEFAULT_YSHIFT = 12
-# Two annotations within this many seconds get a per-rank xshift bump so their
-# text doesn't sit on top of each other along the time axis either.
-_ANOMALY_COLLISION_S = 0.030
-_COLLISION_XSHIFT_PX = 36
 
 
 def _cluster_anomalies(anomalies: list[Anomaly]) -> list[tuple[Anomaly, int]]:
@@ -1168,20 +1156,12 @@ def _anomaly_annotations(
     ]
     clusters = _cluster_anomalies(visible)
     anns: list[dict[str, Any]] = []
-    last_time: float | None = None
-    rank = 0
     for a, count in clusters:
         text = _ANOMALY_GLYPH.get(a.kind, a.kind)
         if count > 1:
             text = f"{text} ×{count}"
         y = (a.seq_lo - baseline) if a.seq_lo is not None else 0
         yshift = _KIND_YSHIFT.get(a.kind, _DEFAULT_YSHIFT)
-        if last_time is not None and (a.time - last_time) <= _ANOMALY_COLLISION_S:
-            rank += 1
-        else:
-            rank = 0
-        last_time = a.time
-        xshift = rank * _COLLISION_XSHIFT_PX
         severity = SEVERITY_BY_KIND.get(a.kind, "info")
         color = _SEVERITY_COLOR[severity]
         anns.append(
@@ -1193,7 +1173,6 @@ def _anomaly_annotations(
                 "text": text,
                 "showarrow": False,
                 "font": {"color": color, "size": 10, "family": PLOTLY_MONO_FAMILY},
-                "xshift": xshift,
                 "yshift": yshift,
             }
         )
@@ -1223,7 +1202,6 @@ def _anomaly_hover_trace(
     ys: list[float] = []
     htexts: list[str] = []
     border: list[str] = []
-    bg: list[str] = []
     for a, _count in clusters:
         y = (a.seq_lo - baseline) if a.seq_lo is not None else 0
         severity = SEVERITY_BY_KIND.get(a.kind, "info")
@@ -1231,7 +1209,10 @@ def _anomaly_hover_trace(
         ys.append(y)
         htexts.append(_anomaly_hovertext(a, model, baseline=baseline))
         border.append(_SEVERITY_COLOR[severity])
-        bg.append(_SEVERITY_HOVER_BG[severity])
+    # bgcolor intentionally omitted — falls back to layout.hoverlabel.bgcolor
+    # (HOVER_BG, the solid dark chrome). Earlier we tinted per-severity at
+    # alpha 0.13, which composited over the transparent paper as a washed-out
+    # light box on light displays. Border alone keeps the severity hint.
     return {
         "type": "scattergl",
         "mode": "markers",
@@ -1240,7 +1221,7 @@ def _anomaly_hover_trace(
         "marker": {"size": 1, "color": "rgba(0,0,0,0)", "opacity": 0},
         "hovertext": htexts,
         "hovertemplate": "%{hovertext}<extra></extra>",
-        "hoverlabel": {"bgcolor": bg, "bordercolor": border},
+        "hoverlabel": {"bordercolor": border},
         "name": "anomalies",
         "showlegend": False,
         "xaxis": xaxis_ref,
