@@ -26,7 +26,7 @@ from .classifier import Class, classify
 # v3 adds per-direction RTT min/avg/max fields (from tcptrace -r output).
 # v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
 # v5 adds rtt_3whs_a/b.
-STATS_PARSER_VERSION = "6"  # v6: cache now persists all typed fields (save/load was lossy)
+STATS_PARSER_VERSION = "7"  # v7: per-direction packet counts (pkts_a / pkts_b) for uni detection
 
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",
@@ -191,6 +191,17 @@ class ConnStats:
     wscale_b: int | None = None
     rtt_3whs_a: float | None = None
     rtt_3whs_b: float | None = None
+    # Per-direction packet counts. Either side at 0 means tcptrace saw no
+    # packets from that host — i.e., the capture only carried one direction
+    # of the flow. Drives the UNI badge and chip filter.
+    pkts_a: int = 0
+    pkts_b: int = 0
+
+    @property
+    def unidirectional(self) -> bool:
+        """One side saw zero packets in the capture. tcptrace can still emit
+        a TSG/throughput for the populated side; the other is just absent."""
+        return self.pkts_a == 0 or self.pkts_b == 0
 
 
 def build_context_lines(body: str) -> tuple[str, str]:
@@ -233,6 +244,7 @@ def _parse_block(n: int, body: str) -> ConnStats:
     mss_a, mss_b = _pair_ints(_MSS_RE, body)
     wscale_a, wscale_b = _pair_ints(_WS_RE, body)
     rtt_3whs_a, rtt_3whs_b = _pair_floats(_RTT_3WHS_RE, body)
+    pkts_a, pkts_b = _pair_ints(_TOTAL_PKTS_RE, body)
     return ConnStats(
         n=n,
         host_a=host_a,
@@ -259,4 +271,6 @@ def _parse_block(n: int, body: str) -> ConnStats:
         wscale_b=wscale_b,
         rtt_3whs_a=rtt_3whs_a,
         rtt_3whs_b=rtt_3whs_b,
+        pkts_a=pkts_a or 0,
+        pkts_b=pkts_b or 0,
     )

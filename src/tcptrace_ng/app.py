@@ -454,6 +454,8 @@ def _badges(stats: ConnStats) -> list[str]:
         out.append("FIN")
     else:
         out.append("INC")
+    if stats.unidirectional:
+        out.append("UNI")
     a, b = _csum_counts_for_endpoints(stats.host_a, stats.host_b)
     if a + b > 0:
         # The chip shows a→b/b→a totals. The acked-vs-lost split lives in the
@@ -613,6 +615,8 @@ def _matches_chips(row, chips: set[str]) -> bool:
     if "rexmt" in chips and row.rexmt_packets == 0:
         return False
     if "incomplete" in chips and row.complete_handshake:
+        return False
+    if "uni" in chips and not row.unidirectional:
         return False
     return not ("bulk" in chips and row.total_bytes < _BULK_BYTES_THRESHOLD)
 
@@ -1382,6 +1386,7 @@ def build_page() -> None:
                         ("rst", "RST"),
                         ("rexmt", "Retransmits"),
                         ("incomplete", "Incomplete"),
+                        ("uni", "Unidirectional"),
                         ("bulk", "Bulk ≥100K"),
                     ]:
                         chip = ui.chip(label).props("dense outline clickable")
