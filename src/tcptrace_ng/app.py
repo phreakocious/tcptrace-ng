@@ -382,6 +382,10 @@ class _State:
         # Sequence-number display. "rel" → subtract per-direction baseline
         # so axes read 0..bytes_sent; "abs" → raw uint32 from the wire.
         self.seq_mode: str = "rel"
+        # When true, the per-tab summary panel sticks to the bottom of the
+        # viewport instead of scrolling away under a tall plot. Off by
+        # default so users who want the full plot height get it.
+        self.dock_summary: bool = False
 
 
 state = _State()
@@ -1314,6 +1318,14 @@ def build_page() -> None:
                     ui.toggle(["rel", "abs"], value=state.seq_mode)
                     .props("dense dark unelevated toggle-color=primary")
                     .tooltip("sequence number display (default relative)")
+                )
+                dock_check = (
+                    ui.checkbox("dock", value=state.dock_summary)
+                    .props("dense dark")
+                    .tooltip(
+                        "pin the per-tab summary panel to the viewport bottom"
+                        " so a tall plot doesn't push it off-screen"
+                    )
                 )
             ui.space()
             # Warning pill — hidden when there are no findings. Click opens a
@@ -2307,6 +2319,14 @@ def build_page() -> None:
             if state.selected_conn is not None:
                 render_main()
 
+        def _on_dock_change(value: bool) -> None:
+            """Toggle the body-level dock class. CSS turns the stats panes into
+            sticky-bottom strips against `body.tt-dock` — no figure rebuild and
+            no re-render needed, just a class flip."""
+            state.dock_summary = bool(value)
+            js_bool = "true" if state.dock_summary else "false"
+            ui.run_javascript(f"document.body.classList.toggle('tt-dock', {js_bool});")
+
         # ---------- wire events ----------
         clear_btn.on_click(_clear_all)
         reanalyze_btn.on_click(_reanalyze)
@@ -2320,6 +2340,7 @@ def build_page() -> None:
         zerox_check.on_value_change(lambda e: _on_flag_change("zero_x_axis", e.value))
         rate_toggle.on_value_change(lambda e: _on_display_change("rate_unit", e.value))
         seq_toggle.on_value_change(lambda e: _on_display_change("seq_mode", e.value))
+        dock_check.on_value_change(lambda e: _on_dock_change(e.value))
         ui.timer(_PCAP_RESCAN_SECONDS, refresh_pcap_dropdown)
 
         # ---------- initial render ----------
@@ -2328,3 +2349,7 @@ def build_page() -> None:
         _refresh_download_btn()
         render_main()
         render_sidebar()
+        # Sync the body-level dock class with the persisted state so the page
+        # honors the user's prior choice without waiting for the toggle to fire.
+        if state.dock_summary:
+            ui.run_javascript("document.body.classList.add('tt-dock');")

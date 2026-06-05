@@ -303,6 +303,22 @@ pre.tcptrace-output {
     padding-bottom: 4px;
 }
 
+/* ---- docked summary footer ---- *
+ * Pins the per-tab summary panel to the viewport bottom when the user opts
+ * in via the "dock" header toggle (which toggles `body.tt-dock`). The plot
+ * above keeps scrolling naturally; the summary just doesn't disappear under
+ * it. Background and border re-match the chrome so the panel doesn't look
+ * transparent over a deep scroll position. We pin at the wrapper that
+ * `tsg-stats` lives inside so the body's grid layout stays intact.        */
+body.tt-dock .tsg-stats {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    background: var(--q-dark-page);
+    border-top: 1px solid var(--q-border);
+    margin-top: 0;
+}
+
 /* ---- TSG viewport stats panel — 4-column grid below the chart ---- */
 .tsg-stats {
     display: grid;
