@@ -311,7 +311,13 @@ pre.tcptrace-output {
  * plot leaves a sticky-bottom panel off-screen until the user scrolls down,
  * which is the opposite of what "docked" should feel like. The fixed left
  * offset matches the 300px tcptrace-sidebar. Quasar's tab_panels hides the
- * inactive panels via display:none, so only the active tab's grid renders. */
+ * inactive panels via display:none, so only the active tab's grid renders.
+ *
+ * --tt-dock-h is the single source of truth for the dock's viewport budget:
+ * it caps the panel's own height, reserves the padding-bottom under the
+ * scroll content, and (via --tt-plot-h below) shrinks the plot so its
+ * bottom 50px of margin (x-axis ticks + "time" title) clears the dock. */
+:root { --tt-dock-h: 220px; }
 body.tt-dock .tsg-stats {
     position: fixed;
     left: 300px;
@@ -322,14 +328,16 @@ body.tt-dock .tsg-stats {
     border-top: 1px solid var(--q-border);
     box-shadow: 0 -4px 8px rgba(0,0,0,0.25);
     margin-top: 0;
-    max-height: 45vh;
+    max-height: var(--tt-dock-h);
     overflow-y: auto;
 }
-/* Reserve viewport space under the plot for the docked panel so the chart
- * doesn't render with its lower portion permanently covered. Approximate
- * the docked panel's natural height — wide enough that the 4-column grid's
- * single-line cells fit without overlap on common viewport widths.        */
-body.tt-dock .tcptrace-main { padding-bottom: 220px; }
+body.tt-dock .tcptrace-main { padding-bottom: var(--tt-dock-h); }
+/* Shrink the plot's container so its bottom edge clears the fixed dock.
+ * The plot's inline height uses `var(--tt-plot-h, calc(100vh - 320px))` —
+ * the var is unset when not docked (fallback wins), set here when docked.
+ * 320 reserves header + tabs/chips/sticky-strip + base margins; subtract
+ * --tt-dock-h on top of that so the chart never overlaps the fixed panel. */
+body.tt-dock { --tt-plot-h: calc(100vh - 320px - var(--tt-dock-h)); }
 
 /* ---- TSG viewport stats panel — 4-column grid below the chart ---- */
 .tsg-stats {

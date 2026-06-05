@@ -1609,7 +1609,14 @@ def build_page() -> None:
                     plotly_el = (
                         ui.plotly(fig)
                         .classes("w-full")
-                        .style("height: calc(100vh - 320px); min-height: 480px;")
+                        .style(
+                            # --tt-plot-h is unset by default (fallback used); set
+                            # to calc(100vh - 320px - --tt-dock-h) by body.tt-dock
+                            # so the bottom 50px of plotly margin (ticks + "time"
+                            # title) clears the fixed dock panel.
+                            "height: var(--tt-plot-h, calc(100vh - 320px));"
+                            " min-height: 480px;"
+                        )
                     )
                     if metric == "tsg":
                         model_pair = state.figure_cache.get((conn_n, metric, "model"))
