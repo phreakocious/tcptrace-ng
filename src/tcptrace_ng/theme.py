@@ -305,19 +305,31 @@ pre.tcptrace-output {
 
 /* ---- docked summary footer ---- *
  * Pins the per-tab summary panel to the viewport bottom when the user opts
- * in via the "dock" header toggle (which toggles `body.tt-dock`). The plot
- * above keeps scrolling naturally; the summary just doesn't disappear under
- * it. Background and border re-match the chrome so the panel doesn't look
- * transparent over a deep scroll position. We pin at the wrapper that
- * `tsg-stats` lives inside so the body's grid layout stays intact.        */
+ * in via the "dock" header toggle (which toggles `body.tt-dock`). Uses
+ * `position: fixed` rather than sticky because sticky only catches an
+ * element that's already scrolled past its anchor — initial load on a tall
+ * plot leaves a sticky-bottom panel off-screen until the user scrolls down,
+ * which is the opposite of what "docked" should feel like. The fixed left
+ * offset matches the 300px tcptrace-sidebar. Quasar's tab_panels hides the
+ * inactive panels via display:none, so only the active tab's grid renders. */
 body.tt-dock .tsg-stats {
-    position: sticky;
+    position: fixed;
+    left: 300px;
+    right: 0;
     bottom: 0;
-    z-index: 4;
+    z-index: 10;
     background: var(--q-dark-page);
     border-top: 1px solid var(--q-border);
+    box-shadow: 0 -4px 8px rgba(0,0,0,0.25);
     margin-top: 0;
+    max-height: 45vh;
+    overflow-y: auto;
 }
+/* Reserve viewport space under the plot for the docked panel so the chart
+ * doesn't render with its lower portion permanently covered. Approximate
+ * the docked panel's natural height — wide enough that the 4-column grid's
+ * single-line cells fit without overlap on common viewport widths.        */
+body.tt-dock .tcptrace-main { padding-bottom: 220px; }
 
 /* ---- TSG viewport stats panel — 4-column grid below the chart ---- */
 .tsg-stats {
