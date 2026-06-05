@@ -1570,6 +1570,12 @@ def build_page() -> None:
                 ui.tab_panels(tabs, value=default_tab)
                 .classes("w-full")
                 .style("background: transparent;")
+                # Quasar's default slide-left/right transition translateX-es
+                # the active panel, which creates a new containing block for
+                # any fixed-positioned descendants — so the docked stats
+                # panel rides the slide horizontally on tab switch. Fade is
+                # purely opacity and leaves the fixed panel anchored.
+                .props('transition-prev="fade" transition-next="fade"')
             ):
                 for g in groups:
                     with ui.tab_panel(_METRIC_LABELS[g.metric]).classes("p-0"):
