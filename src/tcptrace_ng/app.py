@@ -1610,12 +1610,12 @@ def build_page() -> None:
                         ui.plotly(fig)
                         .classes("w-full")
                         .style(
-                            # --tt-plot-h is unset by default (fallback used); set
-                            # to calc(100vh - 320px - --tt-dock-h) by body.tt-dock
-                            # so the bottom 50px of plotly margin (ticks + "time"
-                            # title) clears the fixed dock panel.
+                            # --tt-plot-h / --tt-plot-min-h are unset by default
+                            # (fallbacks win); body.tt-dock sets them so the
+                            # plot shrinks to clear the fixed dock panel and
+                            # allows a smaller min on narrower viewports.
                             "height: var(--tt-plot-h, calc(100vh - 320px));"
-                            " min-height: 480px;"
+                            " min-height: var(--tt-plot-min-h, 480px);"
                         )
                     )
                     if metric == "tsg":
@@ -2335,10 +2335,17 @@ def build_page() -> None:
         def _on_dock_change(value: bool) -> None:
             """Toggle the body-level dock class. CSS turns the stats panes into
             sticky-bottom strips against `body.tt-dock` — no figure rebuild and
-            no re-render needed, just a class flip."""
+            no re-render needed, just a class flip. Trigger Plotly.Plots.resize
+            after the flip because Plotly caches its internal dimensions and
+            won't redraw to the new CSS-driven container height on its own."""
             state.dock_summary = bool(value)
             js_bool = "true" if state.dock_summary else "false"
-            ui.run_javascript(f"document.body.classList.toggle('tt-dock', {js_bool});")
+            ui.run_javascript(
+                f"document.body.classList.toggle('tt-dock', {js_bool});"
+                " requestAnimationFrame(() => document.querySelectorAll"
+                "('.js-plotly-plot').forEach(p => window.Plotly &&"
+                " window.Plotly.Plots.resize(p)));"
+            )
 
         # ---------- wire events ----------
         clear_btn.on_click(_clear_all)

@@ -316,8 +316,11 @@ pre.tcptrace-output {
  * --tt-dock-h is the single source of truth for the dock's viewport budget:
  * it caps the panel's own height, reserves the padding-bottom under the
  * scroll content, and (via --tt-plot-h below) shrinks the plot so its
- * bottom 50px of margin (x-axis ticks + "time" title) clears the dock. */
-:root { --tt-dock-h: 220px; }
+ * bottom edge sits just above the dock's top edge. 290px fits a typical
+ * bidirectional stats grid (measured ~283px) without the panel needing a
+ * scrollbar; tighter unidirectional content leaves a small gap (cheap to
+ * live with vs. JS-measuring real height per-render). */
+:root { --tt-dock-h: 290px; }
 body.tt-dock .tsg-stats {
     position: fixed;
     left: 300px;
@@ -332,12 +335,18 @@ body.tt-dock .tsg-stats {
     overflow-y: auto;
 }
 body.tt-dock .tcptrace-main { padding-bottom: var(--tt-dock-h); }
-/* Shrink the plot's container so its bottom edge clears the fixed dock.
- * The plot's inline height uses `var(--tt-plot-h, calc(100vh - 320px))` —
- * the var is unset when not docked (fallback wins), set here when docked.
- * 320 reserves header + tabs/chips/sticky-strip + base margins; subtract
- * --tt-dock-h on top of that so the chart never overlaps the fixed panel. */
-body.tt-dock { --tt-plot-h: calc(100vh - 320px - var(--tt-dock-h)); }
+/* Shrink the plot's container so its bottom edge sits just above the dock.
+ * Inline style uses var(--tt-plot-h, calc(100vh - 320px)) — the var is
+ * unset when not docked (fallback wins), set here when docked. 264px is
+ * the measured top reservation (header + tab strip + chip strip + sticky
+ * head) above the plot; subtracting it plus --tt-dock-h leaves the plot
+ * flush against the dock with no wasted gap. --tt-plot-min-h drops the
+ * minimum from 480 to 360 in docked mode so smaller windows don't blow
+ * past the dock; below ~920px viewport, the plot will still overlap. */
+body.tt-dock {
+    --tt-plot-h: calc(100vh - 264px - var(--tt-dock-h));
+    --tt-plot-min-h: 360px;
+}
 
 /* ---- TSG viewport stats panel — 4-column grid below the chart ---- */
 .tsg-stats {
