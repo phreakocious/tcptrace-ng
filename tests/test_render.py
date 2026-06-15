@@ -1,6 +1,6 @@
-from tcptrace_ng.app import _matches_chips
 from tcptrace_ng.classifier import Class
 from tcptrace_ng.stats_parser import ConnStats
+from tcptrace_ng.view.format import _matches_chips
 
 
 def _row(**kw):

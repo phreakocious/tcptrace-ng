@@ -55,18 +55,18 @@ from .xpl_parser import (
 # ticks don't read as alarms — clusters do. PALETTE.crit (red) is reserved for
 # findings-layer confirmations.
 COLOR_MAP: dict[str, str] = {
-    "white":   PALETTE.text_emph,
-    "red":     PALETTE.bad,
-    "green":   PALETTE.good,
-    "yellow":  PALETTE.notable,
-    "blue":    PALETTE.info,
+    "white": PALETTE.text_emph,
+    "red": PALETTE.bad,
+    "green": PALETTE.good,
+    "yellow": PALETTE.notable,
+    "blue": PALETTE.info,
     "magenta": PALETTE.magenta,
-    "cyan":    PALETTE.accent,
-    "orange":  PALETTE.bad,
-    "purple":  PALETTE.rare,
-    "pink":    PALETTE.magenta,
+    "cyan": PALETTE.accent,
+    "orange": PALETTE.bad,
+    "purple": PALETTE.rare,
+    "pink": PALETTE.magenta,
     # black-on-dark is invisible — lift to dim.
-    "black":   PALETTE.text_dim,
+    "black": PALETTE.text_dim,
 }
 
 
@@ -899,9 +899,7 @@ def _ack_customdata(
 _TSG_ACK_TEMPLATE = "<b>ACK for seq %{customdata[0]:,.0f}</b>%{customdata[3]}<extra></extra>"
 
 
-_TSG_RWIN_TEMPLATE = (
-    "<b>rwnd %{customdata[1]:,.0f}</b><br>(scale: %{customdata[2]})<extra></extra>"
-)
+_TSG_RWIN_TEMPLATE = "<b>rwnd %{customdata[1]:,.0f}</b><br>(scale: %{customdata[2]})<extra></extra>"
 
 
 def _ack_trace(
@@ -1031,10 +1029,10 @@ _ANOMALY_GLYPH = {
 # These are findings-layer confirmations (RTO/fast/spurious/zero_win, …), not
 # per-event ticks — so `severe` maps to PALETTE.crit (red) rather than bad.
 _SEVERITY_COLOR = {
-    "severe": PALETTE.crit,        # red — alarms (rto, fast, spurious, zero_win, …)
-    "warn": PALETTE.notable,       # amber — symptoms worth attention
-    "handshake": PALETTE.accent,   # cyan — protocol markers (SYN/SA/A/FA/R FA)
-    "info": PALETTE.text_dim,      # grey — diagnostic noise; hidden unless toggled
+    "severe": PALETTE.crit,  # red — alarms (rto, fast, spurious, zero_win, …)
+    "warn": PALETTE.notable,  # amber — symptoms worth attention
+    "handshake": PALETTE.accent,  # cyan — protocol markers (SYN/SA/A/FA/R FA)
+    "info": PALETTE.text_dim,  # grey — diagnostic noise; hidden unless toggled
 }
 
 _ANOMALY_CLUSTER_S = 0.050
@@ -1170,7 +1168,7 @@ def _anomaly_annotations(
     """Visible glyph annotations only. Hover popovers ride on the paired
     invisible marker trace built by `_anomaly_hover_trace`, because Plotly
     annotations don't respond to programmatic `Plotly.Fx.hover` — and the
-    shared-cursor crossbar (see app.attach_hover_crossbar) fires hover via that
+    shared-cursor crossbar (see view/hover_crossbar.py) fires hover via that
     API on every panel. Direct mouseover the glyph still pops the tooltip
     because the crossbar's mousemove listener is active across the plot."""
     visible = [
@@ -1520,7 +1518,7 @@ def _build_direction_traces(
 def _tsg_xaxis(*, show_ticks: bool) -> dict[str, Any]:
     # Hover crossbar isn't a Plotly spike — Plotly's spike stops at its own
     # subplot boundary, which leaves the bwd panel empty when hovering fwd
-    # (and vice versa). A client-side script (see app.attach_hover_crossbar)
+    # (and vice versa). A client-side script (see view/hover_crossbar.py)
     # draws a full-figure layout shape on plotly_hover instead, spanning
     # both panels. hovermode=x at the layout level is what arms plotly_hover.
     return {

@@ -1,11 +1,22 @@
 """Shared test fixtures."""
 
 import struct
+import sys
 from pathlib import Path
 
 import pytest
 
 pytest_plugins = ["nicegui.testing.user_plugin"]
+
+
+@pytest.fixture(autouse=True)
+def _evict_state_module():
+    """NiceGUI's user fixture evicts tcptrace_ng.app from sys.modules so each
+    test gets a fresh module. state.py lives in a separate module that NiceGUI
+    doesn't know about, so we evict it ourselves to prevent state leaking
+    between tests."""
+    yield
+    sys.modules.pop("tcptrace_ng.state", None)
 
 
 SAMPLE_LISTING = """\

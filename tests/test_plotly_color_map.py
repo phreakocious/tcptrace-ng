@@ -6,6 +6,7 @@ SACK arrows) — overwhelmingly routine in real traffic. Map to PALETTE.bad
 (red) stays reserved for the findings layer that has actually inspected
 the connection state.
 """
+
 from __future__ import annotations
 
 from tcptrace_ng.plotly_adapter import COLOR_MAP
@@ -43,13 +44,23 @@ def test_xplot_purple_magenta_pink_match_palette():
 def test_color_map_keys_unchanged_from_pre_retheme():
     """No xplot semantics lost — same eleven keys as the prior COLOR_MAP."""
     assert set(COLOR_MAP.keys()) == {
-        "white", "red", "green", "yellow", "blue", "magenta",
-        "cyan", "orange", "purple", "pink", "black",
+        "white",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "orange",
+        "purple",
+        "pink",
+        "black",
     }
 
 
 def test_color_map_values_are_six_digit_hexes():
     import re
+
     hex_re = re.compile(r"#[0-9a-fA-F]{6}")
     for k, v in COLOR_MAP.items():
         assert hex_re.fullmatch(v), f"COLOR_MAP[{k!r}]={v!r} is not a 6-digit hex"

@@ -5,6 +5,7 @@ theme.py's Palette dataclass (or the documented LEGEND_BG rgba derived
 via `theme._rgba`). This test runs `grep` over the package and asserts
 no other file matches.
 """
+
 from __future__ import annotations
 
 import re

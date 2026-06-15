@@ -11,9 +11,11 @@ Three layers all feed off the single `Palette` dataclass below:
 3. Plotly constants below resolve to concrete hexes at server-render time
    (Plotly's layout JSON can't see CSS vars).
 
-After this rewrite, every 6-digit hex in `src/tcptrace_ng/` lives in the
-`Palette` dataclass and the documented `LEGEND_BG` rgba — the audit is
-`grep -rnE "#[0-9a-fA-F]{6}" src/tcptrace_ng/`.
+After this rewrite, every 6-digit hex in `src/tcptrace_ng/` lives in the named
+`Palette` instances in `THEMES` (and the documented `LEGEND_BG` rgba) — the
+audit is `grep -rnE "#[0-9a-fA-F]{6}" src/tcptrace_ng/`. The active theme is
+chosen once at import via `TT_THEME` (see `PALETTE` below); switching is
+startup-time, not live.
 
 The `.tcptrace-output` block and color classes are load-bearing: they style
 the color-coded tcptrace text output that the classifier categorizes line by
@@ -22,40 +24,124 @@ line. Everything else is chrome.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class Palette:
-    """Every hex in the app. Solarized-derived foreground colors over near-black
-    terminal backgrounds. Field names are role-semantic ('bad', 'emph') so a
-    future palette tweak ("orange shouldn't be bad anymore") is a one-line edit
-    here rather than a grep across the codebase."""
+    """A theme: every hex the app uses, addressed by semantic role ('bad',
+    'emph') rather than hue, so a palette swap is a data change, not a grep.
+    This is the schema only — concrete themes are the named instances below,
+    and `PALETTE` binds the active one (see `TT_THEME`). Every downstream layer
+    (`quasar_colors`, the `--q-*` CSS vars in `DARK_CSS`, the Plotly constants)
+    reads the bound `PALETTE`, so adding a theme is purely additive here."""
 
     # backgrounds
-    bg_page: str = "#0a0a0a"
-    bg_surface: str = "#0e1115"
-    bg_panel: str = "#0e1115"
-    border: str = "#1f2629"
+    bg_page: str  # main canvas — darkest surface
+    bg_surface: str  # grid / hover / plot bg
+    bg_panel: str  # sidebar / header / cards
+    border: str  # hairline dividers
 
-    # text (Solarized base scale)
-    text_emph: str = "#eee8d5"
-    text_body: str = "#93a1a1"
-    text_muted: str = "#657b83"
-    text_dim: str = "#586e75"
+    # text scale (bright -> dim)
+    text_emph: str  # emphasis / headings
+    text_body: str  # default body text
+    text_muted: str  # secondary / labels
+    text_dim: str  # tertiary / chrome
 
     # status — semantic, not hue-named
-    good: str = "#859900"     # Solarized green
-    notable: str = "#b58900"  # Solarized yellow — "look here"
-    bad: str = "#cb4b16"      # Solarized orange — everyday bad / warn
-    crit: str = "#dc322f"     # Solarized red — reserved for critical
-    info: str = "#268bd2"     # Solarized blue
-    accent: str = "#2aa198"   # Solarized cyan — selection / primary
-    rare: str = "#6c71c4"     # Solarized violet
-    magenta: str = "#d33682"  # Solarized magenta — xpl-magenta passthrough
+    good: str  # ok / success
+    notable: str  # "look here"
+    bad: str  # everyday bad / warn
+    crit: str  # reserved for critical
+    info: str  # informational accent
+    accent: str  # selection / primary
+    rare: str  # rare extra-emphasis tier
+    magenta: str  # xpl-magenta passthrough
 
 
-PALETTE = Palette()
+# Original theme: standard Solarized foreground hues over near-black terminal
+# backgrounds (deliberately not the classic teal base).
+SOLARIZED_DARK = Palette(
+    bg_page="#0a0a0a",
+    bg_surface="#0e1115",
+    bg_panel="#0e1115",
+    border="#1f2629",
+    text_emph="#eee8d5",
+    text_body="#93a1a1",
+    text_muted="#657b83",
+    text_dim="#586e75",
+    good="#859900",  # green
+    notable="#b58900",  # yellow
+    bad="#cb4b16",  # orange
+    crit="#dc322f",  # red
+    info="#268bd2",  # blue
+    accent="#2aa198",  # cyan
+    rare="#6c71c4",  # violet
+    magenta="#d33682",  # magenta
+)
+
+# oklab-Solarized (dark): the perceptually-adjusted Solarized hues (tracking the
+# `oklabs-solarized-dark` color-theme JSON at the repo root) over a deep
+# teal-black base. The accents are the JSON's; the backgrounds are pulled below
+# its #002d38/#093946, which read too bright at full-surface scale.
+OKLAB_SOLARIZED_DARK = Palette(
+    bg_page="#00141a",  # deep teal-black canvas
+    bg_surface="#001b23",  # a hair above page (grid/hover/plot bg)
+    bg_panel="#001b23",  # sidebar/header/cards
+    border="#0d3a47",  # muted teal hairline
+    text_emph="#f1e9d2",  # JSON caret
+    text_body="#98a8a8",  # JSON foreground
+    text_muted="#657377",  # JSON operators/braces
+    text_dim="#5b7279",  # JSON comment/invisibles
+    good="#819500",  # green
+    notable="#ac8300",  # yellow
+    bad="#d56500",  # orange
+    crit="#f23749",  # red
+    info="#2b90d8",  # blue
+    accent="#259d94",  # cyan
+    rare="#7d80d1",  # violet
+    magenta="#dd459d",  # magenta
+)
+
+# Penumbra (dark++): a neutral (non-teal) warm-dark theme with mid-saturation,
+# low-contrast accents. Hexes converted from the `penumbra_dark++.itermcolors`
+# sRGB components. Penumbra ships no distinct orange in its 16-color set, so the
+# `bad` role borrows the theme's Badge amber (#e59c4c) to stay separable from
+# `crit`'s coral red; `info`/`rare` split the theme's true-blue (Link) and
+# periwinkle (Ansi 4). Grays are a derived ramp anchored on Bold/Foreground/Ansi 8.
+PENUMBRA_DARK = Palette(
+    bg_page="#181b1f",  # Background / Ansi 0
+    bg_surface="#1e2228",  # a hair above page (grid/hover/plot bg)
+    bg_panel="#1e2228",  # sidebar/header/cards
+    border="#30353c",  # neutral hairline
+    text_emph="#dedede",  # Bold Color
+    text_body="#aeaeae",  # Foreground
+    text_muted="#636363",  # Ansi 8 (bright black)
+    text_dim="#4f4f4f",  # derived, dimmest chrome
+    good="#61c68a",  # green — Ansi 2
+    notable="#c7ad40",  # yellow — Ansi 3
+    bad="#e59c4c",  # amber — Badge Color (stands in for absent orange)
+    crit="#f48e74",  # coral red — Ansi 1
+    info="#61b5fa",  # true blue — Link Color
+    accent="#1ac2e1",  # cyan — Ansi 6
+    rare="#97a6ff",  # periwinkle — Ansi 4
+    magenta="#e18dce",  # magenta — Ansi 5
+)
+
+THEMES: dict[str, Palette] = {
+    "solarized-dark": SOLARIZED_DARK,
+    "oklab-solarized-dark": OKLAB_SOLARIZED_DARK,
+    "penumbra-dark": PENUMBRA_DARK,
+}
+
+DEFAULT_THEME = "oklab-solarized-dark"
+
+# Active palette, bound once at import. Switch by relaunching with TT_THEME set
+# (e.g. `TT_THEME=solarized-dark`); unknown names fall back to the default.
+# This is startup selection, not live switching: the Plotly constants below and
+# every `from .theme import PALETTE` consumer bind this value at import time.
+PALETTE = THEMES.get(os.environ.get("TT_THEME", DEFAULT_THEME), THEMES[DEFAULT_THEME])
 
 
 def quasar_colors() -> dict[str, str]:
@@ -74,27 +160,39 @@ def quasar_colors() -> dict[str, str]:
     p = PALETTE
     return {
         # Quasar built-in slots — drive every default-Quasar widget surface.
-        "primary": p.accent,     # cyan — everyday accent / selection / active tab
-        "secondary": p.info,     # blue — secondary buttons/badges (rarely used today)
-        "accent": p.rare,        # violet — rare emphasis (NOT the cyan accent)
-        "dark": p.bg_surface,    # surface bg for cards/menus in dark mode
+        "primary": p.accent,  # cyan — everyday accent / selection / active tab
+        "secondary": p.info,  # blue — secondary buttons/badges (rarely used today)
+        "accent": p.rare,  # violet — rare emphasis (NOT the cyan accent)
+        "dark": p.bg_surface,  # surface bg for cards/menus in dark mode
         "dark_page": p.bg_page,  # body bg in dark mode
-        "positive": p.good,      # Quasar "ok"-semantic widgets
-        "negative": p.bad,       # Quasar "bad"-semantic widgets — orange, NOT crit red
+        "positive": p.good,  # Quasar "ok"-semantic widgets
+        "negative": p.bad,  # Quasar "bad"-semantic widgets — orange, NOT crit red
         "info": p.info,
-        "warning": p.notable,    # warning chip / amber surfaces
+        "warning": p.notable,  # warning chip / amber surfaces
         # Semantic brand tokens — addressable via `color=<name>` and var(--q-<name>).
-        "good": p.good, "notable": p.notable, "bad": p.bad, "crit": p.crit,
+        "good": p.good,
+        "notable": p.notable,
+        "bad": p.bad,
+        "crit": p.crit,
         # Text-role brand tokens.
-        "emph": p.text_emph, "body": p.text_body, "muted": p.text_muted, "dim": p.text_dim,
+        "emph": p.text_emph,
+        "body": p.text_body,
+        "muted": p.text_muted,
+        "dim": p.text_dim,
         # Surface brand tokens — `panel` is decoupled from Quasar's `dark` slot in case
         # those two values diverge later (sidebar/header vs cards/menus).
-        "panel": p.bg_panel, "border": p.border,
+        "panel": p.bg_panel,
+        "border": p.border,
         # Hue-named tokens — for symmetry and rare external consumers
         # (e.g. an out-of-tree xpl colorizer that asks for "sol_cyan" by name).
-        "sol_red": p.crit, "sol_orange": p.bad, "sol_yellow": p.notable,
-        "sol_green": p.good, "sol_cyan": p.accent, "sol_blue": p.info,
-        "sol_violet": p.rare, "sol_magenta": p.magenta,
+        "sol_red": p.crit,
+        "sol_orange": p.bad,
+        "sol_yellow": p.notable,
+        "sol_green": p.good,
+        "sol_cyan": p.accent,
+        "sol_blue": p.info,
+        "sol_violet": p.rare,
+        "sol_magenta": p.magenta,
     }
 
 
@@ -112,6 +210,7 @@ SUBPLOT_LABEL_COLOR = PALETTE.text_muted
 HOVER_BG = PALETTE.bg_surface
 HOVER_BORDER = PALETTE.border
 HOVER_TEXT = PALETTE.text_body
+
 
 def rgba(hex6: str, alpha: float) -> str:
     """Convert `#rrggbb` + alpha to `rgba(r,g,b,a)`. Used for the few places
@@ -186,6 +285,14 @@ DARK_CSS = """
 .tcptrace-conn-row .conn-badges  { letter-spacing: 0.04em; color: var(--q-muted); }
 .tcptrace-conn-row .conn-meta-bot { font-family: var(--mono); font-size: 10px;
                                     color: var(--q-dim); margin-top: 2px; }
+/* per-row hide for filter/chip toggles — no DOM teardown */
+.tcptrace-conn-row.row-hidden { display: none !important; }
+
+/* parent for the conn list — flex column so `order:` reorders rows
+   visually without DOM moves (apply_sort). Quasar's q-list is block
+   by default; we override for this one list. */
+.tcptrace-conn-flex { display: flex !important; flex-direction: column; }
+.tcptrace-conn-flex > .q-item { order: 0; }
 
 /* dots */
 .tcptrace-conn-dot {
@@ -218,6 +325,7 @@ DARK_CSS = """
 .tcptrace-subtitle { font-family: var(--mono); font-size: 12px; color: var(--q-muted); }
 .tcptrace-context  { font-family: var(--mono); font-size: 11px; color: var(--q-dim); line-height: 1.45; }
 .tcptrace-empty    { color: var(--q-dim); font-style: italic; text-align: center; margin-top: 64px; }
+.tcptrace-zone-hidden { display: none !important; }
 
 /* ---- output expansion + dialogs ---- */
 .tcptrace-expansion .q-expansion-item__container {

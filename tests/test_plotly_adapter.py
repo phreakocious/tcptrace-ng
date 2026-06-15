@@ -560,7 +560,7 @@ def test_tsg_figure_has_no_top_title():
 def test_tsg_layout_arms_plotly_hover_for_crossbar_script():
     """Plotly's per-axis spike stops at its subplot boundary, so the crossbar
     is drawn client-side as an absolutely-positioned overlay (see
-    _HOVER_CROSSBAR_JS in app.py). We still need hovermode=x at the layout
+    _HOVER_CROSSBAR_JS in view/hover_crossbar.py). We still need hovermode=x at the layout
     level so Fx.hover can pop both panels' tooltips; the native spike config
     is gone so it doesn't double the JS-drawn line."""
     fwd = TsgModel(src="1.1.1.1:1", dst="2.2.2.2:2", direction="a2b")
@@ -581,7 +581,7 @@ def test_throughput_layout_arms_plotly_hover_for_crossbar_script():
 
 
 def test_metric_traces_omit_x_from_hover_for_single_crossbar_timestamp():
-    """The crossbar overlay owns the one timestamp (see _HOVER_CROSSBAR_JS).
+    """The crossbar overlay owns the one timestamp (see view/hover_crossbar.py).
     Per-trace tooltips must not repeat it — extra per-panel timestamps that
     show/disappear read as flicker. Line and marker traces therefore show y
     only, never x, and no hovertemplate emits x."""
@@ -1044,7 +1044,8 @@ def test_tsg_figure_single_direction_keeps_dual_panes_with_empty_strip():
     assert layout["yaxis2"]["domain"][1] - layout["yaxis2"]["domain"][0] < 0.2
     # The bwd pane carries the no-traffic overlay.
     no_traffic = [
-        a for a in layout["annotations"]
+        a
+        for a in layout["annotations"]
         if "no traffic" in a.get("text", "") and a.get("yref") == "y2"
     ]
     assert len(no_traffic) == 1
@@ -1438,9 +1439,7 @@ def test_anomaly_hovertext_respects_rel_seq_mode():
         # Hover popovers now ride on the invisible-marker trace; clusters there
         # appear in the same order as the visible glyph annotations, so pair by
         # cluster index back to each annotation's glyph text.
-        glyphs = [
-            a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") != "paper"
-        ]
+        glyphs = [a.get("text") for a in fig["layout"]["annotations"] if a.get("yref") != "paper"]
         hover = next(t for t in fig["data"] if t.get("name") == "anomalies")
         # Strip cluster ×N suffix so callers can key on the bare glyph.
         tips = {}
@@ -1839,7 +1838,8 @@ class TestThroughputFigure:
         assert layout["yaxis"]["domain"][1] - layout["yaxis"]["domain"][0] > 0.5
         assert layout["yaxis2"]["domain"][1] - layout["yaxis2"]["domain"][0] < 0.2
         no_traffic = [
-            a for a in layout["annotations"]
+            a
+            for a in layout["annotations"]
             if "no traffic" in a.get("text", "") and a.get("yref") == "y2"
         ]
         assert len(no_traffic) == 1

@@ -11,8 +11,10 @@ import pytest
 from nicegui import ui as _ui
 from nicegui.testing import User
 
-from tcptrace_ng.app import _format_mtime, _scan_pcaps, build_page, build_xpl_zip
+from tcptrace_ng.app import build_page, build_xpl_zip
 from tcptrace_ng.runner import AnalyzeResult, ConnRow, RunnerError
+from tcptrace_ng.view.format import _format_mtime
+from tcptrace_ng.view.header import _scan_pcaps
 
 
 @pytest.fixture
@@ -105,10 +107,13 @@ async def test_conn_click_renders_classified_text(user: User, tmp_path, monkeypa
         items = _conn_items(user)
         assert items, "expected at least one conn item in sidebar"
         items[0]._handle_event({"listener_id": next(iter(items[0]._event_listeners)), "args": {}})
-        # Allow scheduled background tasks (the async _on_conn_click) to run.
-        for _ in range(20):
+        # Allow scheduled background tasks (the async select_conn) to run.
+        # The phased flow has more await points (analyze → synthesize →
+        # diagnose → show_analysis_for), so wait until findings are present
+        # which means the full flow completed.
+        for _ in range(40):
             await asyncio.sleep(0)
-            if app_mod.state.selected_conn == 1 and 1 in app_mod.state.analyses:
+            if app_mod.state.selected_conn == 1 and 1 in app_mod.state.findings:
                 break
 
         # Open the raw-output dialog via its sticky-header button so the
@@ -492,13 +497,13 @@ def test_render_throughput_stats_panel_updates_on_relayout():
     """
     import unittest.mock as mock
 
-    from tcptrace_ng.app import _render_throughput_stats_panel
     from tcptrace_ng.throughput import (
         DirectionSummary,
         RateSample,
         ThroughputModel,
         ThroughputModelPair,
     )
+    from tcptrace_ng.view.main import _render_throughput_stats_panel
 
     # Low-rate samples in t=0..5, high-rate samples in t=6..10.
     samples_low = tuple(
@@ -564,7 +569,7 @@ def test_render_throughput_stats_panel_updates_on_relayout():
         def __exit__(self, *_):
             pass
 
-    with mock.patch("tcptrace_ng.app.ui") as fake_ui:
+    with mock.patch("tcptrace_ng.view.main.ui") as fake_ui:
         container_full = _FakeContainer(rendered_full)
         fake_ui.html.side_effect = lambda s: rendered_full.append(s)
         _render_throughput_stats_panel(container_full, pair, "→", "←", None, None)
@@ -603,7 +608,7 @@ def test_hover_crossbar_overlay_not_per_frame_relayout():
     cross-panel value sync (Fx.hover on both subplots) and a single stable
     timestamp label are retained.
     """
-    from tcptrace_ng.app import _HOVER_CROSSBAR_JS as JS
+    from tcptrace_ng.view.hover_crossbar import _HOVER_CROSSBAR_JS as JS
 
     # No per-frame relayout: the regressed code did Plotly.relayout(gd, {shapes:[...]}).
     assert "relayout" not in JS, "crossbar must not call Plotly.relayout in the hot path"

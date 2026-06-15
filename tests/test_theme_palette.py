@@ -5,6 +5,7 @@ These guard the load-bearing policy decisions:
 - primary slot drives selection + active-tab indicator and is cyan (PALETTE.accent)
 - every Quasar slot is filled and every brand token is exposed
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -30,10 +31,22 @@ def test_palette_fields_are_six_digit_hexes():
 def test_palette_has_all_documented_tokens():
     """Spec §1 — 16 tokens, named by role."""
     expected = {
-        "bg_page", "bg_surface", "bg_panel", "border",
-        "text_emph", "text_body", "text_muted", "text_dim",
-        "good", "notable", "bad", "crit",
-        "info", "accent", "rare", "magenta",
+        "bg_page",
+        "bg_surface",
+        "bg_panel",
+        "border",
+        "text_emph",
+        "text_body",
+        "text_muted",
+        "text_dim",
+        "good",
+        "notable",
+        "bad",
+        "crit",
+        "info",
+        "accent",
+        "rare",
+        "magenta",
     }
     actual = {f.name for f in dataclasses.fields(Palette)}
     assert actual == expected, f"missing: {expected - actual}; extra: {actual - expected}"
@@ -42,9 +55,15 @@ def test_palette_has_all_documented_tokens():
 def test_quasar_colors_fills_every_built_in_slot():
     qc = quasar_colors()
     expected_slots = {
-        "primary", "secondary", "accent",
-        "dark", "dark_page",
-        "positive", "negative", "info", "warning",
+        "primary",
+        "secondary",
+        "accent",
+        "dark",
+        "dark_page",
+        "positive",
+        "negative",
+        "info",
+        "warning",
     }
     assert expected_slots <= qc.keys()
 
@@ -69,9 +88,16 @@ def test_quasar_colors_exposes_brand_tokens():
     and via the utility classes in DARK_CSS §3."""
     qc = quasar_colors()
     for tok in (
-        "good", "notable", "bad", "crit",
-        "emph", "body", "muted", "dim",
-        "panel", "border",
+        "good",
+        "notable",
+        "bad",
+        "crit",
+        "emph",
+        "body",
+        "muted",
+        "dim",
+        "panel",
+        "border",
     ):
         assert tok in qc, f"missing brand token: {tok}"
 
@@ -89,8 +115,14 @@ def test_quasar_colors_exposes_hue_named_passthrough_tokens():
     and rare external consumers (e.g. an out-of-tree xpl colorizer)."""
     qc = quasar_colors()
     for tok in (
-        "sol_red", "sol_orange", "sol_yellow", "sol_green",
-        "sol_cyan", "sol_blue", "sol_violet", "sol_magenta",
+        "sol_red",
+        "sol_orange",
+        "sol_yellow",
+        "sol_green",
+        "sol_cyan",
+        "sol_blue",
+        "sol_violet",
+        "sol_magenta",
     ):
         assert tok in qc, f"missing hue-named token: {tok}"
     assert qc["sol_red"] == PALETTE.crit  # the only red lives in `crit`
