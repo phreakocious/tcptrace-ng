@@ -7,12 +7,13 @@ and view/main.py (later phases).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..classifier import Class
+from ..classifier import Class, classify
 from ..diagnose import Finding, severity_to_class
 from ..state import _escape_html
 from ..stats_parser import ConnStats
@@ -70,11 +71,17 @@ def _format_size(n: int) -> str:
     return f"{n / 1024 / 1024 / 1024:.2f} GB"
 
 
+def _conn_search_text(row) -> str:
+    """Haystack string for filter matching: conn number + both endpoints,
+    space-joined so one substring check covers all fields. (Also feeds the
+    client-side list filter once that lands.)"""
+    return f"{row.n} {row.host_a} {row.host_b}"
+
+
 def _matches_filter(row, q: str) -> bool:
     if not q:
         return True
-    needle = q.lower()
-    return needle in str(row.n) or needle in row.host_a.lower() or needle in row.host_b.lower()
+    return q.lower() in _conn_search_text(row).lower()
 
 
 def _format_duration(s: float) -> str:
@@ -185,6 +192,41 @@ def _build_conn_row_html(
     )
 
 
+def _escape_attr(s: str) -> str:
+    """Escape for a double-quoted HTML attribute. `_escape_html` misses the
+    double-quote, which would break `data-text="…"`."""
+    return _escape_html(s).replace('"', "&quot;")
+
+
+def _build_conn_list_html(
+    rows,
+    *,
+    selected_n: int | None,
+    badges_map: dict[int, str],
+    findings_map: dict[int, list[Finding]],
+    order_map: dict[int, int],
+) -> str:
+    """Render the whole connection list as one HTML string.
+
+    One `<div class="tcptrace-conn-row" …>` per row, carrying `data-n` (click
+    target), `data-text` (filter haystack), `data-flags` (chip tokens), the
+    selected class when `row.n == selected_n`, and an inline `order` so the
+    initial sort needs no client round-trip. Wrapped in `.tcptrace-conn-flex`
+    (the flex column that makes `order` reorder visually)."""
+    parts: list[str] = []
+    for row in rows:
+        inner = _build_conn_row_html(row, badges_map.get(row.n, ""), findings_map.get(row.n, []))
+        sel = " tcptrace-conn-selected" if row.n == selected_n else ""
+        text = _escape_attr(_conn_search_text(row))
+        flags = " ".join(sorted(_conn_flags(row)))
+        order = order_map.get(row.n, 0)
+        parts.append(
+            f'<div class="tcptrace-conn-row{sel}" data-n="{row.n}" '
+            f'data-text="{text}" data-flags="{flags}" style="order:{order}">{inner}</div>'
+        )
+    return f'<div class="tcptrace-conn-flex">{"".join(parts)}</div>'
+
+
 def _findings_panel_html(findings: list[Finding], fwd_label: str, bwd_label: str) -> str:
     """Stacked findings rows for the main-panel header. '' when empty.
 
@@ -212,23 +254,30 @@ def _findings_panel_html(findings: list[Finding], fwd_label: str, bwd_label: str
 _BULK_BYTES_THRESHOLD = 100 * 1024  # 100 KB; hardcoded per spec
 
 
-def _matches_chips(row, chips: set[str]) -> bool:
-    if not chips:
-        return True
+def _conn_flags(row) -> set[str]:
+    """Set of chip tokens this row satisfies — the single source for both
+    `_matches_chips` and (later) the per-row filter metadata. Stats-less rows
+    have no flags, so any active chip hides them."""
     if not isinstance(row, ConnStats):
-        # Stats-less fallback rows never satisfy stats-based chips
-        return False
-    if "bad" in chips and row.verdict != Class.BAD:
-        return False
-    if "rst" in chips and not row.has_rst:
-        return False
-    if "rexmt" in chips and row.rexmt_packets == 0:
-        return False
-    if "incomplete" in chips and row.complete_handshake:
-        return False
-    if "uni" in chips and not row.unidirectional:
-        return False
-    return not ("bulk" in chips and row.total_bytes < _BULK_BYTES_THRESHOLD)
+        return set()
+    flags: set[str] = set()
+    if row.verdict == Class.BAD:
+        flags.add("bad")
+    if row.has_rst:
+        flags.add("rst")
+    if row.rexmt_packets > 0:
+        flags.add("rexmt")
+    if not row.complete_handshake:
+        flags.add("incomplete")
+    if row.unidirectional:
+        flags.add("uni")
+    if row.total_bytes >= _BULK_BYTES_THRESHOLD:
+        flags.add("bulk")
+    return flags
+
+
+def _matches_chips(row, chips: set[str]) -> bool:
+    return chips <= _conn_flags(row)
 
 
 def _sort_rows(rows: list, key: str) -> list:
@@ -470,6 +519,52 @@ def _phase_label_text(n: int, phase: str) -> str:
     if phase == "diagnosing":
         return "computing diagnostics"
     return f"analyzing connection {n}"
+
+
+def _conn_filter_js(query: str, flags) -> str:
+    return (
+        "window.ttConnList && window.ttConnList.filter("
+        f"{json.dumps(query)}, {json.dumps(sorted(flags))})"
+    )
+
+
+def _conn_sort_js(order) -> str:
+    return f"window.ttConnList && window.ttConnList.sort({json.dumps(list(order))})"
+
+
+def _conn_select_js(old, new) -> str:
+    return f"window.ttConnList && window.ttConnList.select({json.dumps(old)}, {json.dumps(new)})"
+
+
+def _conn_set_row_js(n: int, html: str) -> str:
+    return f"window.ttConnList && window.ttConnList.setRow({json.dumps(n)}, {json.dumps(html)})"
+
+
+def _output_dialog_html(
+    details_text: str,
+    *,
+    debug: bool,
+    desegment_kinds: set[str],
+    desegment_coalesces: list[dict],
+) -> tuple[str, str]:
+    """(banner_html, pre_html) for the raw tcptrace-output dialog. Pure so the
+    dialog content can be built lazily on open without rebuilding the dialog."""
+    banner = _desegment_banner_text(desegment_kinds, desegment_coalesces)
+    banner_html = (
+        f'<div class="tcptrace-desegment-banner">{_escape_html(banner)}</div>' if banner else ""
+    )
+    lines: list[str] = []
+    for line in details_text.splitlines():
+        cls = classify(line)
+        # Faithful to the original dialog: only _SUPPRESS lines (classify→None)
+        # are hidden in non-debug; NORMAL/colored lines are always shown.
+        if cls is None:
+            if not debug:
+                continue
+            cls = Class.NORMAL
+        lines.append(f'<span class="{cls.value}">{_escape_html(line)}</span>')
+    pre_html = '<pre class="tcptrace-output">' + "\n".join(lines) + "</pre>"
+    return banner_html, pre_html
 
 
 def _throughput_stats_grid_html(
