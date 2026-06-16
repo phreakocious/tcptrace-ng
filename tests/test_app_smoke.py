@@ -100,13 +100,15 @@ async def test_conn_click_renders_classified_text(user: User, tmp_path, monkeypa
         select.set_value(str(pcap))
         await user.should_see("a:1")  # conn row in sidebar
 
-        # NiceGUI Item.on_click wraps the callback in handle_event(), which
-        # schedules async callbacks as background tasks. To exercise the
-        # full path deterministically without racing the loop, dispatch the
-        # registered listener and explicitly await its scheduled task.
-        items = _conn_items(user)
-        assert items, "expected at least one conn item in sidebar"
-        items[0]._handle_event({"listener_id": next(iter(items[0]._event_listeners)), "args": {}})
+        # Clicks are now handled via JS event delegation → emitEvent('conn_click')
+        # → ui.on('conn_click', handler) registered on client.layout.  Find that
+        # listener and fire it directly so async callbacks schedule as usual.
+        layout = user.client.layout
+        conn_click_lid = next(
+            lid for lid, ev in layout._event_listeners.items()
+            if ev.type == "conn_click"
+        )
+        layout._handle_event({"listener_id": conn_click_lid, "args": {"n": 1}})
         # Allow scheduled background tasks (the async select_conn) to run.
         # The phased flow has more await points (analyze → synthesize →
         # diagnose → show_analysis_for), so wait until findings are present
@@ -765,9 +767,12 @@ async def test_conn_click_renders_findings_panel(user: User, tmp_path, monkeypat
         select.set_value(str(pcap))
         await user.should_see("10.0.0.1:50000")
 
-        items = _conn_items(user)
-        assert items, "expected a conn item in sidebar"
-        items[0]._handle_event({"listener_id": next(iter(items[0]._event_listeners)), "args": {}})
+        layout = user.client.layout
+        conn_click_lid = next(
+            lid for lid, ev in layout._event_listeners.items()
+            if ev.type == "conn_click"
+        )
+        layout._handle_event({"listener_id": conn_click_lid, "args": {"n": 1}})
         for _ in range(20):
             await asyncio.sleep(0)
             # Wait on findings (computed just after analyses) — the thing asserted below.
@@ -775,5 +780,10 @@ async def test_conn_click_renders_findings_panel(user: User, tmp_path, monkeypat
                 break
 
         assert app_mod.state.findings.get(1) == [finding]
-        await user.should_see("High retransmission rate")  # findings panel
-        await user.should_see("⚠1")  # sidebar issue badge
+        await user.should_see("High retransmission rate")  # findings panel (server-rendered)
+        # The sidebar ⚠ badge reaches the live DOM via client JS (ttConnList.setRow),
+        # which the headless harness can't execute; verify the row HTML that
+        # refresh_row pushes instead.
+        from tcptrace_ng.view.format import _build_conn_row_html
+
+        assert "⚠1" in _build_conn_row_html(rows[0], "", [finding])

@@ -2,16 +2,17 @@
 
 `build(state, on_conn_click, on_download_zip,
        csum_counts_for_endpoints) -> SidebarHandle`
-constructs the sidebar DOM once. The returned handle exposes a per-row
-registry (`_rows`) and surgical refresh methods that mutate existing
-elements instead of rebuilding the list:
+constructs the sidebar DOM once. The conn list is one `ui.html` whose
+content is a blob built by `_build_conn_list_html`; filtering, sorting,
+selection, and row-updates run client-side via `window.ttConnList`:
 
-- `populate_rows(stats)` builds each row once and bumps state.stats_generation
-- `refresh_selection(old, new)` toggles the selected class on two rows
-- `apply_filter(q)` / `apply_chips(chips)` toggle `.row-hidden` on items
-- `apply_sort(key)` assigns `style="order: i"` (CSS flex order)
-- `refresh_row(n)` / `refresh_all_rows()` swap inner `ui.html.content`
-- `refresh_count_label()` recomputes the header label
+- `populate_rows(stats)` renders the whole list as one blob and bumps
+  state.stats_generation; sort and selection are baked inline.
+- `refresh_selection(old, new)` runs JS to toggle the selected class.
+- `apply_filter(q)` / `apply_chips(chips)` run JS filter.
+- `apply_sort(key)` runs JS sort.
+- `refresh_row(n)` / `refresh_all_rows()` re-render via JS or full blob.
+- `refresh_count_label()` recomputes the header label (server-side).
 
 Chip toggle and sort select handlers call these methods directly so the
 drawer stays self-contained.
@@ -32,33 +33,59 @@ from ..runner import ConnRow
 from ..state import _State
 from ..stats_parser import ConnStats
 from .format import (
+    _build_conn_list_html,
     _build_conn_row_html,
+    _conn_filter_js,
+    _conn_select_js,
+    _conn_set_row_js,
+    _conn_sort_js,
     _matches_chips,
     _matches_filter,
     _sort_rows,
 )
 
 
-@dataclass
-class _RowHandle:
-    """Per-connection UI handle stored in the sidebar's row registry.
-
-    `item` is the outer Quasar item — selection class and `row-hidden`
-    class live there. `body` is the inner `ui.html` whose `.content` we
-    swap when findings arrive or analysis updates the row.
-    """
-
-    item: ui.item
-    body: ui.html
+_CONN_LIST_JS = """
+<script>
+window.ttConnList = (function () {
+  function row(n) { return document.querySelector('.tcptrace-conn-row[data-n="' + n + '"]'); }
+  return {
+    filter: function (query, flags) {
+      var q = (query || '').toLowerCase();
+      var fl = flags || [];
+      var rows = document.querySelectorAll('.tcptrace-conn-row');
+      for (var i = 0; i < rows.length; i++) {
+        var el = rows[i];
+        var text = (el.dataset.text || '').toLowerCase();
+        var rf = (el.dataset.flags || '').split(' ');
+        var show = (!q || text.indexOf(q) !== -1)
+          && fl.every(function (k) { return rf.indexOf(k) !== -1; });
+        el.style.display = show ? '' : 'none';
+      }
+    },
+    sort: function (order) {
+      (order || []).forEach(function (n, i) { var el = row(n); if (el) el.style.order = i; });
+    },
+    select: function (oldN, newN) {
+      if (oldN !== null && oldN !== undefined) { var o = row(oldN); if (o) o.classList.remove('tcptrace-conn-selected'); }
+      if (newN !== null && newN !== undefined) { var e = row(newN); if (e) e.classList.add('tcptrace-conn-selected'); }
+    },
+    setRow: function (n, html) { var el = row(n); if (el) el.innerHTML = html; }
+  };
+})();
+document.addEventListener('click', function (ev) {
+  var el = ev.target.closest ? ev.target.closest('.tcptrace-conn-row') : null;
+  if (!el) return;
+  var n = parseInt(el.dataset.n, 10);
+  if (!isNaN(n)) emitEvent('conn_click', { n: n });
+});
+</script>
+"""
 
 
 @dataclass
 class SidebarHandle:
-    """Public surface of the sidebar zone.
-
-    Exposes a per-row registry and surgical refresh methods that mutate
-    existing elements instead of rebuilding the list.
-    """
+    """Public surface of the sidebar zone."""
 
     drawer: ui.left_drawer
     conn_count_label: ui.label
@@ -66,6 +93,7 @@ class SidebarHandle:
     sort_select: ui.select
     chips: dict[str, ui.chip]
     conn_list_container: ui.column
+    conn_list_html: ui.html
     download_btn: ui.button
     refresh_download_btn: Callable[[], None]
     populate_rows: Callable[[list[ConnStats | ConnRow]], None]
@@ -76,8 +104,6 @@ class SidebarHandle:
     refresh_row: Callable[[int], None]
     refresh_all_rows: Callable[[], None]
     refresh_count_label: Callable[[], None]
-    # Test-only: per-row registry, exposed read-only for assertions.
-    _rows: dict[int, _RowHandle]
 
 
 def build(
@@ -89,8 +115,8 @@ def build(
 ) -> SidebarHandle:
     """Build the sidebar drawer once. Returns refresh hooks + widget refs."""
 
-    _rows: dict[int, _RowHandle] = {}
-    _stats_by_n: dict[int, ConnStats | ConnRow] = {}
+    ui.add_head_html(_CONN_LIST_JS)
+    ui.on("conn_click", lambda e: on_conn_click(int(e.args["n"])))
 
     def _badges(stats: ConnStats) -> list[str]:
         out: list[str] = []
@@ -168,6 +194,8 @@ def build(
 
             sort_select.on_value_change(_on_sort_change)
         conn_list_container = ui.column().classes("w-full flex-grow overflow-auto gap-0")
+        with conn_list_container:
+            conn_list_html = ui.html("").classes("w-full")
         with ui.row().classes("w-full tcptrace-sidebar-footer px-3 py-2"):
             download_btn = (
                 ui.button("↓ xpl zip")
@@ -178,56 +206,48 @@ def build(
     def _should_show(row) -> bool:
         return _matches_filter(row, state.conn_filter) and _matches_chips(row, state.chip_filters)
 
-    def _findings_for(row) -> list:
-        return state.findings.get(row.n, [])
-
-    def _row_html(row) -> str:
-        return _build_conn_row_html(
-            row,
-            badges_str=" ".join(_badges(row)) if isinstance(row, ConnStats) else "",
-            findings=_findings_for(row),
+    def _render_blob(stats: list) -> None:
+        badges_map = {
+            r.n: " ".join(_badges(r)) if isinstance(r, ConnStats) else "" for r in stats
+        }
+        findings_map = {r.n: state.findings.get(r.n, []) for r in stats}
+        ordered = _sort_rows(list(stats), state.sort_key)
+        order_map = {r.n: i for i, r in enumerate(ordered)}
+        conn_list_html.content = _build_conn_list_html(
+            stats,
+            selected_n=state.selected_conn,
+            badges_map=badges_map,
+            findings_map=findings_map,
+            order_map=order_map,
         )
 
-    def populate_rows(stats: list[ConnStats | ConnRow]) -> None:
-        """Build the registry from scratch. Bumps stats_generation."""
+    def populate_rows(stats: list) -> None:
+        """Render the whole list as one blob. Bumps stats_generation. Sort and
+        selection are baked inline so the build-time render needs no client
+        round-trip; an active filter is re-applied via JS (always in a handler)."""
         state.stats_generation += 1
-        conn_list_container.clear()
-        _rows.clear()
-        _stats_by_n.clear()
         if state.selected_pcap is None:
+            conn_list_html.content = ""
             refresh_count_label()
             return
-        with conn_list_container, ui.list().props("dense").classes("w-full tcptrace-conn-flex"):
-            for row in stats:
-                selected = state.selected_conn == row.n
-                cls = "tcptrace-conn-row"
-                if selected:
-                    cls += " tcptrace-conn-selected"
-                item = ui.item(on_click=lambda r=row: on_conn_click(r.n)).classes(cls)
-                with item, ui.item_section():
-                    body = ui.html(_row_html(row))
-                _rows[row.n] = _RowHandle(item=item, body=body)
-                _stats_by_n[row.n] = row
-                if not _should_show(row):
-                    item.classes(add="row-hidden")
-        apply_sort(state.sort_key)
+        _render_blob(stats)
+        if state.conn_filter or state.chip_filters:
+            _run_js(_conn_filter_js(state.conn_filter, state.chip_filters))
         refresh_count_label()
 
+    def _run_js(code: str) -> None:
+        """Fire-and-forget JS. Silently no-ops when there is no client context
+        (e.g., unit-test calls that exercise server state without a browser)."""
+        try:
+            ui.run_javascript(code)
+        except RuntimeError:
+            pass
+
     def refresh_selection(old: int | None, new: int | None) -> None:
-        if old is not None and old in _rows:
-            _rows[old].item.classes(remove="tcptrace-conn-selected")
-        if new is not None and new in _rows:
-            _rows[new].item.classes(add="tcptrace-conn-selected")
+        _run_js(_conn_select_js(old, new))
 
     def _recompute_visibility() -> None:
-        for row_n, rh in _rows.items():
-            row = _stats_by_n.get(row_n)
-            if row is None:
-                continue
-            if _should_show(row):
-                rh.item.classes(remove="row-hidden")
-            else:
-                rh.item.classes(add="row-hidden")
+        _run_js(_conn_filter_js(state.conn_filter, state.chip_filters))
         refresh_count_label()
 
     def apply_filter(q: str) -> None:
@@ -235,27 +255,30 @@ def build(
         _recompute_visibility()
 
     def apply_chips(chips_set: set[str]) -> None:
-        """Recompute row visibility. `chips_set` accepted for API symmetry
-        with apply_filter; the body reads state.chip_filters directly."""
         _recompute_visibility()
 
     def apply_sort(key: str) -> None:
-        sorted_rows = _sort_rows(list(state.stats), key)
-        for idx, row in enumerate(sorted_rows):
-            rh = _rows.get(row.n)
-            if rh is not None:
-                rh.item.style(f"order: {idx}")
+        ordered = _sort_rows(list(state.stats), key)
+        _run_js(_conn_sort_js([r.n for r in ordered]))
 
     def refresh_row(n: int) -> None:
-        rh = _rows.get(n)
-        row = _stats_by_n.get(n)
-        if rh is None or row is None:
+        row = next((r for r in state.stats if r.n == n), None)
+        if row is None:
             return
-        rh.body.content = _row_html(row)
+        badges = " ".join(_badges(row)) if isinstance(row, ConnStats) else ""
+        inner = _build_conn_row_html(row, badges, state.findings.get(n, []))
+        # O(1) live-DOM patch. state.findings is canonical; the blob is a render
+        # cache rebuilt from it on the next populate_rows. Re-rendering the whole
+        # blob here would be O(N) and would reset the client-side filter (setting
+        # .content replaces innerHTML, dropping the display:none state).
+        _run_js(_conn_set_row_js(n, inner))
 
     def refresh_all_rows() -> None:
-        for n in list(_rows):
-            refresh_row(n)
+        _render_blob(state.stats)
+        # Re-rendering replaces innerHTML and drops the client-side filter;
+        # re-apply it (mirrors populate_rows).
+        if state.conn_filter or state.chip_filters:
+            _run_js(_conn_filter_js(state.conn_filter, state.chip_filters))
 
     def refresh_count_label() -> None:
         if state.selected_pcap is None:
@@ -289,6 +312,7 @@ def build(
         sort_select=sort_select,
         chips=chips,
         conn_list_container=conn_list_container,
+        conn_list_html=conn_list_html,
         download_btn=download_btn,
         refresh_download_btn=_refresh_download_btn,
         populate_rows=populate_rows,
@@ -299,5 +323,4 @@ def build(
         refresh_row=refresh_row,
         refresh_all_rows=refresh_all_rows,
         refresh_count_label=refresh_count_label,
-        _rows=_rows,
     )
