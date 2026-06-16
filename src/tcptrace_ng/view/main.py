@@ -22,21 +22,20 @@ from pathlib import Path
 
 from nicegui import background_tasks, run, ui
 
-from ..classifier import Class, classify
 from ..plotly_adapter import to_throughput_figure, to_tsg_figure
 from ..runner import AnalyzeResult
 
 # state singleton is for module-level helpers below; inside build(),
 # the `state` parameter shadows this (same object in practice).
-from ..state import _escape_html, _figure_cache_key, _State, state
+from ..state import _figure_cache_key, _State, state
 from ..stats_parser import ConnStats
 from ..throughput import ThroughputModelPair
 from ..xpl_grouper import GroupedXpl, group_xpls
 from .format import (
     _apply_rate_unit_to_ctx,
-    _desegment_banner_text,
     _direction_labels,
     _findings_panel_html,
+    _output_dialog_html,
     _phase_label_text,
     _stats_grid_html,
     _throughput_stats_grid_html,
@@ -177,7 +176,8 @@ class MainHandle:
     _findings_html: ui.html
     _output_btn_slot: ui.row
     _tabs_slot: ui.column
-    _current_dialog: dict[str, ui.dialog | None]
+    _output_dialog: ui.dialog
+    _current: dict
     _active_tab_state: dict[str, dict]
 
 
@@ -216,8 +216,41 @@ def build(
                 _pending_spinner = ui.spinner(size="md")
                 _pending_label = ui.label("").classes("text-muted")
             _figures_zone = ui.column().classes("w-full gap-3 tcptrace-zone-hidden")
+        _output_dialog = ui.dialog()
+        with _output_dialog, ui.card().classes("tcptrace-output-card p-0"):
+            ui.html(
+                '<div class="tcptrace-legend">'
+                '<span class="swatch good">GOOD</span>'
+                '<span class="swatch look">INTERESTING</span>'
+                '<span class="swatch bad">BAD</span></div>'
+            )
+            _output_banner = ui.html("")
+            _output_pre = ui.html("")
 
-    _current_dialog: dict[str, ui.dialog | None] = {"d": None}
+    _current: dict = {"n": None, "result": None}
+
+    def _open_output_dialog() -> None:
+        result = _current["result"]
+        if result is None:
+            return
+        banner, pre = _output_dialog_html(
+            result.details_text,
+            debug=state.debug,
+            desegment_kinds=state.desegment_kinds,
+            desegment_coalesces=state.desegment_coalesces,
+        )
+        _output_banner.content = banner
+        _output_pre.content = pre
+        _output_dialog.open()
+
+    with _output_btn_slot, ui.column().classes("items-end gap-1"):
+        ui.button("tcptrace output", on_click=_open_output_dialog).props(
+            "flat dense"
+        ).classes("tcptrace-rawout-btn")
+        ui.button(
+            "download pcap",
+            on_click=lambda: on_download_conn_pcap(_current["n"]),
+        ).props("flat dense").classes("tcptrace-rawout-btn")
 
     # Updated by _show_figure when a tab is activated so refresh_active_tab
     # and refresh_stats_panel can find the live plotly element + model.
@@ -241,35 +274,6 @@ def build(
         else:
             html_el.content = ""
             html_el.classes(add="tcptrace-zone-hidden")
-
-    def _build_output_dialog(result: AnalyzeResult) -> ui.dialog:
-        """Color-coded raw tcptrace output in a centered modal — opened
-        from the sticky-header button, dismissed by click-outside or ESC."""
-        legend_html = (
-            '<div class="tcptrace-legend">'
-            '<span class="swatch good">GOOD</span>'
-            '<span class="swatch look">INTERESTING</span>'
-            '<span class="swatch bad">BAD</span>'
-            "</div>"
-        )
-        html_lines: list[str] = []
-        for line in result.details_text.splitlines():
-            cls = classify(line)
-            if cls is None:
-                if not state.debug:
-                    continue
-                cls = Class.NORMAL
-            html_lines.append(f'<span class="{cls.value}">{_escape_html(line)}</span>')
-        pre_html = '<pre class="tcptrace-output">' + "\n".join(html_lines) + "</pre>"
-
-        dialog = ui.dialog()
-        with dialog, ui.card().classes("tcptrace-output-card p-0"):
-            banner = _desegment_banner_text(state.desegment_kinds, state.desegment_coalesces)
-            if banner:
-                ui.html(f'<div class="tcptrace-desegment-banner">{_escape_html(banner)}</div>')
-            ui.html(legend_html)
-            ui.html(pre_html)
-        return dialog
 
     def _render_tabs_head(result: AnalyzeResult) -> tuple[list[GroupedXpl], object | None, str]:
         """Render the tab strip. Returns (groups, tabs_element, default_tab_label).
@@ -639,23 +643,8 @@ def build(
         )
 
         _active_tab_state.clear()
-        old_dialog = _current_dialog["d"]
-        if old_dialog is not None:
-            old_dialog.delete()
-            _current_dialog["d"] = None
-        with main_container:
-            new_dialog = _build_output_dialog(result)
-        _current_dialog["d"] = new_dialog
-        _output_btn_slot.clear()
-        with _output_btn_slot:
-            with ui.column().classes("items-end gap-1"):
-                ui.button("tcptrace output", on_click=new_dialog.open).props(
-                    "flat dense"
-                ).classes("tcptrace-rawout-btn")
-                ui.button(
-                    "download pcap",
-                    on_click=lambda _e, n=n: on_download_conn_pcap(n),
-                ).props("flat dense").classes("tcptrace-rawout-btn")
+        _current["n"] = n
+        _current["result"] = result
 
         _tabs_slot.clear()
         with _tabs_slot:
@@ -799,6 +788,7 @@ def build(
         _findings_html=_findings_html,
         _output_btn_slot=_output_btn_slot,
         _tabs_slot=_tabs_slot,
-        _current_dialog=_current_dialog,
+        _output_dialog=_output_dialog,
+        _current=_current,
         _active_tab_state=_active_tab_state,
     )

@@ -24,6 +24,7 @@ decomposition for the dependency rule).
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -43,7 +44,6 @@ from .format import (
     _matches_filter,
     _sort_rows,
 )
-
 
 _CONN_LIST_JS = """
 <script>
@@ -238,10 +238,8 @@ def build(
     def _run_js(code: str) -> None:
         """Fire-and-forget JS. Silently no-ops when there is no client context
         (e.g., unit-test calls that exercise server state without a browser)."""
-        try:
+        with contextlib.suppress(RuntimeError):
             ui.run_javascript(code)
-        except RuntimeError:
-            pass
 
     def refresh_selection(old: int | None, new: int | None) -> None:
         _run_js(_conn_select_js(old, new))
@@ -255,6 +253,8 @@ def build(
         _recompute_visibility()
 
     def apply_chips(chips_set: set[str]) -> None:
+        """`chips_set` accepted for API symmetry with apply_filter; the body
+        reads state.chip_filters directly."""
         _recompute_visibility()
 
     def apply_sort(key: str) -> None:

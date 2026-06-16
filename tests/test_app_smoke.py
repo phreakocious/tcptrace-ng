@@ -33,10 +33,6 @@ def _select_element(user):
     raise AssertionError("no pcap select element found")
 
 
-def _conn_items(user):
-    return list(user.find(kind=_ui.item).elements)
-
-
 async def test_page_renders_brand_and_empty_state(user: User, empty_cwd):
     build_page()
     await user.open("/")

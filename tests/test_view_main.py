@@ -121,9 +121,8 @@ async def test_show_pending_phase_change_mutates_label_only(user: User, main_han
 
 
 async def test_show_analysis_for_owns_one_dialog_at_a_time(user: User, main_handle, tmp_path):
-    """show_analysis_for(n2) deletes the dialog built for n1. Today's
-    behavior rebuilt the dialog every render — we now build once per
-    (analysis arrival, n change)."""
+    """show_analysis_for builds the output dialog once at build() time.
+    Switching connections updates _current but keeps the same dialog object."""
     _index, _ = main_handle
     await user.open("/")
     handle = _index.handle  # type: ignore[attr-defined]
@@ -133,13 +132,13 @@ async def test_show_analysis_for_owns_one_dialog_at_a_time(user: User, main_hand
     state.analyses = {1: _fake_analyze(1, tmp_path), 2: _fake_analyze(2, tmp_path)}
     state.selected_conn = 1
     handle.show_analysis_for(1)
-    first_dialog = handle._current_dialog["d"]
-    assert first_dialog is not None
+    dlg = handle._output_dialog
+    assert dlg is not None
+    assert handle._current["result"] is state.analyses[1]
     state.selected_conn = 2
     handle.show_analysis_for(2)
-    second_dialog = handle._current_dialog["d"]
-    assert second_dialog is not None
-    assert id(second_dialog) != id(first_dialog)
+    assert handle._output_dialog is dlg  # same object — built once
+    assert handle._current["result"] is state.analyses[2]
 
 
 async def test_show_analysis_for_persistent_sticky_head_handles(user: User, main_handle, tmp_path):
@@ -205,6 +204,25 @@ async def test_refresh_findings_panel_does_not_rebuild_tabs(user: User, main_han
     handle.refresh_findings_panel(1)
     assert id(handle._tabs_slot) == tabs_slot_id
     assert id(handle._findings_html) == findings_id
+
+
+async def test_output_controls_built_once_survive_switch(user: User, main_handle, tmp_path):
+    """Switching connections does NOT recreate the output buttons or dialog."""
+    _index, _ = main_handle
+    await user.open("/")
+    handle = _index.handle  # type: ignore[attr-defined]
+    state = _index.state  # type: ignore[attr-defined]
+    state.selected_pcap = tmp_path / "fake.pcap"
+    state.stats = [_stats(1), _stats(2)]
+    state.analyses = {1: _fake_analyze(1, tmp_path), 2: _fake_analyze(2, tmp_path)}
+    state.selected_conn = 1
+    handle.show_analysis_for(1)
+    dlg = handle._output_dialog
+    btn_slot_id = id(handle._output_btn_slot)
+    state.selected_conn = 2
+    handle.show_analysis_for(2)
+    assert handle._output_dialog is dlg            # same dialog object, content swapped lazily
+    assert id(handle._output_btn_slot) == btn_slot_id
 
 
 async def test_no_show_analysis_at_startup(user: User, main_handle, tmp_path, monkeypatch):

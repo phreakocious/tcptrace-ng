@@ -285,14 +285,12 @@ DARK_CSS = """
 .tcptrace-conn-row .conn-badges  { letter-spacing: 0.04em; color: var(--q-muted); }
 .tcptrace-conn-row .conn-meta-bot { font-family: var(--mono); font-size: 10px;
                                     color: var(--q-dim); margin-top: 2px; }
-/* per-row hide for filter/chip toggles — no DOM teardown */
-.tcptrace-conn-row.row-hidden { display: none !important; }
 
 /* parent for the conn list — flex column so `order:` reorders rows
    visually without DOM moves (apply_sort). Quasar's q-list is block
    by default; we override for this one list. */
 .tcptrace-conn-flex { display: flex !important; flex-direction: column; }
-.tcptrace-conn-flex > .q-item { order: 0; }
+.tcptrace-conn-flex > .tcptrace-conn-row { order: 0; }
 
 /* dots */
 .tcptrace-conn-dot {

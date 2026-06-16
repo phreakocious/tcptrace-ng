@@ -7,14 +7,21 @@ from tcptrace_ng.diagnose import Finding
 from tcptrace_ng.runner import ConnRow
 from tcptrace_ng.stats_parser import ConnStats
 from tcptrace_ng.view.format import (
+    _build_conn_list_html,
+    _conn_filter_js,
     _conn_flags,
     _conn_search_text,
+    _conn_select_js,
+    _conn_set_row_js,
+    _conn_sort_js,
     _desegment_banner_text,
+    _escape_attr,
     _findings_panel_html,
     _format_throughput_Bps,
     _issue_summary,
     _matches_chips,
     _matches_filter,
+    _output_dialog_html,
     _phase_label_text,
     _stats_grid_html,
     _verdict_dot_class,
@@ -32,22 +39,22 @@ def _cs(n=1, **kw):
         else:
             kw.setdefault("pkts_a", 10)
             kw.setdefault("pkts_b", 10)
-    base = dict(
-        host_a=f"10.0.0.{n}:5000{n}",
-        host_b=f"10.0.0.{n + 100}:443",
-        client_is_a=True,
-        total_bytes=1000,
-        total_packets=10,
-        duration_s=0.1,
-        rexmt_packets=0,
-        has_rst=False,
-        complete_handshake=True,
-        pkts_a=10,
-        pkts_b=10,
-        verdict=Class.NORMAL,
-        fwd_ctx="",
-        bwd_ctx="",
-    )
+    base = {
+        "host_a": f"10.0.0.{n}:5000{n}",
+        "host_b": f"10.0.0.{n + 100}:443",
+        "client_is_a": True,
+        "total_bytes": 1000,
+        "total_packets": 10,
+        "duration_s": 0.1,
+        "rexmt_packets": 0,
+        "has_rst": False,
+        "complete_handshake": True,
+        "pkts_a": 10,
+        "pkts_b": 10,
+        "verdict": Class.NORMAL,
+        "fwd_ctx": "",
+        "bwd_ctx": "",
+    }
     base.update(kw)
     return ConnStats(n=n, **base)
 
@@ -267,13 +274,6 @@ def test_phase_label_text_each_phase():
 
 def test_phase_label_text_unknown_phase_falls_back_to_analyzing():
     assert _phase_label_text(7, "wat") == "analyzing connection 7"
-
-
-from tcptrace_ng.view.format import _build_conn_list_html, _escape_attr
-from tcptrace_ng.view.format import (
-    _conn_filter_js, _conn_select_js, _conn_set_row_js, _conn_sort_js,
-    _output_dialog_html,
-)
 
 
 def test_escape_attr_escapes_quote_and_amp():
