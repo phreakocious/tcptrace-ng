@@ -8,7 +8,7 @@ Local web UI for [tcptrace](https://github.com/blitz/tcptrace) pcap analysis, wi
 
 ```bash
 # 1. Get a tcptrace binary — pick one:
-git clone --recurse-submodules <this repo> && cd tcptrace-ng && make vendor-tcptrace
+git clone --recurse-submodules https://github.com/phreakocious/tcptrace-ng.git && cd tcptrace-ng && make vendor-tcptrace
 # or: brew install tcptrace            # macOS
 # or: apt install tcptrace             # Debian/Ubuntu
 
