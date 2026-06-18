@@ -61,6 +61,7 @@ class TcpFlow:
         server: tuple[str, int] = ("10.0.0.2", 443),
         mss: int = 1460,
         wscale: int = 7,
+        tsval_clock_hz: int = 1000,
     ) -> None:
         self.cli_ip, self.cli_port = _ip(client[0]), client[1]
         self.srv_ip, self.srv_port = _ip(server[0]), server[1]
@@ -72,23 +73,32 @@ class TcpFlow:
         # `fl.ack(...)` would resolve to this dict and raise TypeError.
         self.cumack = {"c": 0, "s": 0}  # cumulative ack of the other side
         self.win = {"c": 64240, "s": 65160}
+        self.tsval_clock_hz = tsval_clock_hz
+        self._ipid = {"c": 1000, "s": 40000}
         self._pkts: list[tuple[float, bytes]] = []
 
     # --- packet emission -------------------------------------------------
-    def _emit(self, t, frm, seq, ack, flags, win, opts=b"", data=b""):
+    def _emit(self, t, frm, seq, ack, flags, win, opts=b"", data=b"", ip_id=None, tsval=None):
         if frm == "c":
             src, sport, dst, dport = self.cli_ip, self.cli_port, self.srv_ip, self.srv_port
             smac, dmac = self.cli_mac, self.srv_mac
         else:
             src, sport, dst, dport = self.srv_ip, self.srv_port, self.cli_ip, self.cli_port
             smac, dmac = self.srv_mac, self.cli_mac
+        # Stamp a TS option onto data/ack frames that weren't given explicit opts.
+        if not opts:
+            v = tsval if tsval is not None else int(t * self.tsval_clock_hz) & 0xFFFFFFFF
+            opts = struct.pack("!BBII", dpkt.tcp.TCP_OPT_TIMESTAMP, 10, v, 0)
         opts = _pad4(opts)
+        if ip_id is None:
+            ip_id = self._ipid[frm] & 0xFFFF
+            self._ipid[frm] += 1
         tcp = dpkt.tcp.TCP(
             sport=sport, dport=dport, seq=seq, ack=ack, flags=flags, win=win, sum=0, data=data
         )
         tcp.opts = opts
         tcp.off = 5 + len(opts) // 4
-        ip = dpkt.ip.IP(src=src, dst=dst, p=dpkt.ip.IP_PROTO_TCP, ttl=64, id=0, sum=0, data=tcp)
+        ip = dpkt.ip.IP(src=src, dst=dst, p=dpkt.ip.IP_PROTO_TCP, ttl=64, id=ip_id, sum=0, data=tcp)
         eth = dpkt.ethernet.Ethernet(src=smac, dst=dmac, type=ETH_TYPE_IP, data=ip)
         self._pkts.append((t, bytes(eth)))
 
@@ -114,12 +124,12 @@ class TcpFlow:
         self.cumack["s"] = self.seq["c"]
         return t0 + rtt + _EPS
 
-    def send(self, t: float, frm: str, nbytes: int, *, push: bool = True) -> tuple[int, int]:
+    def send(self, t: float, frm: str, nbytes: int, *, push: bool = True, ip_id=None, tsval=None) -> tuple[int, int]:
         """Send `nbytes` of data from `frm`. Returns the (seq_lo, seq_hi) sent."""
         flags = TH_ACK | (TH_PSH if push else 0)
         lo = self.seq[frm]
         self._emit(
-            t, frm, lo, self.cumack[frm], flags, self.win[frm] >> self.wscale, data=b"X" * nbytes
+            t, frm, lo, self.cumack[frm], flags, self.win[frm] >> self.wscale, data=b"X" * nbytes, ip_id=ip_id, tsval=tsval
         )
         self.seq[frm] += nbytes
         return lo, self.seq[frm]
@@ -131,7 +141,7 @@ class TcpFlow:
         win_field = (rwin >> self.wscale) if rwin is not None else (self.win[frm] >> self.wscale)
         self._emit(t, frm, self.seq[frm], self.cumack[frm], TH_ACK, win_field)
 
-    def retransmit(self, t: float, frm: str, seq: int, nbytes: int) -> None:
+    def retransmit(self, t: float, frm: str, seq: int, nbytes: int, *, ip_id=None, tsval=None) -> None:
         """Re-send an OLD seq range (loss recovery) without advancing seq."""
         self._emit(
             t,
@@ -141,6 +151,8 @@ class TcpFlow:
             TH_ACK | TH_PSH,
             self.win[frm] >> self.wscale,
             data=b"X" * nbytes,
+            ip_id=ip_id,
+            tsval=tsval,
         )
 
     def keepalive(self, t: float, frm: str) -> None:
