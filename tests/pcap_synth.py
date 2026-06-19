@@ -134,12 +134,22 @@ class TcpFlow:
         self.seq[frm] += nbytes
         return lo, self.seq[frm]
 
-    def ack(self, t: float, frm: str, *, rwin: int | None = None) -> None:
-        """Pure ACK from `frm` of everything the other side has sent so far."""
+    def ack(self, t: float, frm: str, *, rwin: int | None = None,
+            sack=None, cumack: int | None = None) -> None:
+        """Pure ACK from `frm`. By default cum-ACKs everything the other side
+        has sent; pass `cumack` to hold it below a hole. `sack` is a list of
+        (lo, hi) blocks emitted as a SACK option (a first block whose hi edge
+        is <= cum-ACK is a D-SACK)."""
         other = "s" if frm == "c" else "c"
-        self.cumack[frm] = self.seq[other]
+        self.cumack[frm] = self.seq[other] if cumack is None else cumack
         win_field = (rwin >> self.wscale) if rwin is not None else (self.win[frm] >> self.wscale)
-        self._emit(t, frm, self.seq[frm], self.cumack[frm], TH_ACK, win_field)
+        opts = b""
+        if sack:
+            tsv = int(t * self.tsval_clock_hz) & 0xFFFFFFFF
+            opts = struct.pack("!BBII", dpkt.tcp.TCP_OPT_TIMESTAMP, 10, tsv, 0)
+            blocks = b"".join(struct.pack("!II", lo, hi) for lo, hi in sack)
+            opts += struct.pack("!BB", dpkt.tcp.TCP_OPT_SACK, 2 + len(blocks)) + blocks
+        self._emit(t, frm, self.seq[frm], self.cumack[frm], TH_ACK, win_field, opts=opts)
 
     def retransmit(self, t: float, frm: str, seq: int, nbytes: int, *, ip_id=None, tsval=None) -> None:
         """Re-send an OLD seq range (loss recovery) without advancing seq."""
