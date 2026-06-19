@@ -452,11 +452,10 @@ def test_build_metric_figure_routes_tput_through_throughput_synthesis(monkeypatc
     # at minimum that there are traces and a layout with an x-axis.
     assert fig.get("data") is not None
     assert "xaxis" in fig.get("layout", {})
-    # to_throughput_figure always puts "throughput" in the figure title;
-    # the generic xpl path never does, so this catches a routing regression.
-    assert "throughput" in fig["layout"]["title"]["text"].lower()
-    # At least one trace should carry throughput-specific hover text
-    # (goodput/wire strings are only emitted by to_throughput_figure).
+    # The throughput figure's top title is intentionally empty since acda7c6
+    # (direction moved to per-panel labels), so the routing-regression guard is
+    # the throughput-specific hover text below: goodput/wire strings are emitted
+    # only by to_throughput_figure, never by the generic xpl path.
     assert any(
         "goodput" in (t.get("hovertemplate") or "").lower()
         or "wire" in (t.get("hovertemplate") or "").lower()
