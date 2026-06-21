@@ -5,6 +5,7 @@ what the trace objectively shows per byte-span. Inference is Plan 2.
 """
 from __future__ import annotations
 
+import bisect
 import io
 import itertools
 import socket
@@ -186,6 +187,40 @@ def _merge(seen: list[tuple[int, int]], lo: int, hi: int) -> None:
     seen[:] = rest
 
 
+class _RevIndex:
+    """Per-data-sender view of reverse-direction frames, sorted by ordinal,
+    with prefix aggregates so per-span receiver queries are O(log n).
+
+    Keyed by the DATA sender's endpoint (== the reverse frame's `dst`).
+    """
+
+    __slots__ = ("dup_ords", "max_ack", "ords", "sack_frames")
+
+    def __init__(self) -> None:
+        self.ords: list[int] = []                       # reverse-frame ordinals, ascending
+        self.max_ack: list[int] = []                    # running max ack over ords[:i+1]
+        self.dup_ords: dict[int, list[int]] = {}        # ack value -> ascending ordinals (pure dup-ACKs)
+        self.sack_frames: list[tuple[int, tuple]] = []  # (ordinal, sack_blocks) for SACK-bearing frames
+
+
+def _reverse_index(frames: list[Frame]) -> dict[str, _RevIndex]:
+    idx: dict[str, _RevIndex] = {}
+    for g in sorted(frames, key=lambda f: f.ordinal):
+        ri = idx.setdefault(g.dst, _RevIndex())         # g is reverse for data-sender g.dst
+        ri.ords.append(g.ordinal)
+        # Serial-aware (RFC 1982) running max: a plain max() latches the stale
+        # pre-wrap ack when a connection's cum-ACK crosses 2**32, producing a
+        # false-negative `already_had` and spurious `missing_before`.
+        prev = ri.max_ack[-1] if ri.max_ack else None
+        ri.max_ack.append(g.ack if prev is None else (g.ack if seq_ge(g.ack, prev) else prev))
+        if (g.payload_len == 0
+                and not (g.flags & (dpkt.tcp.TH_SYN | dpkt.tcp.TH_FIN))):
+            ri.dup_ords.setdefault(g.ack, []).append(g.ordinal)
+        if g.sack_blocks:
+            ri.sack_frames.append((g.ordinal, g.sack_blocks))
+    return idx
+
+
 def _classify_span(st: _DirState, lo: int, hi: int) -> SeqObs:
     if st.baseline is not None and seq_lt(lo, st.baseline):
         return "prebaseline"
@@ -225,29 +260,36 @@ def replay(frames: list[Frame]) -> list[SpanObs]:
 
 def receiver_state(frames: list[Frame], spans: list[SpanObs]) -> list[SpanObs]:
     by_ord = {fr.ordinal: fr for fr in frames}
+    rev_idx = _reverse_index(frames)
     out: list[SpanObs] = []
     for sp in spans:
         fr = by_ord[sp.frame_ordinal]
-        # reverse-direction frames strictly before this span's frame, in capture order
-        rev = [g for g in frames
-               if g.src == sp.dst and g.dst == sp.src and g.ordinal < fr.ordinal]
-        had = any(seq_ge(g.ack, sp.hi) for g in rev) or any(
-            seq_le(blo, sp.lo) and seq_le(sp.hi, bhi)
-            for g in rev for (blo, bhi) in g.sack_blocks)
-        # dup-ACK run at this span's left edge (exclude SYN/FIN control frames)
-        dups = sum(1 for g in rev
-                   if g.ack == sp.lo and g.payload_len == 0
-                   and not (g.flags & (dpkt.tcp.TH_SYN | dpkt.tcp.TH_FIN)))
-        sack_above = any(seq_ge(blo, sp.hi) for g in rev for (blo, _bhi) in g.sack_blocks)
-        cumack_at_or_below = bool(rev) and not any(seq_gt(g.ack, sp.lo) for g in rev)
-        if had:
-            state = "already_had"
-        elif cumack_at_or_below and (sack_above or dups >= 3):
-            state = "missing_before"
-        else:
-            state = "unknown"
-        out.append(_dc_replace(sp, receiver_state=state))
+        ri = rev_idx.get(sp.src)
+        out.append(_dc_replace(sp, receiver_state=_recv_state_one(sp, fr, ri)))
     return out
+
+
+def _recv_state_one(sp: SpanObs, fr: Frame, ri: _RevIndex | None) -> Literal["missing_before", "already_had", "unknown"]:
+    if ri is None:
+        return "unknown"
+    cut = bisect.bisect_left(ri.ords, fr.ordinal)       # prefix = reverse frames with ordinal < fr.ordinal
+    if cut == 0:
+        return "unknown"
+    max_ack = ri.max_ack[cut - 1]
+    sacks_prefix = [blk for (o, blk) in ri.sack_frames if o < fr.ordinal]
+    had = seq_ge(max_ack, sp.hi) or any(
+        seq_le(blo, sp.lo) and seq_le(sp.hi, bhi)
+        for blocks in sacks_prefix for (blo, bhi) in blocks)
+    if had:
+        return "already_had"
+    dlist = ri.dup_ords.get(sp.lo, ())
+    dups = bisect.bisect_left(dlist, fr.ordinal) if dlist else 0
+    sack_above = any(seq_ge(blo, sp.hi)
+                     for blocks in sacks_prefix for (blo, _bhi) in blocks)
+    cumack_at_or_below = not seq_gt(max_ack, sp.lo)     # prefix non-empty (cut>0)
+    if cumack_at_or_below and (sack_above or dups >= 3):
+        return "missing_before"
+    return "unknown"
 
 
 def duplicate_observation(frames: list[Frame], spans: list[SpanObs],
@@ -438,14 +480,18 @@ def _rto_or_loss(sp: SpanObs, fr: Frame, frames: list[Frame], rtt: float | None)
 
 
 def _recovery_trigger(sp: SpanObs, frames: list[Frame], by_ord: dict[int, Frame],
-                      rtt: float | None) -> SpanObs:
+                      rev_idx: dict, rtt: float | None) -> SpanObs:
     if sp.copy_status != "retransmission":
         return sp
     fr = by_ord[sp.frame_ordinal]
-    rev = [g for g in frames if g.src == sp.dst and g.dst == sp.src and g.ordinal < fr.ordinal]
-    dups = sum(1 for g in rev if g.ack == sp.lo and g.payload_len == 0
-               and not (g.flags & (dpkt.tcp.TH_SYN | dpkt.tcp.TH_FIN)))
-    sack_above = any(seq_ge(blo, sp.hi) for g in rev for (blo, _e) in g.sack_blocks)
+    ri = rev_idx.get(sp.src)
+    dups, sack_above = 0, False
+    if ri is not None:
+        dlist = ri.dup_ords.get(sp.lo, ())
+        dups = bisect.bisect_left(dlist, fr.ordinal) if dlist else 0
+        sack_above = any(seq_ge(blo, sp.hi)
+                         for (o, blocks) in ri.sack_frames if o < fr.ordinal
+                         for (blo, _e) in blocks)
     if dups >= 3 or sack_above:
         ev = ("dupack_run",) if dups >= 3 else ("sack_hole",)
         return _dc_replace(sp, recovery_trigger="fast_ack", evidence=sp.evidence + ev)
@@ -453,11 +499,11 @@ def _recovery_trigger(sp: SpanObs, frames: list[Frame], by_ord: dict[int, Frame]
 
 
 def _timing(frames: list[Frame], spans: list[SpanObs], by_ord: dict[int, Frame],
-            succ: dict[tuple[str, int], int], rtt: float | None) -> list[SpanObs]:
+            succ: dict[tuple[str, int], int], rev_idx: dict, rtt: float | None) -> list[SpanObs]:
     out: list[SpanObs] = []
     for sp in spans:
         sp = _late_original(sp, by_ord, succ, rtt)
-        sp = _recovery_trigger(sp, frames, by_ord, rtt)
+        sp = _recovery_trigger(sp, frames, by_ord, rev_idx, rtt)
         out.append(sp)
     return out
 
@@ -494,13 +540,22 @@ def _dsack_pass(frames: list[Frame], spans: list[SpanObs]) -> list[SpanObs]:
 
 
 def _tier_one(sp: SpanObs) -> Tier:
+    # tier = confidence in the copy_status verdict (conclusiveness of evidence type), NOT
+    # reorder-disambiguation depth. Direct evidence (byte-overlap / already_had) floors hi;
+    # a corroborator lifts an *inferred* verdict only when it agrees with it.
     if sp.copy_status == "unknown":
         return "lo"
-    corroborated = (sp.receiver_state in ("missing_before", "already_had")
-                    or sp.receiver_duplicate_reported == "yes")
-    if sp.generation_order in ("after_successor", "before_successor"):
-        return "hi" if corroborated else "med"
-    return "med" if corroborated else "lo"
+    if sp.copy_status == "retransmission" and (
+            "overlaps_seen" in sp.evidence or sp.receiver_state == "already_had"):
+        return "hi"                                       # bytes/receiver settle it directly
+    if sp.copy_status == "probable_capture_duplicate":
+        return "med"                                      # positive fingerprint, tap-vs-wire ambiguous
+    if sp.copy_status == "retransmission":                # inferred: fills_gap after_successor
+        return "hi" if (sp.receiver_state == "missing_before"
+                        or sp.receiver_duplicate_reported == "yes") else "med"
+    # copy_status == "original": late-original is the only non-default. A missing_before here
+    # CONTRADICTS the late-original reading (false-fast-retransmit setup), so it must NOT lift it.
+    return "med" if "late_original" in sp.evidence else "lo"
 
 
 def _tier(spans: list[SpanObs]) -> list[SpanObs]:
@@ -516,7 +571,8 @@ def infer(frames: list[Frame], spans: list[SpanObs], *, rtt: float | None = None
     succ = _successor_map(spans)
     spans = _generation_order(spans, by_ord, succ)
     spans = _copy_status(spans)
-    spans = _timing(frames, spans, by_ord, succ, rtt)
+    rev_idx = _reverse_index(frames)
+    spans = _timing(frames, spans, by_ord, succ, rev_idx, rtt)
     spans = _dsack_pass(frames, spans)
     spans = _tier(spans)
     return spans

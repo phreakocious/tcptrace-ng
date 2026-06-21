@@ -41,6 +41,7 @@ class _State:
         self.sort_key: str = "n"
         self.analyses: dict[int, AnalyzeResult] = {}
         self.findings: dict[int, list[Finding]] = {}
+        self.reorder: dict[int, object] = {}   # n -> ReorderResult | None (Plan 3; consumed by Plan 4)
         self.figure_cache: dict[tuple, object] = {}
         self.timeout: float = 60.0
         self.debug: bool = False

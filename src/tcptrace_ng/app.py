@@ -42,6 +42,7 @@ from .plotly_adapter import (
     to_throughput_figure,
     to_tsg_figure,
 )
+from .reorder_pipeline import classify_connection_pure
 from .runner import (
     AnalyzeResult,
     RunnerError,
@@ -584,6 +585,25 @@ def build_page() -> None:
             main.show_pending(n, "synthesizing")
             await asyncio.sleep(0)
             tsg_pair = await _ensure_tsg_pair(n, header.refresh_warnings)
+            # Phase 2.5: reorder classification (data layer; cached for Plan-4 presentation).
+            if n not in state.reorder and state.selected_pcap is not None:
+                _row = next((r for r in state.stats if r.n == n), None)
+                _stats_row = next(
+                    (r for r in state.stats if isinstance(r, ConnStats) and r.n == n), None
+                )
+                if _row is not None:
+                    _layout = CacheLayout(state.selected_pcap)
+                    try:
+                        state.reorder[n] = await run.cpu_bound(
+                            classify_connection_pure,
+                            _layout.decap_pcap,
+                            state.selected_pcap,
+                            _row.host_a,
+                            _row.host_b,
+                            _stats_row,
+                        )
+                    except Exception:
+                        state.reorder[n] = None
             # Phase 3: diagnosing.
             if n not in state.findings:
                 main.show_pending(n, "diagnosing")
@@ -616,6 +636,7 @@ def build_page() -> None:
             state.stats = []
             state.analyses = {}
             state.findings = {}
+            state.reorder = {}
             state.figure_cache = {}
             state.conn_filter = ""
             sidebar.filter_input.set_value("")
