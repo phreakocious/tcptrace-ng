@@ -360,6 +360,7 @@ def _detect_cliffs(
 ) -> list[Cliff]:
     raw_cliffs: list[Cliff] = []
     anom_times = [a.time for a in tsg.anomalies]
+    seg_times = [s.time for s in tsg.segments]
     in_flight_times = [t for t, _ in tsg.in_flight]
     in_flight_values = [b for _, b in tsg.in_flight]
 
@@ -370,6 +371,13 @@ def _detect_cliffs(
             continue
         drop_frac = 1.0 - after / before
         if drop_frac < 0.5:
+            continue
+
+        # A rate needs a few segments behind it. One or two segments in the
+        # before windows turn a lone request into a "-100%" cliff.
+        lo = bisect.bisect_left(seg_times, samples[i - 2].t - window_s / 2.0)
+        hi = bisect.bisect_left(seg_times, samples[i - 1].t + window_s / 2.0)
+        if hi - lo < 4:
             continue
 
         t_c = samples[i].t
@@ -388,6 +396,22 @@ def _detect_cliffs(
         ai_lo = bisect.bisect_left(anom_times, search_lo)
         ai_hi = bisect.bisect_right(anom_times, search_hi)
         nearby = [a for a in tsg.anomalies[ai_lo:ai_hi] if a.kind in _CLIFF_KINDS]
+
+        # The sender ran out of data rather than being held back: it stops
+        # sending within the cliff's neighborhood (end of transfer, or the
+        # capture ends mid-flight), or its pipe empties before its next send
+        # (an ACK held back past the drop) or within the neighborhood (a
+        # straggler just after the drop). A nearby loss keeps the cliff: RTO
+        # recovery empties the pipe too, when the retransmit's ACK covers
+        # everything.
+        if not any(a.kind in _CLIFF_LOSS_KINDS for a in nearby):
+            if bisect.bisect_right(seg_times, search_hi) == len(seg_times):
+                continue
+            next_send = seg_times[bisect.bisect_right(seg_times, t_c)]
+            fi_lo = bisect.bisect_right(in_flight_times, t_c)
+            fi_hi = bisect.bisect_left(in_flight_times, max(next_send, search_hi))
+            if 0 in in_flight_values[fi_lo:fi_hi]:
+                continue
 
         cause: Literal["post-loss", "rwin-shrink", "unknown"]
         if nearby:

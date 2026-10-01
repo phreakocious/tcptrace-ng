@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from tcptrace_ng.tcp_inspect import Ack, Anomaly, Segment, TsgModel, TsgModelPair
+from tcptrace_ng.tcp_inspect import (
+    Ack,
+    Anomaly,
+    Segment,
+    TsgModel,
+    TsgModelPair,
+    _compute_in_flight,
+)
 from tcptrace_ng.throughput import (
     DirectionSummary,
     ThroughputModelPair,
@@ -661,8 +668,10 @@ def test_cliff_dedup_keeps_deeper_drop():
         seq = end
         t += 0.050
 
-    # 4 very-low-rate segments (deep cliff candidate, within window_s of shallow one)
-    for _ in range(4):
+    # Very-low-rate segments (deep cliff candidate, within window_s of shallow one).
+    # 12, not 4: the transfer must outlast the cliff's 2*window_s neighborhood, or
+    # the drop reads as end-of-transfer and is suppressed.
+    for _ in range(12):
         end = seq + bytes_deep
         segs.append(
             _seg(
@@ -690,6 +699,71 @@ def test_cliff_dedup_keeps_deeper_drop():
     assert cliffs[0].drop_frac > 0.70, (
         f"expected deep cliff (drop_frac>0.70), got {cliffs[0].drop_frac}"
     )
+
+
+def _flow(sends, anomalies=None) -> TsgModel:
+    """sends: (time, nbytes, ack_time | None). In-flight is replayed by the
+    synthesizer's own _compute_in_flight, so drain timing matches real captures."""
+    segs, acks, seq = [], [], 0
+    for t, n, ack_t in sends:
+        rtt = (ack_t - t) * 1000.0 if ack_t is not None else None
+        segs.append(_seg(t, seq, seq + n, paired_ack_time=ack_t, paired_rtt_ms=rtt))
+        if ack_t is not None:
+            acks.append(_ack(ack_t, seq + n))
+        seq += n
+    acks.sort(key=lambda a: a.time)
+    in_flight, segs = _compute_in_flight(segs, acks)
+    return TsgModel(
+        direction="a2b", segments=segs, acks=acks, in_flight=in_flight, anomalies=anomalies or []
+    )
+
+
+# 10 KB/s for 0.5 s at a 50 ms RTT (window_s 0.2); the last segment is left to each case.
+_BURST = [(1.0 + 0.05 * k, 512, 1.05 + 0.05 * k) for k in range(9)]
+# Resumed sending well after the burst, below the 1 KB/s noise floor so it can't cliff itself.
+_LATER = [(4.0 + 0.05 * k, 32, 4.05 + 0.05 * k) for k in range(4)]
+
+
+@pytest.mark.parametrize(
+    "sends",
+    [
+        # Transfer (or capture) ends; the last segment is never ACKed, so in-flight
+        # never drains and that segment never counts as goodput.
+        pytest.param([*_BURST, (1.45, 512, None)], id="tail-unacked"),
+        # An ACK holds the last segment ~0.8 s, past 2*window_s after the drop, then
+        # the sender idles (firmware_flash, where a 200 ms delayed ACK did it).
+        pytest.param([*_BURST, (1.45, 512, 2.25), *_LATER], id="delayed-ack-hold"),
+        # A straggler goes out just after the drop; the pipe empties ~1 RTT later
+        # (config_change). The drop lands at t=1.6, so the straggler is the next send.
+        pytest.param(
+            [*_BURST, (1.45, 512, 1.70), (1.65, 64, 1.75), *_LATER], id="straggler-then-drain"
+        ),
+        # Two segments are not a rate; the second waits on an ACK past the next send.
+        pytest.param([(1.0, 300, 1.05), (1.05, 300, None), (8.0, 300, 8.05)], id="too-few-segs"),
+    ],
+)
+def test_cliff_suppressed_when_sender_stops(sends):
+    """A goodput drop because the sender ran out of data is not a cliff. 167 of 176
+    cliffs across the in-repo captures were this shape, mostly '-100% (unknown)'."""
+    result = synthesize_throughput(_pair(fwd=_flow(sends)))
+    assert result.fwd.cliffs == ()
+
+
+def test_cliff_kept_when_pipe_stays_full():
+    # Rate falls 94% with data outstanding throughout: the network, not the sender.
+    sends = [(1.0 + 0.05 * k, 512, 1.06 + 0.05 * k) for k in range(10)]
+    sends += [(1.5 + 0.05 * k, 32, 1.56 + 0.05 * k) for k in range(20)]
+    cliffs = synthesize_throughput(_pair(fwd=_flow(sends))).fwd.cliffs
+    assert [c.cause_hint for c in cliffs] == ["unknown"]
+
+
+def test_cliff_kept_after_loss_even_if_pipe_drains():
+    # RTO recovery: the retransmit's ACK covers everything, so in-flight touches 0.
+    rto = Anomaly(time=1.55, kind="rto", one_liner="rto retransmit", seq_lo=4608, seq_hi=5120)
+    sends = [*_BURST, (1.45, 512, 1.70)]
+    sends += [(1.75 + 0.05 * k, 32, 1.8 + 0.05 * k) for k in range(20)]
+    cliffs = synthesize_throughput(_pair(fwd=_flow(sends, [rto]))).fwd.cliffs
+    assert [c.cause_hint for c in cliffs] == ["post-loss"]
 
 
 # ---------------------------------------------------------------------------
