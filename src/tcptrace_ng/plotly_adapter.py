@@ -895,7 +895,7 @@ def _ack_customdata(
     return out
 
 
-# rwnd lives on the yellow rwin line and is redundant on ACKs (TODO.md item 2).
+# rwnd lives on the yellow rwin line and is redundant on ACKs.
 _TSG_ACK_TEMPLATE = "<b>ACK for seq %{customdata[0]:,.0f}</b>%{customdata[3]}<extra></extra>"
 
 
