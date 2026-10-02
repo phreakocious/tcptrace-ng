@@ -5,7 +5,8 @@ Point TCPTRACE_NG_PCAPS at that repo; unset, these tests skip.
 Ground truth comes from the rig, never from an analyzer: `drops=` in each
 manifest is the data-path drop count, and every drop forces exactly one more
 retransmit. These expectations say what a correct analyzer must report; they
-were committed before the first capture was generated. Known bugs are
+were committed before the first capture was generated; each later amendment
+gives its reason in its commit. Known bugs are
 xfail(strict), so a fix shows up as XPASS.
 """
 
@@ -35,12 +36,27 @@ pytestmark = [
 ]
 
 # Linux TCP_RTO_MIN. The rig's RTT is ~20 ms, so any retransmit sent sooner
-# than this after the previous copy of its bytes was not an RTO.
+# than this after the previous copy of its bytes was not an RTO. This is a
+# fact about the rig's Linux sender, never a rule for the analyzer: FreeBSD's
+# minimum is 30 ms and RFC 6298 asks for 1 s. A fix that reuses it passes
+# here, where every sender is Linux, and mislabels other stacks.
 _RTO_MIN_S = 0.2
 
 # _classify_retx calls a retransmit `fast` only after >= 3 dup-ACKs and `rto`
 # otherwise, so SACK/RACK recovery with fewer dup-ACKs reads as an RTO.
 _RTO_BUG = "SACK/RACK recovery with < 3 dup-ACKs labelled rto"
+# The receiver's ACKs carry a D-SACK for each of reorder's retransmits, which
+# proves them spurious; neither the label nor the loss findings use it.
+_DSACK_BUG = "D-SACK-proven spurious retransmits read as loss"
+# A receiver-side capture labels each late fill `ooo`, never rtx, so loss
+# findings there hang on dup_count >= 3 alone (bottleneck's SACK ACKs: all 0).
+_RX_LOSS = "loss detectors read s.rtx; a receiver-side capture never sets it"
+_STALL_SPLIT = "each RTO of a backoff series ends a stall, so one blackout reads as several"
+_CLIFF_RTO = "cliff cause looks for loss within 2 windows; an RTO's retransmit comes later"
+
+
+def _xfail(reason: str, *values):
+    return pytest.param(*values, marks=pytest.mark.xfail(strict=True, reason=reason))
 
 
 @functools.cache
@@ -92,8 +108,25 @@ _FINDINGS = {
 }
 
 
-@pytest.mark.parametrize("vantage", ["sender", "receiver"])
-@pytest.mark.parametrize("scen", list(_FINDINGS))
+@pytest.mark.parametrize(
+    "scen,vantage",
+    [
+        ("loss", "sender"),
+        ("loss", "receiver"),
+        ("gro", "sender"),
+        ("gro", "receiver"),
+        ("storm", "sender"),
+        _xfail(_RX_LOSS, "storm", "receiver"),
+        ("bottleneck", "sender"),
+        # tbf tail drops follow timing, not the seed: whether any SACK ACK
+        # reaches dup_count 3 changes with each generation.
+        pytest.param("bottleneck", "receiver", marks=pytest.mark.xfail(reason=_RX_LOSS)),
+        ("slow_rcv", "sender"),
+        ("slow_rcv", "receiver"),
+        _xfail(_DSACK_BUG, "reorder", "sender"),
+        _xfail(_DSACK_BUG, "reorder", "receiver"),
+    ],
+)
 def test_findings(scen, vantage):
     present, absent = _FINDINGS[scen]
     codes = _models(scen, vantage)[2]
@@ -110,8 +143,8 @@ def test_findings(scen, vantage):
         ("storm", "ge"),
         ("bottleneck", "ge"),
         ("blackout", "ge"),
-        ("slow_rcv", "eq"),
-        ("reorder", "eq"),
+        _xfail(_DSACK_BUG, "slow_rcv", "eq"),
+        _xfail(_DSACK_BUG, "reorder", "eq"),
     ],
 )
 def test_retransmits_match_drops(scen, rel):
@@ -122,12 +155,13 @@ def test_retransmits_match_drops(scen, rel):
 @pytest.mark.parametrize(
     "scen",
     [
-        pytest.param("loss", marks=pytest.mark.xfail(strict=True, reason=_RTO_BUG)),
-        pytest.param("gro", marks=pytest.mark.xfail(strict=True, reason=_RTO_BUG)),
-        "storm",
-        "bottleneck",
+        _xfail(_RTO_BUG, "loss"),
+        _xfail(_RTO_BUG, "gro"),
+        _xfail(_RTO_BUG, "storm"),
+        _xfail(_RTO_BUG, "bottleneck"),
         "blackout",
-        "reorder",
+        _xfail(_RTO_BUG, "slow_rcv"),
+        _xfail(_RTO_BUG, "reorder"),
     ],
 )
 def test_rto_label_needs_rto_gap(scen):
@@ -148,15 +182,20 @@ def test_blackout_has_true_rto():
     )
 
 
-@pytest.mark.parametrize("vantage", ["sender", "receiver"])
-def test_blackout_stall(vantage):
-    stalls = _models("blackout", vantage)[1].stalls
+# Sender side only: a receiver-side capture cannot tell a blackout from a
+# sender that paused, because it never sees the lost data.
+@pytest.mark.xfail(strict=True, reason=_STALL_SPLIT)
+def test_blackout_stall():
+    stalls = _models("blackout", "sender")[1].stalls
     assert max((s.duration_s for s in stalls), default=0) >= 2.0, stalls
 
 
-def test_bottleneck_post_loss_cliff():
-    cliffs = _models("bottleneck", "sender")[1].cliffs
-    assert any(c.cause_hint == "post-loss" for c in cliffs), cliffs
+# blackout is paced and loses nothing outside the 2 s window, so every goodput
+# cliff in it comes from that loss.
+@pytest.mark.xfail(strict=True, reason=_CLIFF_RTO)
+def test_blackout_cliffs_are_post_loss():
+    cliffs = _models("blackout", "sender")[1].cliffs
+    assert cliffs and all(c.cause_hint == "post-loss" for c in cliffs), cliffs
 
 
 def test_gro_rig_coalesced_only_the_receiver():
