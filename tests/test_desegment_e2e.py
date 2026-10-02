@@ -100,3 +100,34 @@ def test_fabricated_segments_tagged_through_pipeline(tmp_path):
     data = [s for m in (pair.fwd, pair.bwd) if m for s in m.segments if s.seq_end > s.seq_start]
     assert len(fab) == 60, f"expected all 60 pieces tagged, got {len(fab)}"
     assert len(fab) == len(data), "every data segment should be a fabricated piece"
+
+
+@pytest.mark.skipif(not _HAVE_TCPTRACE, reason="tcptrace binary not available")
+def test_zero_length_tso_frame_reaches_the_model(tmp_path):
+    """Through real tcptrace: a sub-MTU send captured TX-side with a 0 total
+    length (email1a has one) was dropped as "too short", taking its bytes out
+    of every count. It must reach the model."""
+    import dpkt
+
+    from tests.diag_pipeline import build_models
+
+    fl = TcpFlow()
+    t = fl.handshake(0.0, rtt=0.04)
+    for _ in range(3):
+        fl.send(t, "s", 1000)
+        fl.ack(t + 0.001, "c")
+        t += 0.02
+    src = fl.write(tmp_path / "zl_in.pcap")
+    with src.open("rb") as f:
+        frames = list(open_reader(f))
+    data_idx = [i for i, (_ts, b) in enumerate(frames) if _tcp_payload_len(b) == 1000]
+    ts, buf = frames[data_idx[1]]
+    frames[data_idx[1]] = (ts, buf[:16] + b"\x00\x00" + buf[18:])
+    pcap = tmp_path / "zl.pcap"
+    with pcap.open("wb") as f:
+        w = dpkt.pcap.Writer(f, linktype=1)
+        for ts, buf in frames:
+            w.writepkt(buf, ts)
+    _, tsg, _, _ = build_models(pcap, out_dir=tmp_path / "o")
+    data_model = tsg.bwd  # server -> client
+    assert sum(s.seq_end - s.seq_start for s in data_model.segments) == 3000

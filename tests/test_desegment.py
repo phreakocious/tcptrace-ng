@@ -121,3 +121,26 @@ def test_desegment_passes_through_residual_and_control(tmp_path):
     assert 8000 in _payloads(out)  # untouched
     assert res.frames_split == 0
     assert res.residual_conns == {frozenset({("10.0.0.2", 443), ("10.0.0.1", 50000)})}
+
+
+def test_desegment_restores_zero_ip_length_on_passthrough(tmp_path):
+    """A residual super-segment (MSS unknown) passes through unsplit, but with
+    its 0 total length rewritten: tcptrace trims a packet to ip.len and would
+    drop it as too short (firmware_download frame 1180)."""
+    fl = TcpFlow()
+    fl.send(0.0, "s", 8000)  # no SYN, no full-size sample -> residual
+    src = fl.write(tmp_path / "z_in.pcap")
+    frames = []
+    with src.open("rb") as f:
+        for ts, buf in open_reader(f):
+            frames.append((ts, buf[:16] + b"\x00\x00" + buf[18:]))
+    with src.open("wb") as f:
+        w = dpkt.pcap.Writer(f, linktype=1)
+        for ts, buf in frames:
+            w.writepkt(buf, ts)
+    out = tmp_path / "z.pcap"
+    desegment_pcap(src, out)
+    with out.open("rb") as f:
+        ((_ts, buf),) = list(open_reader(f))
+    ip = dpkt.ethernet.Ethernet(buf).data
+    assert ip.len == ip.hl * 4 + len(ip.data) and len(bytes(ip.data.data)) == 8000

@@ -212,3 +212,23 @@ def test_detect_offload_uses_onwire_len_on_snaplen_truncated_capture(tmp_path):
     rep = detect_offload(pcap)
     assert rep.oversized_segments == 1
     assert rep.max_payload == 30000
+
+
+def _zero_len(frame: bytes) -> bytes:
+    """The IPv4 total-length field zeroed, as a TX-side TSO capture leaves it."""
+    return frame[:16] + b"\x00\x00" + frame[18:]
+
+
+def test_detect_offload_counts_zero_length_frames(tmp_path):
+    """A 0 total length is a pre-segmentation send even under the MTU (email1a
+    has a 1447 B one); tcptrace drops such a frame, so it must trigger desegment."""
+    pcap = _write_pcap(tmp_path, [_tcp_frame(100), _zero_len(_tcp_frame(1447))])
+    rep = detect_offload(pcap)
+    assert (rep.oversized_segments, rep.zero_length_ip) == (0, 1)
+    assert rep.needs_desegment
+
+
+def test_detect_offload_default_scan_reaches_past_1000_frames(tmp_path):
+    """email1a's first offloaded frame is #1224; a 1000-frame probe never saw it."""
+    pcap = _write_pcap(tmp_path, [_tcp_frame(100)] * 1200 + [_tcp_frame(32768)])
+    assert detect_offload(pcap).oversized_segments == 1

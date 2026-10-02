@@ -78,7 +78,7 @@ async def ensure_desegmented(state: _State, src: Path, layout: CacheLayout) -> P
         rep = await run.io_bound(detect_offload, src)
     except Exception:
         return src
-    if rep.oversized_segments == 0:
+    if not rep.needs_desegment:
         return src
     out = layout.desegment_pcap
     if is_fresh(out, src, cache_version(state), layout.version_file):

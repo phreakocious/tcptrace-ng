@@ -38,7 +38,7 @@ def build_models(pcap: Path, conn_n: int = 1, *, out_dir: Path | None = None):
     # Mirror the app: de-coalesce NIC offload (LRO/GRO/TSO) before tcptrace, so
     # e2e fixtures exercise the same wire-plausible segments the UI analyzes.
     # Guarded on detect_offload so non-offload fixtures stay byte-identical.
-    if detect_offload(pcap).oversized_segments > 0:
+    if detect_offload(pcap).needs_desegment:
         deseg = out_dir / "desegment.pcap"
         deseg.parent.mkdir(parents=True, exist_ok=True)
         desegment_pcap(pcap, deseg)

@@ -36,7 +36,9 @@ OFFLOAD_VERSION = "1"
 # all-offloaded — false-flagging every capture in DC/storage environments.
 _STANDARD_MTU_PAYLOAD = 1500
 _MAX_JUMBO_PAYLOAD = 9216
-_SCAN_FRAMES = 1000
+# Same bound as desegment's MSS scan. Offload that first shows past it goes
+# unrepaired (ponytail: scan unbounded if a capture needs it; ~10 us/frame).
+_SCAN_FRAMES = 100_000
 _DLT_EN10MB = 1
 
 
@@ -46,14 +48,21 @@ class OffloadReport:
     tcp_segments: int = 0
     oversized_segments: int = 0
     max_payload: int = 0
+    # IPv4 frames whose total length is 0: a TX-side TSO send captured before
+    # the NIC filled it in. tcptrace drops these as too short, whatever their size.
+    zero_length_ip: int = 0
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def needs_desegment(self) -> bool:
+        return self.oversized_segments > 0 or self.zero_length_ip > 0
 
 
 def detect_offload(pcap_path: Path, max_frames: int = _SCAN_FRAMES) -> OffloadReport:
     """Scan a bounded prefix of `pcap_path` and report NIC offload signs.
 
-    Bounded so this stays a fast pre-flight check; the threshold is picked
-    high enough that a single oversized payload is signal, not noise.
+    Bounded like desegment's own scan; the threshold is picked high enough
+    that a single oversized payload is signal, not noise.
     """
     report = OffloadReport()
     payloads: list[int] = []
@@ -66,9 +75,13 @@ def detect_offload(pcap_path: Path, max_frames: int = _SCAN_FRAMES) -> OffloadRe
                 if i >= max_frames:
                     break
                 report.frames_scanned += 1
-                payload_len = _tcp_payload_len(buf)
-                if payload_len is None:
+                parsed = _tcp_ip(buf)
+                if parsed is None:
                     continue
+                ip, tcp = parsed
+                payload_len = _payload_len(ip, tcp)
+                if isinstance(ip, dpkt.ip.IP) and ip.len == 0:
+                    report.zero_length_ip += 1
                 report.tcp_segments += 1
                 report.max_payload = max(report.max_payload, payload_len)
                 payloads.append(payload_len)
@@ -114,6 +127,12 @@ def _tcp_payload_len(buf: bytes) -> int | None:
     so the TX-side TSO case — where the IP length field can be left 0 for the
     NIC to fill while the full pre-slice payload is captured — is still caught.
     """
+    parsed = _tcp_ip(buf)
+    return None if parsed is None else _payload_len(*parsed)
+
+
+def _tcp_ip(buf: bytes) -> tuple | None:
+    """(ip, tcp) for an Ethernet/IP/TCP frame, else None."""
     try:
         eth = dpkt.ethernet.Ethernet(buf)
     except (dpkt.dpkt.NeedData, dpkt.dpkt.UnpackError):
@@ -124,6 +143,10 @@ def _tcp_payload_len(buf: bytes) -> int | None:
     tcp = ip.data
     if not isinstance(tcp, dpkt.tcp.TCP):
         return None
+    return ip, tcp
+
+
+def _payload_len(ip, tcp) -> int:
     tcp_hdr_len = tcp.off * 4
     if isinstance(ip, dpkt.ip.IP):
         on_wire = ip.len - ip.hl * 4 - tcp_hdr_len

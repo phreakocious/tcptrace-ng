@@ -49,6 +49,7 @@ class DesegmentResult:
     coalesces: list[CoalesceEvent] = field(default_factory=list)
     residual_conns: set = field(default_factory=set)
     kinds: set[str] = field(default_factory=set)
+    frames_len_restored: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -156,14 +157,14 @@ def _split_frame(buf, ts, table: MssTable, result: DesegmentResult):
         return None
     ip, tcp, payload_len = parsed
     if payload_len <= _STANDARD_MTU_PAYLOAD:
-        return None  # not coalesced; control/pure-ack/<=MTU
+        return _restore_ip_len(buf, ip, result)  # not coalesced; control/pure-ack/<=MTU
     sender = _endpoint(ip.src, tcp.sport)
     receiver = _endpoint(ip.dst, tcp.dport)
     mss_info = table.slice_mss(sender, receiver)
     if mss_info is None or payload_len <= mss_info[0]:
         if mss_info is None:
             result.residual_conns.add(_flow_key(ip, tcp))
-        return None
+        return _restore_ip_len(buf, ip, result)
     mss, source = mss_info
     eth = dpkt.ethernet.Ethernet(buf)
     ip = eth.data
@@ -210,6 +211,20 @@ def _split_frame(buf, ts, table: MssTable, result: DesegmentResult):
         )
     )
     return pieces
+
+
+def _restore_ip_len(buf, ip, result: DesegmentResult):
+    """[buf] with a 0 IPv4 total length rewritten from the captured bytes, else
+    None (pass through). A TX-side TSO capture leaves the field 0 for the NIC;
+    tcptrace trims every packet to it and drops the frame as too short."""
+    if not (isinstance(ip, dpkt.ip.IP) and ip.len == 0):
+        return None
+    eth = dpkt.ethernet.Ethernet(buf)
+    eth.data.len = eth.data.hl * 4 + len(eth.data.data)
+    eth.data.sum = 0  # dpkt recomputes on serialize
+    result.frames_len_restored += 1
+    result.kinds.add("lro/gro/tso")
+    return [bytes(eth)]
 
 
 def connection_mss(pcap_path: Path, max_frames: int = _SCAN_FRAMES) -> MssTable:
