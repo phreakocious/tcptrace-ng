@@ -36,6 +36,9 @@ class Stall:
     pending_bytes: int
     rtt_multiple: float
     severity: Literal["info", "warn", "severe"]
+    # The receiver held the sender with a zero window, from the zero-window ACK
+    # to the window update; otherwise the sender had data out and no ACK came.
+    zero_window: bool = False
 
 
 @dataclass(frozen=True)
@@ -332,13 +335,6 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
             continue
 
         rtt_multiple = gap_s / (srtt_ms / 1000.0)
-        if rtt_multiple < 5:
-            severity: Literal["info", "warn", "severe"] = "info"
-        elif rtt_multiple < 10:
-            severity = "warn"
-        else:
-            severity = "severe"
-
         stalls.append(
             Stall(
                 t_start=seg_a.time,
@@ -346,10 +342,55 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
                 duration_s=gap_s,
                 pending_bytes=pending,
                 rtt_multiple=rtt_multiple,
-                severity=severity,
+                severity=_stall_severity(rtt_multiple),
             )
         )
 
+    return stalls
+
+
+def _stall_severity(rtt_multiple: float) -> Literal["info", "warn", "severe"]:
+    if rtt_multiple < 5:
+        return "info"
+    if rtt_multiple < 10:
+        return "warn"
+    return "severe"
+
+
+def _detect_zero_window_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
+    """Each zero-window episode, from the zero-window ACK to the window update
+    that reopens it. In-flight is usually 0 throughout, which _detect_stalls
+    reads as the sender idling. Shorter than max(3×RTT, 200 ms) is flow control
+    doing its job. An episode the capture never sees reopen is skipped: at the
+    end of a transfer it is benign (spec D-ZWIN)."""
+    # ponytail: an unterminated episode with the sender probing is a real hang
+    # this skips; count probe segments to tell it from the benign case if one shows up.
+    stalls: list[Stall] = []
+    inf_times = [t for t, _ in tsg.in_flight]
+    closed_at: float | None = None
+    for a in tsg.acks:
+        if not a.rwin_known:
+            continue
+        if a.rwin == 0:
+            closed_at = a.time if closed_at is None else closed_at
+            continue
+        if closed_at is None:
+            continue
+        dur = a.time - closed_at
+        if dur >= max(3.0 * rtt_min_s, 0.200):
+            idx = bisect.bisect_right(inf_times, closed_at) - 1
+            stalls.append(
+                Stall(
+                    t_start=closed_at,
+                    t_end=a.time,
+                    duration_s=dur,
+                    pending_bytes=tsg.in_flight[idx][1] if idx >= 0 else 0,
+                    rtt_multiple=dur / rtt_min_s,
+                    severity=_stall_severity(dur / rtt_min_s),
+                    zero_window=True,
+                )
+            )
+        closed_at = None
     return stalls
 
 
@@ -490,7 +531,10 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
         (rtt_min_fallback_ms / 1000.0) if rtt_min_fallback_ms is not None else rtt_min_s, 0.001
     )
     samples = _emit_samples(tsg, window_s, stride_s, t_start, t_end, base_rtt_s)
-    stalls = _detect_stalls(tsg, rtt_min_s)
+    stalls = sorted(
+        _detect_stalls(tsg, rtt_min_s) + _detect_zero_window_stalls(tsg, rtt_min_s),
+        key=lambda s: s.t_start,
+    )
     cliffs = _detect_cliffs(samples, tsg, window_s)
 
     total_payload = sum(

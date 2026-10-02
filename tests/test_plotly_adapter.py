@@ -1699,6 +1699,15 @@ class TestThroughputFigure:
         assert alphas[1] == pytest.approx(0.15)
         assert alphas[2] == pytest.approx(0.22)
 
+    def test_zero_window_stall_names_its_cause(self):
+        """A zero-window pause is the receiver holding the sender; labelled a bare
+        'stall' it reads as the network blocking it."""
+        zw = Stall(**{**_stall().__dict__, "zero_window": True})
+        model = _tput_model(samples=(_sample(1.0),), stalls=(zw, _stall(t_start=3.0)))
+        fig = to_throughput_figure(ThroughputModelPair(fwd=model))
+        texts = [t["text"] for t in fig["data"] if t.get("name") == "stall"]
+        assert texts == ["zero window 500ms (6.0×RTT)", "stall 500ms (6.0×RTT)"]
+
     def test_show_info_false_hides_info_stall(self):
         model = _tput_model(
             samples=(_sample(1.0),),

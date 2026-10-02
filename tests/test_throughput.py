@@ -436,6 +436,47 @@ def test_stall_baseline_uses_rtt_min_not_gap_terminating_rtt():
     assert stalls[0].severity == "severe"
 
 
+def _zero_window_flow(closed_s: float | None) -> TsgModel:
+    """RTT 50 ms. The receiver ACKs everything with a zero window at 1.10 and
+    reopens it closed_s later with a pure window update; the sender resumes
+    1 RTT after that. closed_s=None: the window never reopens."""
+    segs = [
+        _seg(1.00, 0, 1000, paired_ack_time=1.05, paired_rtt_ms=50.0),
+        _seg(1.05, 1000, 2000, paired_ack_time=1.10, paired_rtt_ms=50.0),
+    ]
+    acks = [_ack(1.05, 1000), _ack(1.10, 2000, rwin=0)]
+    if closed_s is not None:
+        reopen = 1.10 + closed_s
+        segs.append(
+            _seg(reopen + 0.05, 2000, 3000, paired_ack_time=reopen + 0.10, paired_rtt_ms=50.0)
+        )
+        acks += [_ack(reopen, 2000), _ack(reopen + 0.10, 3000)]
+    in_flight, segs = _compute_in_flight(segs, acks)
+    return TsgModel(direction="a2b", segments=segs, acks=acks, in_flight=in_flight)
+
+
+def test_zero_window_episode_is_a_stall():
+    """In-flight is 0 across a zero window, so the drain check reads the pause as
+    the sender idling. It is the receiver holding the sender: a stall from the
+    zero-window ACK to the window update (spec D-ZWIN)."""
+    stalls = synthesize_throughput(_pair(fwd=_zero_window_flow(1.5))).fwd.stalls
+    assert len(stalls) == 1
+    assert stalls[0].zero_window is True
+    assert stalls[0].t_start == pytest.approx(1.10)
+    assert stalls[0].t_end == pytest.approx(2.60)
+    assert stalls[0].rtt_multiple == pytest.approx(1.5 / 0.05)
+
+
+def test_transient_zero_window_is_not_a_stall():
+    """30 ms of zero window is flow control doing its job (spec D-ZWIN negative)."""
+    assert synthesize_throughput(_pair(fwd=_zero_window_flow(0.030))).fwd.stalls == ()
+
+
+def test_zero_window_that_never_reopens_is_not_a_stall():
+    """A zero window at the end of the transfer is benign (spec D-ZWIN FP guard)."""
+    assert synthesize_throughput(_pair(fwd=_zero_window_flow(None))).fwd.stalls == ()
+
+
 # ---------------------------------------------------------------------------
 # Cliff detection
 # ---------------------------------------------------------------------------

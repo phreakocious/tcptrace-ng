@@ -1893,7 +1893,8 @@ def _stall_traces(
         if show:
             legend_seen.add("stall")
         dur_ms = stall.duration_s * 1000.0
-        text = f"stall {dur_ms:.0f}ms ({stall.rtt_multiple:.1f}×RTT)"
+        what = "zero window" if stall.zero_window else "stall"
+        text = f"{what} {dur_ms:.0f}ms ({stall.rtt_multiple:.1f}×RTT)"
         t0 = _epoch_to_iso(stall.t_start)
         t1 = _epoch_to_iso(stall.t_end)
         out.append(
