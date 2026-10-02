@@ -278,6 +278,46 @@ def _sack_confirmed_loss(tsg: TsgModelPair | None) -> list[Finding]:
     return out
 
 
+def _zero_window(tput: ThroughputModelPair | None) -> list[Finding]:
+    """D-ZWIN: the receiver's zero window held the sender past max(3×RTT, 200 ms).
+    The episodes are throughput's zero-window stalls; shorter ones are flow
+    control and never become stalls."""
+    if tput is None:
+        return []
+    out: list[Finding] = []
+    for model, scope in ((tput.fwd, "a2b"), (tput.bwd, "b2a")):
+        zw = [s for s in model.stalls if s.zero_window] if model is not None else []
+        if not zw:
+            continue
+        worst = max(zw, key=lambda s: s.duration_s)
+        longest = f"{worst.duration_s * 1000:.0f} ms ({worst.rtt_multiple:.0f}×RTT)"
+        total_ms = sum(s.duration_s for s in zw) * 1000
+        span = (
+            f"for {longest}"
+            if len(zw) == 1
+            else f"{len(zw)} times, longest {longest}, {total_ms:.0f} ms in all"
+        )
+        out.append(
+            Finding(
+                code="zero_window",
+                severity="bad",
+                scope=scope,  # type: ignore[arg-type]
+                headline="Receiver zero window held the sender",
+                detail=(
+                    f"{model.dst} advertised a zero window {span}; the receiving "
+                    f"application was not draining its socket."
+                ),
+                evidence={
+                    "episodes": len(zw),
+                    "longest_ms": worst.duration_s * 1000,
+                    "total_ms": total_ms,
+                    "rtt_multiple": worst.rtt_multiple,
+                },
+            )
+        )
+    return out
+
+
 def diagnose(
     stats: ConnStats | None,
     tsg: TsgModelPair | None,
@@ -288,8 +328,8 @@ def diagnose(
 ) -> list[Finding]:
     """Return the Findings for one connection, sorted by descending severity.
 
-    `tput`, `offload`, and `csum_events` are accepted but not yet consumed — they
-    are reserved for follow-on detectors (throughput pathologies; the
+    `tput` feeds `zero_window`. `offload` and `csum_events` are accepted but not
+    yet consumed — they are reserved for follow-on detectors (the
     `capture_quality` finding; checksum findings). NOTE the `loss_storm` offload
     *gate* is model-internal (`_direction_is_coalesced` reads the per-direction
     TsgModel); the `offload` param here is the pcap-wide report destined for the
@@ -299,5 +339,6 @@ def diagnose(
     findings += _capture_vantage(stats)
     findings += _loss_storm(tsg)
     findings += _sack_confirmed_loss(tsg)
+    findings += _zero_window(tput)
     findings.sort(key=lambda f: _SEVERITY_RANK[f.severity], reverse=True)
     return findings

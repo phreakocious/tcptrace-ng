@@ -372,3 +372,49 @@ def test_direction_is_coalesced_none_mss_backstop():
 
     m = TsgModel(mss=None, segments=[Segment(1.0, 0, 3000, None, None, None, 0)])
     assert _direction_is_coalesced(m) is True
+
+
+# --- zero_window (D-ZWIN) ---
+
+
+def _tput_stalls(*stalls):
+    from tcptrace_ng.throughput import ThroughputModel, _make_summary
+
+    model = ThroughputModel(
+        samples=(),
+        stalls=stalls,
+        cliffs=(),
+        summary=_make_summary([], list(stalls), [], 0, 0, 0),
+        src="10.0.0.1:80",
+        dst="10.0.0.2:51200",
+    )
+    return ThroughputModelPair(fwd=model)
+
+
+def _stall(duration_s, rtt_multiple, zero_window=True):
+    from tcptrace_ng.throughput import Stall
+
+    return Stall(
+        t_start=1.0,
+        t_end=1.0 + duration_s,
+        duration_s=duration_s,
+        pending_bytes=0,
+        rtt_multiple=rtt_multiple,
+        severity="severe",
+        zero_window=zero_window,
+    )
+
+
+def test_zero_window_fires_bad_naming_the_receiver():
+    (f,) = diagnose(None, None, _tput_stalls(_stall(0.326, 23.1)))
+    assert (f.code, f.severity, f.scope) == ("zero_window", "bad", "a2b")
+    assert f.detail.startswith("10.0.0.2:51200 advertised a zero window for 326 ms (23×RTT)")
+
+
+def test_zero_window_reports_count_longest_and_total():
+    (f,) = diagnose(None, None, _tput_stalls(_stall(0.326, 23.1), _stall(0.250, 17.7)))
+    assert "2 times, longest 326 ms (23×RTT), 576 ms in all" in f.detail
+
+
+def test_zero_window_silent_on_a_network_stall():
+    assert diagnose(None, None, _tput_stalls(_stall(0.5, 10.0, zero_window=False))) == []

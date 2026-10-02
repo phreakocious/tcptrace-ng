@@ -131,6 +131,43 @@ def test_e2e_loss_storm_reports_bad_after_desegment(tmp_path):
     assert storm[0].evidence.get("offload_capped") is False
 
 
+def _zero_window_transfer(tmp_path, name, *, closed_s=1.5):
+    """Client-side capture, 40 ms RTT. The server streams 10 MSS; the client's
+    last ACK closes its window; a pure window update reopens it closed_s later;
+    the server resumes one RTT after the update."""
+    fl = TcpFlow()
+    st = fl.handshake(0.0, rtt=0.040) + 0.040
+    for i in range(10):
+        fl.send(st, "s", 1448)
+        fl.ack(st + 0.0001, "c", rwin=0 if i == 9 else None)
+        st += 0.001
+    reopen = st + closed_s
+    fl.ack(reopen, "c")  # window update: cumack unchanged, window back open
+    st = reopen + 0.040
+    for _ in range(4):
+        fl.send(st, "s", 1448)
+        fl.ack(st + 0.0001, "c")
+        st += 0.001
+    fl.fin(st, "s")
+    fl.fin(st + 0.0002, "c")
+    return fl.write(tmp_path / name)
+
+
+def test_e2e_zero_window_fires(tmp_path):
+    """Through real tcptrace: the window update is the only marker of the reopen."""
+    findings = run_pipeline(_zero_window_transfer(tmp_path, "zwin.pcap"))
+    zw = [f for f in findings if f.code == "zero_window"]
+    assert zw, f"expected zero_window, got {_codes(findings)}"
+    assert zw[0].scope == "b2a"
+    assert zw[0].evidence["longest_ms"] == pytest.approx(1500, abs=2)
+    assert zw[0].evidence["rtt_multiple"] == pytest.approx(1.5 / 0.040, rel=0.01)
+
+
+def test_e2e_transient_zero_window_is_silent(tmp_path):
+    findings = run_pipeline(_zero_window_transfer(tmp_path, "zwin30.pcap", closed_s=0.030))
+    assert "zero_window" not in _codes(findings)
+
+
 # --- real-capture regression anchor (local-only; np.pcap is gitignored) ---
 _NP = Path(__file__).resolve().parents[1] / "np.pcap"
 

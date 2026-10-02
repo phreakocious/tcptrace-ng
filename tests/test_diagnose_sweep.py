@@ -16,7 +16,7 @@ import pytest
 from tcptrace_ng.runner import _VENDORED_TCPTRACE
 from tests.diag_pipeline import run_pipeline
 from tests.pcap_synth import TcpFlow
-from tests.test_diagnose_e2e import _bulk_transfer, _codes
+from tests.test_diagnose_e2e import _bulk_transfer, _codes, _zero_window_transfer
 
 pytestmark = pytest.mark.skipif(
     shutil.which("tcptrace") is None and not _VENDORED_TCPTRACE.is_file(),
@@ -48,6 +48,7 @@ def _loss_heavy(tmp_path, name):
 _CASES = [
     ("vantage_clean", _vantage_clean, None),
     ("loss_heavy", _loss_heavy, "loss_storm"),
+    ("zero_window", _zero_window_transfer, "zero_window"),
 ]
 _ALL_PATHOLOGIES = {code for _, _, code in _CASES if code}
 
