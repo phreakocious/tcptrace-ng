@@ -651,6 +651,92 @@ line 1.0 1000 1.0 1100
     assert "zero_win" not in [a.kind for a in pair.fwd.anomalies]
 
 
+# Lifted verbatim from firmware_download.pcapng conn 25 (b2a tsg): the receiver
+# closes its window (rwin 0 at .160394), reopens it with a pure window update
+# (.172458: green dtick, yellow vertical), and the sender resumes at .187432.
+# The remote address is replaced with a documentation one (RFC 5737).
+TSG_ZERO_WINDOW_REOPEN = """\
+timeval double
+title
+203.0.113.1:80_==>_172.20.0.100:51200 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1538186791.160389 2134517785
+uarrow 1538186791.160389 2134519225
+line 1538186791.160389 2134517785 1538186791.160389 2134519225
+white
+darrow 1538186791.160390 2134519225
+uarrow 1538186791.160390 2134520537
+line 1538186791.160390 2134519225 1538186791.160390 2134520537
+atext 1538186791.160394 2134520537 magenta
+Z
+green
+line 1538186791.160315 2134517785 1538186791.160394 2134517785
+line 1538186791.160394 2134517785 1538186791.160394 2134520537
+yellow
+line 1538186791.160315 2134520601 1538186791.160394 2134520601
+line 1538186791.160394 2134520601 1538186791.160394 2134520537
+green
+line 1538186791.160394 2134520537 1538186791.172458 2134520537
+dtick 1538186791.172458 2134520537
+yellow
+line 1538186791.160394 2134520537 1538186791.172458 2134520537
+line 1538186791.172458 2134520537 1538186791.172458 2135692761
+white
+darrow 1538186791.187432 2134520537
+uarrow 1538186791.187432 2134521977
+line 1538186791.187432 2134520537 1538186791.187432 2134521977
+white
+darrow 1538186791.187730 2134521977
+uarrow 1538186791.187730 2134523417
+line 1538186791.187730 2134521977 1538186791.187730 2134523417
+green
+line 1538186791.172458 2134520537 1538186791.187743 2134520537
+line 1538186791.187743 2134520537 1538186791.187743 2134523417
+yellow
+line 1538186791.172458 2135692761 1538186791.187743 2135692761
+line 1538186791.187743 2135692761 1538186791.187743 2135692825
+"""
+
+
+def test_window_update_is_an_ack():
+    """A pure window update moves the window without moving the cumack. tcptrace
+    draws it as a green dtick plus a yellow vertical (trace.c:2326,2343). It is
+    the only record of when a zero window reopened, so it must be an Ack."""
+    pair = synthesize(parse_xpl(TSG_ZERO_WINDOW_REOPEN), None, "")
+    reopen = [a for a in pair.fwd.acks if a.time == 1538186791.172458]
+    assert len(reopen) == 1
+    assert reopen[0].ack_seq == 2134520537
+    assert reopen[0].rwin == 2135692761 - 2134520537
+    assert reopen[0].rwin_known is True
+
+
+def test_dup_ack_with_unchanged_window_is_not_an_ack():
+    """Green dtick plus yellow utick: the window did not move, so this is no
+    window update. Lifted verbatim from the same capture, remote address
+    replaced too."""
+    xpl_text = """\
+timeval double
+title
+203.0.113.1:80_==>_172.20.0.100:51200 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+green
+line 1538186790.918864 2131230265 1538186790.918940 2131230265
+dtick 1538186790.918940 2131230265
+yellow
+line 1538186790.918864 2131296313 1538186790.918940 2131296313
+utick 1538186790.918940 2131296313
+"""
+    pair = synthesize(parse_xpl(xpl_text), None, "")
+    assert not pair.fwd.acks
+
+
 def test_anomaly_ooo_when_seg_seq_below_max_seen():
     xpl_text = """\
 timeval double

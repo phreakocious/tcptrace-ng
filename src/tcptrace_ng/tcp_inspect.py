@@ -404,7 +404,9 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
     green_steps: list[tuple[float, int]] = []  # (time, new_ack_seq)
     green_zero: list[tuple[float, int]] = []  # zero-len verticals — kept for dup-ACK matching
     green_level_at_time: dict[float, int] = {}  # time -> cumack level (flat runs + ticks)
+    green_tick_times: set[float] = set()  # ACKs that held the cumack
     yellow_at_time: dict[float, int] = {}  # time -> rwin top seq
+    yellow_step_times: set[float] = set()  # ACKs that moved the window edge
     dup_labels: dict[tuple[float, int], int] = {}  # (time, seq) -> N from atext
     sack_by_time: dict[float, list[tuple[int, int]]] = {}  # time -> [(lo, hi), ...]
 
@@ -434,6 +436,7 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                 # change between two ACKs (tcptrace omits the vertical then).
                 if _is_vertical(cmd):
                     yellow_at_time[cmd.x1] = int(cmd.y2)
+                    yellow_step_times.add(cmd.x1)
                 else:
                     yellow_at_time.setdefault(cmd.x1, int(cmd.y1))
                     yellow_at_time.setdefault(cmd.x2, int(cmd.y2))
@@ -454,6 +457,7 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
             # one that doesn't advance the cumack. Authoritative level source
             # for synthesizing a D-SACK/dup-ACK that has no green step.
             green_level_at_time.setdefault(cmd.x, int(cmd.y))
+            green_tick_times.add(cmd.x)
         elif isinstance(cmd, Text) and cmd.color == "green":
             label = cmd.label.strip()
             if label.isdigit():
@@ -504,6 +508,22 @@ def _extract_acks(xpl: XplPlot) -> list[Ack]:
                 sack_blocks=tuple(sorted(sack_by_time[t])),
                 dup_count=dup_labels.get((t, ack_seq), 0),
                 rwin_known=rwin_known,
+            )
+        )
+    # Pure window update: the cumack held (green tick) but the window edge moved
+    # (yellow vertical, trace.c:2343). It is the only record of when a zero
+    # window reopened. A tick with an unchanged window is a dup-ACK, not this.
+    have = {a.time for a in acks}
+    for t in sorted((green_tick_times & yellow_step_times) - have):
+        ack_seq = green_level_at_time[t]
+        acks.append(
+            Ack(
+                time=t,
+                ack_seq=ack_seq,
+                rwin=yellow_at_time[t] - ack_seq,
+                rwin_scaled=None,
+                sack_blocks=(),
+                dup_count=0,
             )
         )
     acks.sort(key=lambda a: a.time)
