@@ -29,6 +29,11 @@ from tcptrace_ng.xpl_parser import parse_xpl
 
 
 def run_pipeline(pcap: Path, conn_n: int = 1, *, out_dir: Path | None = None) -> list[Finding]:
+    return build_models(pcap, conn_n, out_dir=out_dir)[-1]
+
+
+def build_models(pcap: Path, conn_n: int = 1, *, out_dir: Path | None = None):
+    """(stats, tsg_pair, tput_pair, findings) — the intermediates run_pipeline discards."""
     out_dir = out_dir or pcap.parent / ".pipeline"
     # Mirror the app: de-coalesce NIC offload (LRO/GRO/TSO) before tcptrace, so
     # e2e fixtures exercise the same wire-plausible segments the UI analyzes.
@@ -59,13 +64,14 @@ def run_pipeline(pcap: Path, conn_n: int = 1, *, out_dir: Path | None = None) ->
     )
     tput_pair = synthesize_throughput(tsg_pair, summary)
 
-    return diagnose(
+    findings = diagnose(
         stats,
         tsg_pair,
         tput_pair,
         offload=detect_offload(pcap),
         csum_events=scan_pcap(pcap),
     )
+    return stats, tsg_pair, tput_pair, findings
 
 
 def conn_count(pcap: Path) -> int:
