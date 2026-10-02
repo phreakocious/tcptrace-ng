@@ -147,7 +147,7 @@ class TsgModel:
     # direction's pure-ACK marker times, this distinguishes a truly-stalled
     # pure-ACK from a coincident-timestamp pure-ACK that advanced alongside a
     # data packet's ACK.
-    non_advancing_ack_times: list[float] = field(default_factory=list)
+    non_advancing_acks: list[tuple[float, bool]] = field(default_factory=list)
     window_scale: int | None = None
     # The MSS that limits this direction's sender (the peer's advertised MSS),
     # or None when tcptrace -l gave no value. Used by diagnose's coalesced gate
@@ -846,33 +846,42 @@ def _extract_flag_events(
     return out
 
 
-def _extract_non_advancing_ack_times(xpl: XplPlot) -> list[float]:
-    """Times where tcptrace marked an ACK event that did not advance cumack.
+def _extract_non_advancing_acks(xpl: XplPlot) -> list[tuple[float, bool]]:
+    """(time, window_held) for each ACK-bearing packet that held the cumack.
+    One entry per packet, so several at one timestamp repeat.
 
-    In tcptrace's TSG xpl, each ACK arrival emits a `green` command pair: a
-    horizontal segment at the prior cumack, then a vertical step (advancing
-    if cumack moved, or a degenerate `line t y t y` "point" if it didn't).
-    When multiple ACK events land at the same wall-clock timestamp, tcptrace
-    chains them by also emitting a "point" between consecutive advancing
-    verticals — purely a drawing connector, NOT a real non-advancing event.
-
-    Distinguishing the two: a zero-length point is a real non-advancing ACK
-    iff the *previous* green command was NOT an advancing vertical. The
-    horizontal-then-point sequence means cumack was stable and another ACK
-    just arrived at the same value; advance-then-point is the connector
-    bridging two advancing ACKs at the same instant.
+    For each ACK, tcptrace draws a green horizontal, then a green dtick when
+    the cumack held (trace.c:2326), then a yellow horizontal and either a
+    yellow utick (window edge held, trace.c:2349) or a yellow vertical (it
+    moved). A zero-length green line is only the horizontal between two ACKs
+    at one timestamp. Data segments that hold the cumack draw the same marks;
+    the caller matches these against pure-ACK packets.
     """
-    out: list[float] = []
-    prev_was_advance = False
+    out: list[tuple[float, bool]] = []
+    held: float | None = None  # a green dtick waiting on its yellow mark
     for cmd in xpl.commands:
-        if not (isinstance(cmd, Line) and cmd.color == "green"):
-            continue
-        is_zero = cmd.x1 == cmd.x2 and cmd.y1 == cmd.y2
-        is_advance = cmd.x1 == cmd.x2 and cmd.y1 != cmd.y2
-        if is_zero and not prev_was_advance:
-            out.append(cmd.x1)
-        prev_was_advance = is_advance
-    out.sort()
+        if isinstance(cmd, Tick) and cmd.color == "green":
+            held = cmd.x
+        elif isinstance(cmd, Tick) and cmd.color == "yellow" and cmd.x == held:
+            out.append((held, True))
+            held = None
+        elif isinstance(cmd, Line) and cmd.y1 != cmd.y2 and cmd.color in ("green", "yellow"):
+            if cmd.color == "yellow" and cmd.x1 == held:
+                out.append((held, False))
+            held = None  # a cumack step, or the window edge moved
+    return out
+
+
+def _new_sack_times(acks: list[Ack]) -> set[float]:
+    """Times of ACKs carrying a SACK block above their cumack that covers
+    octets no earlier SACK block did."""
+    seen: list[tuple[int, int]] = []
+    out: set[float] = set()
+    for a in acks:
+        for lo, hi in a.sack_blocks:
+            if lo > a.ack_seq and not _range_covered(seen, lo, hi):
+                out.add(a.time)
+            _merge_range(seen, lo, hi)
     return out
 
 
@@ -933,8 +942,9 @@ def _classify_pure_acks(pure_ack_times: list[float], opp: TsgModel) -> list[Anom
 
     Returns anomalies of kind `dup_ack` or `partial_ack`:
 
-      dup_ack: the pure-ACK is at a time where no advancing cumack event
-        landed — its ACK field equals the previous ACK from this side.
+      dup_ack: the pure-ACK held the cumack while Y had data outstanding, and
+        either held the window (RFC 5681) or SACKed new octets (RFC 6675).
+        Unlike Wireshark, a repeat with nothing outstanding is not one.
 
       partial_ack: the pure-ACK advances cumack but the new value is still
         below the highest seq Y has sent — analog of Wireshark's
@@ -947,7 +957,12 @@ def _classify_pure_acks(pure_ack_times: list[float], opp: TsgModel) -> list[Anom
 
     ack_times = [a.time for a in opp.acks]
     ack_seqs = [a.ack_seq for a in opp.acks]
-    non_advancing = set(opp.non_advancing_ack_times)
+    # Per packet: a timestamp with one non-advancing ACK and two pure ACKs
+    # (the other advanced) holds one dup-ACK, not two.
+    non_advancing: dict[float, list[bool]] = {}
+    for t, window_held in opp.non_advancing_acks:
+        non_advancing.setdefault(t, []).append(window_held)
+    new_sack = _new_sack_times(opp.acks)
 
     sorted_segs = sorted(opp.segments, key=lambda s: s.time)
     seg_times = [s.time for s in sorted_segs]
@@ -959,14 +974,21 @@ def _classify_pure_acks(pure_ack_times: list[float], opp: TsgModel) -> list[Anom
 
     out: list[Anomaly] = []
     for t in sorted(pure_ack_times):
-        if t in non_advancing:
-            # Non-advancing green event at this time → ACK field equals the
-            # previous one → duplicate ACK. The cumack value the sender saw
-            # is the last advancing one strictly before t.
+        if non_advancing.get(t):
+            window_held = non_advancing[t].pop(0)
+            # The cumack held. The value the sender saw is the last ACK strictly
+            # before t. A duplicate needs the acked side to have data
+            # outstanding (RFC 5681 §2 (a): a keepalive or an idle repeat is
+            # none) and either an unchanged window (5681 (e)) or new SACK
+            # information, which counts even when the window moved (RFC 6675 §2).
             prev_i = bisect.bisect_left(ack_times, t) - 1
             if prev_i < 0:
                 continue
             cumack = ack_seqs[prev_i]
+            j = bisect.bisect_right(seg_times, t) - 1
+            outstanding = (running_max[j] if j >= 0 else 0) > cumack
+            if not (outstanding and (window_held or t in new_sack)):
+                continue
             out.append(
                 Anomaly(
                     time=t,
@@ -1249,7 +1271,7 @@ def _build_model(
         in_flight=in_flight,
         anomalies=anomalies,
         pure_ack_times=_extract_pure_ack_times(xpl),
-        non_advancing_ack_times=_extract_non_advancing_ack_times(xpl),
+        non_advancing_acks=_extract_non_advancing_acks(xpl),
         window_scale=window_scale,
         mss=mss,
         summary=summary,

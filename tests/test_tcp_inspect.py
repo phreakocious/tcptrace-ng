@@ -1141,57 +1141,249 @@ line 1.5 9000 1.5 9100
     assert ws.n_bad_csum == 3
 
 
-def test_dup_ack_cross_direction_from_non_advancing_green_after_horizontal():
-    # Cross-direction setup: b's pure-ACK markers (in b2a xpl) are classified
-    # against a's cumack staircase (in a2b xpl). A pure-ACK at time t whose
-    # opposing staircase has a zero-length green point at t — preceded by a
-    # horizontal, not by an advancing vertical — is a dup-ACK. The anomaly
-    # attaches to the fwd model (where the staircase lives).
+def test_dup_acks_on_a_real_capture():
+    """Lifted verbatim from example_8_dupe_acks.pcapng. b's pure ACKs (white
+    arrow pairs in b2a) hold the cumack where a2b shows a green dtick then a
+    yellow utick: cumack and window both held (trace.c:2326,2349).
+    - .133063 (frame 26): a dup-ACK; a has 1145578986..1145581598 outstanding.
+      The other pure ACK at .133063 advances.
+    - .040028 (frame 170): tshark calls it a dup-ACK, but frame 169 already
+      acked everything a sent, so a has nothing outstanding: RFC 5681 §2 (a).
+    - .128492, .128802, .043687: b's data segments; they hold the cumack too.
+    The remote address is replaced with a documentation one (RFC 5737)."""
     fwd_text = """\
 timeval double
 title
-1.1.1.1:1 ==> 2.2.2.2:2 (time sequence graph)
+172.20.0.100:51385_==>_203.0.113.2:443 (time sequence graph)
 xlabel
 time
 ylabel
 sequence number
 white
-line 1.0 1000 1.0 1100
+darrow 1538187875.128863 1145581560
+diamond 1538187875.128863 1145581598 white
+dot 1538187875.128863 1145581598 white
+line 1538187875.128863 1145581560 1538187875.128863 1145581598
 green
-line 0.0 1000 1.5 1000
-line 1.5 1000 1.5 1100
-line 1.5 1100 2.0 1100
-line 2.0 1100 2.0 1100
-line 2.0 1100 2.5 1100
-line 2.5 1100 2.5 1100
+line 1538187875.114099 1145578893 1538187875.127758 1145578893
+line 1538187875.127758 1145578893 1538187875.127758 1145578986
 yellow
-line 0.0 9000 2.5 9000
+line 1538187875.114099 1146104205 1538187875.127758 1146104205
+line 1538187875.127758 1146104205 1538187875.127758 1146104042
+green
+line 1538187875.127758 1145578986 1538187875.128492 1145578986
+dtick 1538187875.128492 1145578986
+yellow
+line 1538187875.127758 1146104042 1538187875.128492 1146104042
+utick 1538187875.128492 1146104042
+green
+line 1538187875.128492 1145578986 1538187875.128802 1145578986
+dtick 1538187875.128802 1145578986
+yellow
+line 1538187875.128492 1146104042 1538187875.128802 1146104042
+utick 1538187875.128802 1146104042
+green
+line 1538187875.128802 1145578986 1538187875.133063 1145578986
+dtick 1538187875.133063 1145578986
+yellow
+line 1538187875.128802 1146104042 1538187875.133063 1146104042
+utick 1538187875.133063 1146104042
+green
+line 1538187875.133063 1145578986 1538187875.133063 1145578986
+line 1538187875.133063 1145578986 1538187875.133063 1145579073
+yellow
+line 1538187875.133063 1146104042 1538187875.133063 1146104042
+line 1538187875.133063 1146104042 1538187875.133063 1146104129
+white
+darrow 1538187878.022871 1145645309
+diamond 1538187878.022871 1145645442 white
+dot 1538187878.022871 1145645442 white
+line 1538187878.022871 1145645309 1538187878.022871 1145645442
+green
+line 1538187878.021677 1145645309 1538187878.036927 1145645309
+line 1538187878.036927 1145645309 1538187878.036927 1145645442
+yellow
+line 1538187878.021677 1146169341 1538187878.036927 1146169341
+line 1538187878.036927 1146169341 1538187878.036927 1146171010
+green
+line 1538187878.036927 1145645442 1538187878.040028 1145645442
+dtick 1538187878.040028 1145645442
+yellow
+line 1538187878.036927 1146171010 1538187878.040028 1146171010
+utick 1538187878.040028 1146171010
+green
+line 1538187878.040028 1145645442 1538187878.043687 1145645442
+dtick 1538187878.043687 1145645442
+yellow
+line 1538187878.040028 1146171010 1538187878.043687 1146171010
+utick 1538187878.043687 1146171010
 """
     bwd_text = """\
 timeval double
 title
-2.2.2.2:2 ==> 1.1.1.1:1 (time sequence graph)
+203.0.113.2:443_==>_172.20.0.100:51385 (time sequence graph)
 xlabel
 time
 ylabel
 sequence number
 white
-darrow 2.0 5000
-uarrow 2.0 5000
-darrow 2.5 5000
-uarrow 2.5 5000
-green
-line 0.0 5000 2.5 5000
-yellow
-line 0.0 8000 2.5 8000
+darrow 1538187875.128492 457945777
+diamond 1538187875.128492 457945828 white
+dot 1538187875.128492 457945828 white
+line 1538187875.128492 457945777 1538187875.128492 457945828
+white
+darrow 1538187875.128802 457945828
+diamond 1538187875.128802 457945897 white
+dot 1538187875.128802 457945897 white
+line 1538187875.128802 457945828 1538187875.128802 457945897
+white
+darrow 1538187875.133063 457945897
+uarrow 1538187875.133063 457945897
+white
+darrow 1538187875.133063 457945897
+uarrow 1538187875.133063 457945897
+white
+darrow 1538187878.040028 457970082
+uarrow 1538187878.040028 457970082
+white
+darrow 1538187878.043687 457970082
+uarrow 1538187878.043687 457971522
+line 1538187878.043687 457970082 1538187878.043687 457971522
 """
     pair = synthesize(parse_xpl(fwd_text), parse_xpl(bwd_text), "")
-    # The two b→a pure-ACK markers at t=2.0 and t=2.5 land on a stretch of
-    # cumack staircase (a's ack of b's data… we set up the *fwd* model's
-    # staircase to be flat — meaning b's cumacks of a's data didn't advance —
-    # which is what flags both as dup-ACKs.) Anomalies attach to fwd model.
-    dups = [a for a in pair.fwd.anomalies if a.kind == "dup_ack"]
-    assert len(dups) == 2
+    dups = [a.time for a in pair.fwd.anomalies if a.kind == "dup_ack"]
+    assert dups == [1538187875.133063]
+
+
+def test_sack_dup_ack_counts_though_the_window_moved():
+    """facebook_audio1a.pcap frame 805, verbatim: the cumack holds, the window
+    edge moves 1 byte (yellow vertical) and a new SACK block sits above the
+    cumack. RFC 6675 §2 counts it a duplicate "even if it ... changes the
+    advertised window"; tshark agrees. The ACK at .839581 advances."""
+    a2b_text = """\
+timeval double
+title
+131.202.240.150:56404_==>_173.252.100.27:443 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1427721123.839581 4207957629
+uarrow 1427721123.839581 4207957629
+white
+darrow 1427721123.840126 4207957629
+uarrow 1427721123.840126 4207957629
+"""
+    b2a_text = """\
+timeval double
+title
+173.252.100.27:443_==>_131.202.240.150:56404 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1427721123.839566 984992625
+uarrow 1427721123.839566 984993963
+line 1427721123.839566 984992625 1427721123.839566 984993963
+green
+line 1427721123.839558 984992625 1427721123.839581 984992625
+line 1427721123.839581 984992625 1427721123.839581 984994098
+yellow
+line 1427721123.839558 984994069 1427721123.839581 984994069
+line 1427721123.839581 984994069 1427721123.839581 984995541
+white
+darrow 1427721123.840100 984995436
+diamond 1427721123.840100 984995573 white
+dot 1427721123.840100 984995573 white
+line 1427721123.840100 984995436 1427721123.840100 984995573
+green
+line 1427721123.839581 984994098 1427721123.840126 984994098
+dtick 1427721123.840126 984994098
+yellow
+line 1427721123.839581 984995541 1427721123.840126 984995541
+line 1427721123.840126 984995541 1427721123.840126 984995542
+purple
+line 1427721123.840126 984995436 1427721123.840126 984995573
+htick 1427721123.840126 984995436
+htick 1427721123.840126 984995573
+atext 1427721123.840126 984995573
+S
+"""
+    pair = synthesize(parse_xpl(a2b_text), parse_xpl(b2a_text), "")
+    assert [a.time for a in pair.bwd.anomalies if a.kind == "dup_ack"] == [1427721123.840126]
+
+
+def test_keepalive_is_not_a_dup_ack():
+    """facebook_audio1a.pcap stream 4, verbatim: a keepalive (.474387, seq one
+    below snd.nxt) and its ACK (.512894) hold cumack and window, but neither
+    side has data outstanding. RFC 5681 §2 (a) requires outstanding data;
+    Wireshark labels these Keep-Alive / Keep-Alive ACK, not Dup ACK."""
+    i2j_text = """\
+timeval double
+title
+131.202.240.150:37692_==>_64.233.171.188:5228 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1427721211.422712 1848199213
+diamond 1427721211.422712 1848199246 white
+dot 1427721211.422712 1848199246 white
+line 1427721211.422712 1848199213 1427721211.422712 1848199246
+green
+line 1427721198.532887 1848199213 1427721211.461559 1848199213
+line 1427721211.461559 1848199213 1427721211.461559 1848199246
+yellow
+line 1427721198.532887 1848199579 1427721211.461559 1848199579
+line 1427721211.461559 1848199579 1427721211.461559 1848199612
+white
+darrow 1427721211.461575 1848199246
+uarrow 1427721211.461575 1848199246
+white
+darrow 1427721256.474387 1848199245
+uarrow 1427721256.474387 1848199245
+green
+line 1427721211.461559 1848199246 1427721256.512894 1848199246
+dtick 1427721256.512894 1848199246
+yellow
+line 1427721211.461559 1848199612 1427721256.512894 1848199612
+utick 1427721256.512894 1848199612
+"""
+    j2i_text = """\
+timeval double
+title
+64.233.171.188:5228_==>_131.202.240.150:37692 (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1427721211.461559 4165771362
+diamond 1427721211.461559 4165771395 white
+dot 1427721211.461559 4165771395 white
+line 1427721211.461559 4165771362 1427721211.461559 4165771395
+green
+line 1427721211.422712 4165771362 1427721211.461575 4165771362
+line 1427721211.461575 4165771362 1427721211.461575 4165771395
+yellow
+line 1427721211.422712 4165771993 1427721211.461575 4165771993
+line 1427721211.461575 4165771993 1427721211.461575 4165772026
+green
+line 1427721211.461575 4165771395 1427721256.474387 4165771395
+dtick 1427721256.474387 4165771395
+yellow
+line 1427721211.461575 4165772026 1427721256.474387 4165772026
+utick 1427721256.474387 4165772026
+white
+darrow 1427721256.512894 4165771395
+uarrow 1427721256.512894 4165771395
+"""
+    pair = synthesize(parse_xpl(i2j_text), parse_xpl(j2i_text), "")
+    kinds = [a.kind for m in (pair.fwd, pair.bwd) for a in m.anomalies]
+    assert "dup_ack" not in kinds
 
 
 def test_dup_ack_skipped_when_opposite_xpl_absent():
@@ -1267,7 +1459,7 @@ def test_no_partial_ack_on_clean_pipelined_transfer():
             Ack(time=1.2, ack_seq=2001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
             Ack(time=1.3, ack_seq=3001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
         ],
-        non_advancing_ack_times=[],
+        non_advancing_acks=[],
     )
     # Pure ACKs that advance cumack but trail max_sent — normal pipelining.
     anoms = _classify_pure_acks([1.1, 1.2], opp)
@@ -1307,7 +1499,7 @@ def test_partial_ack_fires_during_loss_recovery():
             # Advances into the retransmit but leaves it short of seq_end (3001).
             Ack(time=1.6, ack_seq=2001, rwin=9000, rwin_scaled=None, sack_blocks=(), dup_count=0),
         ],
-        non_advancing_ack_times=[],
+        non_advancing_acks=[],
     )
     partials = [a for a in _classify_pure_acks([1.6], opp) if a.kind == "partial_ack"]
     assert len(partials) == 1
