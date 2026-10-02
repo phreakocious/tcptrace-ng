@@ -594,24 +594,30 @@ def test_cliff_cause_hint_unknown_without_anomalies():
     assert all(c.severity == "warn" for c in result.fwd.cliffs)
 
 
-def test_cliff_cause_hint_rwin_shrink():
+def _shrink_cliffs(kind: str):
     t_cliff_center = 1.0 + 10 * 0.050 + 0.300 + 0.0
     anom = Anomaly(
         time=t_cliff_center + 0.050,
-        kind="win_shrink",
+        kind=kind,
         one_liner="window shrunk",
         seq_lo=1000,
         seq_hi=1000,
     )
     tsg = _build_cliff_tsg(rate_before_Bps=10240, rate_after_Bps=512, anomalies=[anom])
-    result = synthesize_throughput(_pair(fwd=tsg))
-    assert result.fwd.cliffs
-    rwin_cliffs = [c for c in result.fwd.cliffs if c.cause_hint == "rwin-shrink"]
-    assert rwin_cliffs
-    # A confirmed cliff is at least 'warn' even when attributed to a low-tier
-    # (info) anomaly like win_shrink — attribution must not demote it below the
-    # severity an unexplained cliff would get.
-    assert all(c.severity == "warn" for c in rwin_cliffs)
+    cliffs = synthesize_throughput(_pair(fwd=tsg)).fwd.cliffs
+    assert cliffs
+    return cliffs
+
+
+def test_cliff_cause_hint_rwin_shrink():
+    assert all(c.cause_hint == "rwin-shrink" for c in _shrink_cliffs("win_shrink_large"))
+
+
+def test_sub_mss_window_shrink_does_not_name_a_cliff_cause():
+    """A shrink under one MSS leaves room for every segment the sender had, so it
+    can't explain a >=50% drop; naming it the cause reads coincidence as cause."""
+    cliffs = _shrink_cliffs("win_shrink")
+    assert all(c.cause_hint == "unknown" and c.severity == "warn" for c in cliffs)
 
 
 def test_cliff_cause_prefers_loss_over_cooccurring_window_shrink():

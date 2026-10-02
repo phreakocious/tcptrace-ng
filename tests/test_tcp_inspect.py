@@ -4,7 +4,7 @@ Following the same fixture discipline as test_xpl_parser.py: real tcptrace
 output verbatim, no invented formats.
 """
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -1466,6 +1466,28 @@ def test_win_shrink_promoted_to_large_when_shrink_meets_mss():
     kinds = [a.kind for a in out]
     assert "win_shrink" in kinds
     assert "win_shrink_large" not in kinds
+
+
+def test_win_shrink_ignores_window_scale_rounding():
+    """A scaled window is advertised in 2**wscale-byte units, so the right edge
+    jitters by up to one unit as the ACK moves; that is rounding, not a shrink.
+    Numbers from np.pcap b2a (wscale 6): the edge goes 1985779665 -> 1985779631."""
+    from tcptrace_ng.tcp_inspect import _detect_anomalies
+
+    acks = [
+        Ack(
+            time=0.0, ack_seq=1985763281, rwin=16384, rwin_scaled=None, sack_blocks=(), dup_count=0
+        ),
+        Ack(
+            time=1.0, ack_seq=1985763439, rwin=16192, rwin_scaled=None, sack_blocks=(), dup_count=0
+        ),
+    ]
+    assert not _detect_anomalies([], acks, mss=1460, window_scale=6)
+    # No scale: the window is in bytes, so a 34-byte retreat is a real shrink.
+    assert [a.kind for a in _detect_anomalies([], acks, mss=1460)] == ["win_shrink"]
+    # A retreat of a whole unit can't be rounding.
+    acks[1] = replace(acks[1], rwin=16192 - 64)
+    assert [a.kind for a in _detect_anomalies([], acks, mss=1460, window_scale=6)] == ["win_shrink"]
 
 
 def test_win_shrink_without_mss_stays_info():

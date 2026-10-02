@@ -638,7 +638,10 @@ def _classify_retx(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
 
 
 def _detect_anomalies(
-    segments: list[Segment], acks: list[Ack], mss: int | None = None
+    segments: list[Segment],
+    acks: list[Ack],
+    mss: int | None = None,
+    window_scale: int | None = None,
 ) -> list[Anomaly]:
     """Catalog anomalies from already-classified segments + acks.
 
@@ -646,8 +649,12 @@ def _detect_anomalies(
       rto / fast / spurious  ← from Segment.rtx
       zero_win               ← Ack.rwin == 0
       win_shrink / win_shrink_large
-                             ← rwin_now < rwin_prev (after accounting for
-                               delta_acked). Promoted to win_shrink_large
+                             ← the window's right edge (ack + rwin) moved
+                               left by at least one 2**window_scale unit.
+                               A scaled window is advertised in those units,
+                               so a smaller retreat is rounding as the ACK
+                               moves, not the receiver taking space back.
+                               Promoted to win_shrink_large
                                when the shrink amount is at least one MSS,
                                which is the threshold at which the receiver
                                loses room for a whole segment in flight.
@@ -673,6 +680,9 @@ def _detect_anomalies(
         )
 
     # rwin-derived
+    # ponytail: compares consecutive ACKs, so a real edge that creeps back by
+    # under one unit per ACK goes unflagged; track the max edge if one shows up.
+    quantum = 1 << window_scale if window_scale else 1
     prev_rwin: int | None = None
     prev_ack: int | None = None
     for a in acks:
@@ -693,12 +703,12 @@ def _detect_anomalies(
                 )
             if prev_rwin is not None and prev_ack is not None:
                 delta_acked = max(0, a.ack_seq - prev_ack)
-                if a.rwin < prev_rwin - delta_acked:
+                shrink_bytes = prev_rwin - delta_acked - a.rwin
+                if shrink_bytes >= quantum:
                     # Position the annotation on the new rwin top (yellow line) at
                     # this time so the y-axis doesn't autorange down to 0 — there's
                     # no data there, just empty space.
                     rwin_top = a.ack_seq + a.rwin
-                    shrink_bytes = prev_rwin - delta_acked - a.rwin
                     kind = (
                         "win_shrink_large"
                         if mss is not None and shrink_bytes >= mss
@@ -1215,7 +1225,7 @@ def _build_model(
     in_flight, segs = _compute_in_flight(segs, acks)
     segs = _pair_rtt(segs, acks)
     segs = _classify_retx(segs, acks)
-    anomalies = _detect_anomalies(segs, acks, mss)
+    anomalies = _detect_anomalies(segs, acks, mss, window_scale)
     flag_events = _extract_flag_events(
         xpl, direction, client_is_a=summary.client_is_a if summary else None
     )

@@ -15,7 +15,9 @@ from .tcp_inspect import SEVERITY_BY_KIND, TsgModel, TsgModelPair
 
 # Anomaly kinds used by cliff detection (hoisted to avoid rebuilding per loop iteration).
 _CLIFF_LOSS_KINDS: frozenset[str] = frozenset({"rto", "fast"})
-_CLIFF_SHRINK_KINDS: frozenset[str] = frozenset({"win_shrink", "win_shrink_large"})
+# A shrink under one MSS (win_shrink) leaves room for every segment, so it can't
+# explain a cliff; only win_shrink_large names one.
+_CLIFF_SHRINK_KINDS: frozenset[str] = frozenset({"win_shrink_large"})
 _CLIFF_KINDS: frozenset[str] = _CLIFF_LOSS_KINDS | _CLIFF_SHRINK_KINDS
 
 
