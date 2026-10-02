@@ -436,23 +436,71 @@ def test_stall_baseline_uses_rtt_min_not_gap_terminating_rtt():
     assert stalls[0].severity == "severe"
 
 
-def _zero_window_flow(closed_s: float | None) -> TsgModel:
+def _zero_window_flow(closed_s: float | None, rtt_ms: float = 50.0) -> TsgModel:
     """RTT 50 ms. The receiver ACKs everything with a zero window at 1.10 and
     reopens it closed_s later with a pure window update; the sender resumes
-    1 RTT after that. closed_s=None: the window never reopens."""
+    1 RTT after that. closed_s=None: the window never reopens. rtt_ms is the
+    data->ACK time the tap sees (µs next to the receiver)."""
     segs = [
-        _seg(1.00, 0, 1000, paired_ack_time=1.05, paired_rtt_ms=50.0),
-        _seg(1.05, 1000, 2000, paired_ack_time=1.10, paired_rtt_ms=50.0),
+        _seg(1.00, 0, 1000, paired_ack_time=1.05, paired_rtt_ms=rtt_ms),
+        _seg(1.05, 1000, 2000, paired_ack_time=1.10, paired_rtt_ms=rtt_ms),
     ]
     acks = [_ack(1.05, 1000), _ack(1.10, 2000, rwin=0)]
     if closed_s is not None:
         reopen = 1.10 + closed_s
         segs.append(
-            _seg(reopen + 0.05, 2000, 3000, paired_ack_time=reopen + 0.10, paired_rtt_ms=50.0)
+            _seg(reopen + 0.05, 2000, 3000, paired_ack_time=reopen + 0.10, paired_rtt_ms=rtt_ms)
         )
         acks += [_ack(reopen, 2000), _ack(reopen + 0.10, 3000)]
     in_flight, segs = _compute_in_flight(segs, acks)
     return TsgModel(direction="a2b", segments=segs, acks=acks, in_flight=in_flight)
+
+
+def _with_handshake(fwd: TsgModel, syns=(0.0,), syn_ack=0.0001, ack=0.0501) -> TsgModelPair:
+    """A 50 ms handshake seen next to b: SYN(s) from a, b's SYN/ACK 0.1 ms later,
+    a's completing ACK one path RTT after the SYN that was answered."""
+
+    def anom(t, kind):
+        return Anomaly(time=t, kind=kind, one_liner=kind, seq_lo=0, seq_hi=0)
+
+    fwd.anomalies = sorted(
+        [*fwd.anomalies, *(anom(t, "syn") for t in syns), anom(ack, "handshake_ack")],
+        key=lambda a: a.time,
+    )
+    return _pair(fwd=fwd, bwd=TsgModel(direction="b2a", anomalies=[anom(syn_ack, "syn_ack")]))
+
+
+def test_stall_rtt_is_the_path_rtt_at_a_receiver_side_tap():
+    """Next to the receiver, data->ACK is the receiver's ACK delay (µs), not an
+    RTT; a 1.5 s stall must not read ×500000. The handshake's SYN->ACK is one
+    path RTT from any tap."""
+    fwd = _zero_window_flow(1.5, rtt_ms=0.003)
+    stalls = synthesize_throughput(_with_handshake(fwd)).fwd.stalls
+    assert stalls[0].rtt_multiple == pytest.approx(1.5 / 0.0501)
+
+
+def test_network_stall_rtt_is_the_path_rtt_at_a_receiver_side_tap():
+    tsg = _build_stall_tsg(0.5, rtt_ms=0.003)
+    stalls = synthesize_throughput(_with_handshake(tsg)).fwd.stalls
+    assert stalls[0].rtt_multiple == pytest.approx(0.5 / 0.0501)
+    assert stalls[0].severity == "warn"
+
+
+def test_queue_inflated_rtt_above_the_path_rtt_is_kept():
+    """Next to the sender, data->ACK includes queueing; an ACK-clocked pause of
+    ~1 inflated RTT is not a stall, so the larger RTT stays the yardstick."""
+    tsg = _build_stall_tsg(0.5, rtt_ms=100.0)
+    stalls = synthesize_throughput(_with_handshake(tsg)).fwd.stalls
+    assert stalls[0].rtt_multiple == pytest.approx(5.0)
+
+
+def test_path_rtt_starts_at_the_answered_syn():
+    """A retransmitted SYN: the RTT runs from the SYN the SYN/ACK answered, not
+    from the first one, which would add a whole RTO."""
+    from tcptrace_ng.throughput import _path_rtt_s
+
+    pair = _with_handshake(TsgModel(direction="a2b"), syns=(-1.0, 0.0))
+    assert _path_rtt_s(pair) == pytest.approx(0.0501)
 
 
 def test_zero_window_episode_is_a_stall():

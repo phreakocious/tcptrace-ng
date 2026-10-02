@@ -284,7 +284,24 @@ def _emit_samples(
     return samples
 
 
-def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
+def _path_rtt_s(tsg_pair: TsgModelPair) -> float | None:
+    """One full path RTT: the completing ACK minus the SYN the SYN/ACK answered.
+    It reads the same from any tap. Data->ACK time does not: next to the
+    receiver it is only the receiver's ACK delay."""
+    anoms = [a for m in (tsg_pair.fwd, tsg_pair.bwd) if m is not None for a in m.anomalies]
+    syn_ack = min((a.time for a in anoms if a.kind == "syn_ack"), default=None)
+    if syn_ack is None:
+        return None
+    syn = max((a.time for a in anoms if a.kind == "syn" and a.time <= syn_ack), default=None)
+    ack = min(
+        (a.time for a in anoms if a.kind == "handshake_ack" and a.time > syn_ack), default=None
+    )
+    if syn is None or ack is None:
+        return None
+    return ack - syn
+
+
+def _detect_stalls(tsg: TsgModel, rtt_min_s: float, path_rtt_s: float | None = None) -> list[Stall]:
     if not tsg.acks:
         return []
 
@@ -301,6 +318,10 @@ def _detect_stalls(tsg: TsgModel, rtt_min_s: float) -> list[Stall]:
         # post-stall / RTO-backed-off probe, whose inflated RTT would push the
         # threshold up and hide or under-tier a genuine network-blocked stall).
         srtt_ms = seg_a.paired_rtt_ms if seg_a.paired_rtt_ms is not None else rtt_min_s * 1000.0
+        # Never below the path RTT: away from the sender, data->ACK is a fraction
+        # of an RTT (µs next to the receiver). Next to the sender it is the full
+        # RTT plus queueing, and that larger value stays the yardstick.
+        srtt_ms = max(srtt_ms, (path_rtt_s or 0.0) * 1000.0)
 
         threshold = max(3.0 * (srtt_ms / 1000.0), 0.200)
         if gap_s < threshold:
@@ -504,7 +525,9 @@ def _detect_cliffs(
     return cliffs
 
 
-def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> ThroughputModel:
+def _build_direction(
+    tsg: TsgModel, rtt_min_fallback_ms: float | None, path_rtt_s: float | None = None
+) -> ThroughputModel:
     rtt_min_s, window_s, stride_s, t_start, t_end = _window_params(tsg, rtt_min_fallback_ms)
 
     # Empty model: no segments and no acks.
@@ -533,8 +556,12 @@ def _build_direction(tsg: TsgModel, rtt_min_fallback_ms: float | None) -> Throug
         (rtt_min_fallback_ms / 1000.0) if rtt_min_fallback_ms is not None else rtt_min_s, 0.001
     )
     samples = _emit_samples(tsg, window_s, stride_s, t_start, t_end, base_rtt_s)
+    # ponytail: window_s still sizes from rtt_min_s (50 ms floor next to a
+    # receiver); moving it to the path RTT changes every rate sample and needs
+    # a cliff re-sweep first.
     stalls = sorted(
-        _detect_stalls(tsg, rtt_min_s) + _detect_zero_window_stalls(tsg, rtt_min_s),
+        _detect_stalls(tsg, rtt_min_s, path_rtt_s)
+        + _detect_zero_window_stalls(tsg, max(rtt_min_s, path_rtt_s or 0.0)),
         key=lambda s: s.t_start,
     )
     cliffs = _detect_cliffs(samples, tsg, window_s)
@@ -586,6 +613,15 @@ def synthesize_throughput(
             return stats.rtt_min_a
         return stats.rtt_min_b
 
-    fwd = _build_direction(tsg_pair.fwd, _rtt_fallback("a2b")) if tsg_pair.fwd is not None else None
-    bwd = _build_direction(tsg_pair.bwd, _rtt_fallback("b2a")) if tsg_pair.bwd is not None else None
+    path = _path_rtt_s(tsg_pair)
+    fwd = (
+        _build_direction(tsg_pair.fwd, _rtt_fallback("a2b"), path)
+        if tsg_pair.fwd is not None
+        else None
+    )
+    bwd = (
+        _build_direction(tsg_pair.bwd, _rtt_fallback("b2a"), path)
+        if tsg_pair.bwd is not None
+        else None
+    )
     return ThroughputModelPair(fwd=fwd, bwd=bwd)
