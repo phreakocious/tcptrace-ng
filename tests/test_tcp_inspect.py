@@ -468,6 +468,106 @@ line 1.200 1000 1.200 1100
     assert rtx_segs[0].rtx == "spurious"
 
 
+# _classify_retx on hand-built timelines (100-byte segments). Each one is the
+# shape of a retransmit seen in a generated capture whose sender's kernel
+# counters say why it retransmitted.
+def _seg(t, lo, rtx=None):
+    return Segment(
+        time=t,
+        seq_start=lo,
+        seq_end=lo + 100,
+        rtx=rtx,
+        paired_ack_time=None,
+        paired_rtt_ms=None,
+        in_flight_after=0,
+    )
+
+
+def _ack(t, ack_seq, *sack):
+    return Ack(time=t, ack_seq=ack_seq, rwin=65535, rwin_scaled=None, sack_blocks=sack, dup_count=0)
+
+
+def _labels(segments, acks):
+    from tcptrace_ng.tcp_inspect import _classify_retx
+
+    return [s.rtx for s in _classify_retx(segments, acks) if s.rtx is not None]
+
+
+def test_retx_fast_on_sack_without_triple_dup_label():
+    """SACK recovery: tcptrace labels no ACK "3" (it changed the window, or
+    carried SACK), but a SACK block above the cumack is the loss signal."""
+    segs = [_seg(0.0, 0), _seg(0.0, 100), _seg(0.0, 200), _seg(0.021, 100, "rto")]
+    acks = [_ack(0.02, 100), _ack(0.02, 100, (200, 300))]
+    assert _labels(segs, acks) == ["fast"]
+
+
+def test_retx_fast_on_partial_ack_inside_fast_recovery():
+    """A partial ACK moves the cumack to the next hole and drives its
+    retransmit with no new SACK; the episode, not the ACK, says fast."""
+    segs = [
+        _seg(0.0, 0),
+        _seg(0.0, 100),
+        _seg(0.0, 200),
+        _seg(0.0201, 300),  # new data after the SACK; lost
+        _seg(0.0202, 100, "rto"),  # opens fast recovery, recover = 400
+        _seg(0.0403, 300, "rto"),
+    ]
+    acks = [_ack(0.02, 100), _ack(0.02, 100, (200, 300)), _ack(0.0402, 300)]
+    assert _labels(segs, acks) == ["fast", "fast"]
+
+
+def test_retx_rto_episode_keeps_go_back_n_rto_after_sack():
+    """After an RTO the sender resends the window; SACKs of new data sent
+    meanwhile must not relabel that go-back-N as fast recovery."""
+    segs = [
+        _seg(0.0, 0),
+        _seg(0.0, 100),
+        _seg(0.0, 200),
+        _seg(0.3, 0, "rto"),  # no ACK at all: timer, head of window
+        _seg(0.32, 300),
+        _seg(0.3201, 100, "rto"),
+        _seg(0.3401, 200, "rto"),
+    ]
+    acks = [_ack(0.32, 100), _ack(0.34, 200, (300, 400))]
+    assert _labels(segs, acks) == ["rto", "rto", "rto"]
+
+
+def test_retx_tlp_resends_newest_segment_then_sack_drives_fast():
+    """RFC 8985 7.3: a loss probe resends the most recently sent segment, not
+    the head, and opens no episode, so the recovery it triggers stays fast."""
+    segs = [
+        _seg(0.0, 0),
+        _seg(0.0, 100),
+        _seg(0.0, 200),
+        _seg(0.06, 200, "rto"),
+        _seg(0.0801, 100, "rto"),
+    ]
+    acks = [_ack(0.02, 100), _ack(0.08, 100, (200, 300))]
+    assert _labels(segs, acks) == ["tlp", "fast"]
+
+
+def test_retx_tlp_and_rto_with_no_ack_in_the_capture():
+    """No ACK in the capture (a peer that went silent): the server probes with
+    its last segment, then resends the first on a doubling timer. The head is
+    the lowest seq sent, not unknown."""
+    segs = [_seg(0.0, 0), _seg(0.0, 100), _seg(0.075, 100, "rto"), _seg(0.315, 0, "rto")]
+    assert _labels(segs, []) == ["tlp", "rto"]
+
+
+def test_retx_rto_when_recovery_retransmit_is_lost():
+    """The fast retransmit is lost and no ACK follows: resending the same
+    bytes again with no new loss signal is the retransmission timer."""
+    segs = [
+        _seg(0.0, 0),
+        _seg(0.0, 100),
+        _seg(0.0, 200),
+        _seg(0.021, 100, "rto"),
+        _seg(0.3, 100, "rto"),
+    ]
+    acks = [_ack(0.02, 100, (200, 300))]
+    assert _labels(segs, acks) == ["fast", "rto"]
+
+
 def test_anomaly_rto_emitted_for_rto_retx():
     xpl_text = """\
 timeval double

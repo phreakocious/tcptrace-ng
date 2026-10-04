@@ -26,7 +26,7 @@ class Segment:
     time: float
     seq_start: int
     seq_end: int
-    rtx: Literal[None, "rto", "fast", "spurious"]
+    rtx: Literal[None, "rto", "fast", "tlp", "spurious"]
     paired_ack_time: float | None
     paired_rtt_ms: float | None
     in_flight_after: int
@@ -54,6 +54,7 @@ class Ack:
 AnomalyKind = Literal[
     "rto",
     "fast",
+    "tlp",
     "spurious",
     "zero_win",
     "win_shrink",
@@ -89,6 +90,9 @@ SEVERITY_BY_KIND: dict[str, AnomalySeverity] = {
     "win_shrink_large": "severe",
     "bad_csum_lost": "severe",
     "dup_ack_drove_retx": "warn",
+    # A loss probe resends the newest segment on a short timer; it may repair
+    # a tail loss or duplicate a delivered segment, and it costs no RTO.
+    "tlp": "warn",
     "ooo": "warn",
     "sack_gap": "warn",
     # D-SACK is confirmatory, not an alarm: it reports a duplicate the receiver
@@ -343,7 +347,7 @@ def _detect_retx_by_coverage(segments: list[Segment]) -> list[Segment]:
     We walk segments in time order tracking the byte ranges already transmitted
     (merged half-open intervals). A data segment whose ``[seq_start, seq_end)``
     is fully contained in that set and is not already flagged becomes
-    ``rtx="rto"``, which `_classify_retx` then refines to rto/fast/spurious.
+    ``rtx="rto"``, which `_classify_retx` then refines to rto/fast/tlp/spurious.
     Partial overlaps are left alone — a re-send that also carries new data is
     not a pure retransmit — and zero-length segments (keepalives/probes) are
     skipped. Red-derived flags are preserved; this only adds coverage we'd
@@ -597,43 +601,80 @@ def _pair_rtt(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
     return out
 
 
-_DEFAULT_RTT_WINDOW_S = 0.050
-
-
-def _median_rtt_seconds(segments: list[Segment]) -> float:
-    rtts = sorted(s.paired_rtt_ms for s in segments if s.paired_rtt_ms is not None)
-    if not rtts:
-        return _DEFAULT_RTT_WINDOW_S
-    mid = rtts[len(rtts) // 2]
-    return mid / 1000.0
-
-
 def _classify_retx(segments: list[Segment], acks: list[Ack]) -> list[Segment]:
-    """Refine each rtx="rto" placeholder to rto / fast / spurious."""
-    if not segments:
-        return segments
+    """Refine each rtx="rto" placeholder to rto / fast / tlp / spurious.
 
-    rtt_window = _median_rtt_seconds(segments)
+    No timing constant: minimum RTOs differ by stack (Linux 200 ms, FreeBSD
+    30 ms, RFC 6298 1 s), so any gap threshold mislabels some stack. The
+    evidence is what the receiver had reported and which bytes went out:
+
+      spurious  an ACK before the retransmit already covered its bytes.
+      fast      since the previous send of these bytes, an ACK carried a loss
+                signal: a SACK block above its cumack (RFC 6675, RACK) or
+                tcptrace's triple-dup label (RFC 5681). tcptrace labels only a
+                pure dup that kept the window, so SACK recovery rarely gets one.
+      rto       no loss signal, and it resends the head of the window
+                (RFC 6298 5.4).
+      tlp       no loss signal, and it resends the newest segment instead
+                (RFC 8985 7.3).
+
+    fast and rto open a recovery episode that lasts until the cumack reaches
+    the highest seq sent when it opened (RFC 6582 "recover"); a probe opens
+    none. A retransmit inside an episode takes its kind: the go-back-N after
+    an RTO follows SACKs of new data, and a partial ACK drives fast recovery
+    with no new SACK. The exception is resending bytes already resent in the
+    episode with no loss signal since: only the timer does that, so it opens
+    an RTO episode.
+    """
     ack_times = [a.time for a in acks]
+    # Running highest cumack, and running count of ACKs carrying a loss signal.
+    cumack: list[int] = []
+    signals = [0]
+    for a in acks:
+        cumack.append(max(a.ack_seq, cumack[-1]) if cumack else a.ack_seq)
+        lossy = a.dup_count >= 3 or any(lo > a.ack_seq for lo, _ in a.sack_blocks)
+        signals.append(signals[-1] + lossy)
+
     out: list[Segment] = []
-
+    snd_lo: int | None = None  # lowest seq sent: the head until an ACK is seen
+    snd_max = 0
+    episode: str | None = None
+    recover = 0
+    opened = 0.0
     for s in segments:
-        if s.rtx is None:
-            out.append(s)
-            continue
+        if s.rtx is not None:
+            # An ACK in the same timestamp may be the one that triggered the
+            # retransmit, so it counts as evidence; only a strictly earlier
+            # ACK makes the retransmit spurious.
+            before = bisect.bisect_left(ack_times, s.time)
+            upto = bisect.bisect_right(ack_times, s.time)
+            cum = cumack[upto - 1] if upto else None
+            una = cum if cum is not None else snd_lo
+            # ponytail: scans back to the previous send of these bytes, about
+            # one window per retransmit; index sends by seq if that gets slow.
+            prev = next((p for p in reversed(out) if p.seq_start <= s.seq_start < p.seq_end), None)
+            since = bisect.bisect_right(ack_times, prev.time) if prev else 0
+            signal = signals[upto] - signals[since] > 0
+            in_episode = episode is not None and (cum is None or cum < recover)
+            resent = prev is not None and prev.rtx is not None and prev.time >= opened
 
-        # Spurious: any ACK earlier than the retx whose ack_seq >= seq_end.
-        idx = bisect.bisect_left(ack_times, s.time)
-        spurious = any(a.ack_seq >= s.seq_end for a in acks[:idx])
-
-        if spurious:
-            new_rtx: str = "spurious"
-        else:
-            # Fast: ≥3 dup-ACKs in (s.time - rtt_window, s.time).
-            dup_sum = sum(a.dup_count for a in acks if s.time - rtt_window < a.time < s.time)
-            new_rtx = "fast" if dup_sum >= 3 else "rto"
-
-        out.append(replace(s, rtx=new_rtx))  # type: ignore[arg-type]
+            if before and cumack[before - 1] >= s.seq_end:
+                new_rtx: str = "spurious"
+            elif in_episode and (signal or not resent):
+                new_rtx = episode  # type: ignore[assignment]
+            else:
+                if signal:
+                    new_rtx = "fast"
+                elif in_episode or una is None or s.seq_start <= una or s.seq_end < snd_max:
+                    new_rtx = "rto"
+                else:
+                    new_rtx = "tlp"
+                if new_rtx != "tlp":
+                    episode, recover, opened = new_rtx, snd_max, s.time
+            s = replace(s, rtx=new_rtx)  # type: ignore[arg-type]
+        out.append(s)
+        snd_lo = s.seq_start if snd_lo is None else min(snd_lo, s.seq_start)
+        snd_max = max(snd_max, s.seq_end)
     return out
 
 
@@ -646,7 +687,7 @@ def _detect_anomalies(
     """Catalog anomalies from already-classified segments + acks.
 
     Rules per spec:
-      rto / fast / spurious  ← from Segment.rtx
+      rto / fast / tlp / spurious  ← from Segment.rtx
       zero_win               ← Ack.rwin == 0
       win_shrink / win_shrink_large
                              ← the window's right edge (ack + rwin) moved
@@ -1083,7 +1124,7 @@ def _suppress_overlapping_retx(
         a
         for a in anomalies
         if not (
-            a.kind in ("rto", "fast", "spurious")
+            a.kind in ("rto", "fast", "tlp", "spurious")
             and a.time in fin_retx_times
             and _is_control_byte(a.seq_lo, a.seq_hi)
         )
@@ -1103,7 +1144,7 @@ def _clear_suppressed_retx(segments: list[Segment], fin_retx_times: set[float]) 
         return segments
     return [
         replace(s, rtx=None)
-        if s.rtx in ("rto", "fast", "spurious")
+        if s.rtx in ("rto", "fast", "tlp", "spurious")
         and s.time in fin_retx_times
         and _is_control_byte(s.seq_start, s.seq_end)
         else s

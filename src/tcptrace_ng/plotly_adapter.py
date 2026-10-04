@@ -804,7 +804,7 @@ def _fabricated_hover_trace(
     }
 
 
-_RTX_CODE = {None: 0.0, "rto": 1.0, "fast": 2.0, "spurious": 3.0}
+_RTX_CODE = {None: 0.0, "rto": 1.0, "fast": 2.0, "spurious": 3.0, "tlp": 4.0}
 
 
 def _retx_customdata(segments: list[Segment], baseline: int = 0) -> list[list[float]]:
@@ -812,7 +812,7 @@ def _retx_customdata(segments: list[Segment], baseline: int = 0) -> list[list[fl
     0: seq_start  (relative to baseline when baseline != 0)
     1: length
     2: in_flight_after
-    3: rtx_code (1=rto, 2=fast, 3=spurious)
+    3: rtx_code (1=rto, 2=fast, 3=spurious, 4=tlp)
     """
     out: list[list[float]] = []
     for s in segments:
@@ -831,7 +831,7 @@ _TSG_RETX_TEMPLATE = (
     "<b>⚠ Retransmit</b><br>"
     "seq %{customdata[0]:,.0f} (%{customdata[1]:.0f} B)<br>"
     "in-flight after: %{customdata[2]:,.0f} B<br>"
-    "rtx code: %{customdata[3]:.0f} (1=rto 2=fast 3=spurious)"
+    "rtx code: %{customdata[3]:.0f} (1=rto 2=fast 3=spurious 4=tlp)"
     "<extra></extra>"
 )
 
@@ -1003,6 +1003,7 @@ def _rwin_trace(
 _ANOMALY_GLYPH = {
     "rto": "⚠ RTO",
     "fast": "⚠ fast retx",
+    "tlp": "⚠ TLP",
     "spurious": "⚠ spurious",
     "zero_win": "0w",
     "win_shrink": "↓rwin",
@@ -1095,6 +1096,7 @@ _SEG_BACKED_KINDS = {"syn", "syn_ack", "fin", "fin_retx"}
 _KINDS_WITH_EMBEDDED_SEQS = {
     "rto",
     "fast",
+    "tlp",
     "spurious",
     "ooo",
     "sack_gap",

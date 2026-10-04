@@ -188,7 +188,11 @@ def _loss_storm(tsg: TsgModelPair | None) -> list[Finding]:
         if len(data_segs) < _MIN_STORM_SEGS:
             continue
         # Exclude <=1-byte retx: keepalives / zero-window probes are NOT loss.
-        retx = [s for s in data_segs if s.rtx in ("rto", "fast") and (s.seq_end - s.seq_start) > 1]
+        retx = [
+            s
+            for s in data_segs
+            if s.rtx in ("rto", "fast", "tlp") and (s.seq_end - s.seq_start) > 1
+        ]
         # Retransmission fraction over all data transmissions — NOT a true loss
         # rate: the denominator includes the retransmits themselves.
         frac = len(retx) / len(data_segs)

@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -42,9 +43,10 @@ pytestmark = [
 # here, where every sender is Linux, and mislabels other stacks.
 _RTO_MIN_S = 0.2
 
-# _classify_retx calls a retransmit `fast` only after >= 3 dup-ACKs and `rto`
-# otherwise, so SACK/RACK recovery with fewer dup-ACKs reads as an RTO.
-_RTO_BUG = "SACK/RACK recovery with < 3 dup-ACKs labelled rto"
+# storm's SYN-ACK is lost; the server resends it on its timer, then again
+# 11 ms later for the client's retransmitted SYN. That trigger travels the
+# other direction, which _classify_retx never sees, so the second reads rto.
+_SYNACK_RTO = "a SYN-ACK resent for the peer's retransmitted SYN labelled rto"
 # The receiver's ACKs carry a D-SACK for each of reorder's retransmits, which
 # proves them spurious; neither the label nor the loss findings use it.
 _DSACK_BUG = "D-SACK-proven spurious retransmits read as loss"
@@ -87,7 +89,7 @@ def _retx(tsg):
     segs = sorted(tsg.segments, key=lambda s: s.time)
     out = []
     for i, s in enumerate(segs):
-        if s.rtx in ("rto", "fast") and s.seq_end > s.seq_start:
+        if s.rtx not in (None, "spurious") and s.seq_end > s.seq_start:
             prev = max(
                 (p.time for p in segs[:i] if p.seq_start <= s.seq_start < p.seq_end),
                 default=None,
@@ -154,15 +156,7 @@ def test_retransmits_match_drops(scen, rel):
 
 @pytest.mark.parametrize(
     "scen",
-    [
-        _xfail(_RTO_BUG, "loss"),
-        _xfail(_RTO_BUG, "gro"),
-        _xfail(_RTO_BUG, "storm"),
-        _xfail(_RTO_BUG, "bottleneck"),
-        "blackout",
-        _xfail(_RTO_BUG, "slow_rcv"),
-        _xfail(_RTO_BUG, "reorder"),
-    ],
+    ["loss", "gro", _xfail(_SYNACK_RTO, "storm"), "bottleneck", "blackout", "slow_rcv", "reorder"],
 )
 def test_rto_label_needs_rto_gap(scen):
     early = [
@@ -180,6 +174,25 @@ def test_blackout_has_true_rto():
         s.rtx == "rto" and gap is not None and gap >= _RTO_MIN_S
         for s, gap in _retx(_models("blackout", "sender")[0])
     )
+
+
+# The sender's kernel says why it retransmitted. Per label, the data
+# retransmits (control bytes aside) are bounded by the counter for that cause:
+# fast by TCPFastRetrans (Recovery state), rto by TCPTimeouts plus the
+# go-back-N it starts (TCPSlowStartRetrans), tlp by TCPLossProbes (a probe
+# may send new data instead, so it can only bound).
+@pytest.mark.parametrize(
+    "scen", ["loss", "gro", "storm", "bottleneck", "blackout", "slow_rcv", "reorder"]
+)
+def test_retx_labels_bounded_by_kernel_counters(scen):
+    text = (PCAPS / scen / "manifest.txt").read_text()
+    k = {n: int(v) for n, v in re.findall(r"^kernel\.srv\.TcpExt(\w+)=(\d+)$", text, re.M)}
+    labels = Counter(
+        s.rtx for s in _models(scen, "sender")[0].segments if s.seq_end - s.seq_start > 1
+    )
+    assert labels["fast"] <= k.get("TCPFastRetrans", 0), (labels, k)
+    assert labels["rto"] <= k.get("TCPTimeouts", 0) + k.get("TCPSlowStartRetrans", 0), (labels, k)
+    assert labels["tlp"] <= k.get("TCPLossProbes", 0), (labels, k)
 
 
 # Sender side only: a receiver-side capture cannot tell a blackout from a
