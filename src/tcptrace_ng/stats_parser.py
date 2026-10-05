@@ -26,7 +26,8 @@ from .classifier import Class, classify
 # v3 adds per-direction RTT min/avg/max fields (from tcptrace -r output).
 # v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
 # v5 adds rtt_3whs_a/b.
-STATS_PARSER_VERSION = "7"  # v7: per-direction packet counts (pkts_a / pkts_b) for uni detection
+# v7 adds per-direction packet counts (pkts_a / pkts_b) for uni detection.
+STATS_PARSER_VERSION = "8"  # v8: an unset 3WHS RTT is None; host a with a SYN is the client
 
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",
