@@ -147,15 +147,17 @@ def _rtt_3whs(body: str) -> tuple[float | None, float | None]:
 
 
 def _client_is_a(body: str) -> bool | None:
+    """tcptrace names host a for the first packet it saw (trace.c NewTTP), so a
+    that sent a SYN opened the connection, unless the capture missed the client's
+    SYN and a's first packet is the SYN-ACK. Comparing SYN counts instead reads a
+    server that resent its SYN-ACK to a silent client as the client."""
     m = _SYNFIN_PAIR_RE.search(body)
     if not m:
         return None
     a_syns, b_syns = int(m.group(1)), int(m.group(2))
-    if a_syns > b_syns:
+    if a_syns:
         return True
-    if b_syns > a_syns:
-        return False
-    return None
+    return False if b_syns else None
 
 
 def _verdict(body: str) -> Class:

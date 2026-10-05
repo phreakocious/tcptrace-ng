@@ -256,13 +256,29 @@ TCP connection 1:
     assert bwd == ""
 
 
-def test_client_undetermined_when_both_sent_syns():
+@pytest.mark.parametrize("b_syns", [1, 5])
+def test_client_is_a_when_both_sent_syns(b_syns):
+    # tcptrace names host a for the first packet it saw, so a sent the SYN; b's
+    # SYN-ACK may go out more often (resent to a client that went silent).
+    body = f"""\
+TCP connection 1:
+\thost a:        1.1.1.1:1111
+\thost b:        2.2.2.2:2222
+   a->b:                                  b->a:
+     SYN/FIN pkts sent:       1/1           SYN/FIN pkts sent:       {b_syns}/1
+================================
+"""
+    rows = parse_stats(body)
+    assert rows[0].client_is_a is True
+
+
+def test_client_undetermined_without_syns():
     body = """\
 TCP connection 1:
 \thost a:        1.1.1.1:1111
 \thost b:        2.2.2.2:2222
    a->b:                                  b->a:
-     SYN/FIN pkts sent:       1/1           SYN/FIN pkts sent:       1/1
+     SYN/FIN pkts sent:       0/1           SYN/FIN pkts sent:       0/1
 ================================
 """
     rows = parse_stats(body)
