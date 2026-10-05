@@ -331,3 +331,20 @@ def test_parses_rtt_from_3whs():
     conns = parse_stats(body)
     assert conns[0].rtt_3whs_a == 80.0
     assert conns[0].rtt_3whs_b == 0.1
+
+
+def test_unset_rtt_from_3whs_is_none():
+    # tcptrace prints an unset 3WHS RTT as 0.0 ms: here b's SYN-ACK went out
+    # 5 times and was never acked, and a's SYN, sent twice, gets no 3WHS sample.
+    body = """TCP connection 1:
+\thost a:        10.0.0.1:50000
+\thost b:        10.0.0.2:443
+\tcomplete conn: no\t(SYNs: 7)  (FINs: 0)
+   a->b:\t\t\t      b->a:
+     SYN/FIN pkts sent:       2/0           SYN/FIN pkts sent:       5/0
+     RTT samples:               1           RTT samples:               0
+     RTT from 3WHS:           0.0 ms        RTT from 3WHS:           0.0 ms
+"""
+    conns = parse_stats(body)
+    assert conns[0].rtt_3whs_a is None
+    assert conns[0].rtt_3whs_b is None

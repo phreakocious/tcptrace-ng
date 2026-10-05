@@ -63,6 +63,7 @@ _RTT_3WHS_RE = re.compile(
     r"^\s*RTT from 3WHS:\s+(\d+\.\d+)\s+ms\s+RTT from 3WHS:\s+(\d+\.\d+)\s+ms",
     re.MULTILINE,
 )
+_RTT_SAMPLES_RE = re.compile(r"^\s*RTT samples:\s+(\d+)\s+RTT samples:\s+(\d+)", re.MULTILINE)
 
 _MSS_RE = re.compile(
     r"^\s*mss requested:\s+(\d+)\s+bytes\s+mss requested:\s+(\d+)\s+bytes",
@@ -129,6 +130,20 @@ def _has_rst(body: str) -> bool:
 def _complete_handshake(body: str) -> bool:
     # Honor `complete conn: yes` OR both directions showing SYN/FIN 1/1.
     return bool(_COMPLETE_RE.search(body)) or bool(_SYNFIN_RE.search(body))
+
+
+def _rtt_3whs(body: str) -> tuple[float | None, float | None]:
+    """tcptrace sets a side's 3WHS RTT only when the ACK of its one SYN arrives
+    (trace.c: syn_count == 1) and prints the unset field as 0.0 ms. A side that
+    sent other than one SYN, or has no RTT sample, therefore has none."""
+    m = _SYNFIN_PAIR_RE.search(body)
+    syns = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    return tuple(  # type: ignore[return-value]
+        None if n == 0 or s not in (None, 1) else rtt
+        for rtt, n, s in zip(
+            _pair_floats(_RTT_3WHS_RE, body), _pair_ints(_RTT_SAMPLES_RE, body), syns, strict=True
+        )
+    )
 
 
 def _client_is_a(body: str) -> bool | None:
@@ -243,7 +258,7 @@ def _parse_block(n: int, body: str) -> ConnStats:
     rtt_avg_a, rtt_avg_b = _pair_floats(_RTT_AVG_RE, body)
     mss_a, mss_b = _pair_ints(_MSS_RE, body)
     wscale_a, wscale_b = _pair_ints(_WS_RE, body)
-    rtt_3whs_a, rtt_3whs_b = _pair_floats(_RTT_3WHS_RE, body)
+    rtt_3whs_a, rtt_3whs_b = _rtt_3whs(body)
     pkts_a, pkts_b = _pair_ints(_TOTAL_PKTS_RE, body)
     return ConnStats(
         n=n,
