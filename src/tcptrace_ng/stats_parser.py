@@ -27,7 +27,8 @@ from .classifier import Class, classify
 # v4 adds per-direction mss / wscale typed fields (was string-only in ctx).
 # v5 adds rtt_3whs_a/b.
 # v7 adds per-direction packet counts (pkts_a / pkts_b) for uni detection.
-STATS_PARSER_VERSION = "8"  # v8: an unset 3WHS RTT is None; host a with a SYN is the client
+# v8: an unset 3WHS RTT is None; host a with a SYN is the client.
+STATS_PARSER_VERSION = "9"  # v9: a side with no RTT sample has no rtt_min/max/avg
 
 _BLOCK_RE = re.compile(
     r"^TCP connection (\d+):\s*\n(.*?)(?=^TCP connection \d+:|\Z)",
@@ -133,6 +134,17 @@ def _complete_handshake(body: str) -> bool:
     return bool(_COMPLETE_RE.search(body)) or bool(_SYNFIN_RE.search(body))
 
 
+def _rtt(pattern: re.Pattern[str], body: str) -> tuple[float | None, float | None]:
+    """tcptrace prints each RTT field of a side with no RTT sample as 0.0 ms:
+    that side has none."""
+    return tuple(  # type: ignore[return-value]
+        None if n == 0 else rtt
+        for rtt, n in zip(
+            _pair_floats(pattern, body), _pair_ints(_RTT_SAMPLES_RE, body), strict=True
+        )
+    )
+
+
 def _rtt_3whs(body: str) -> tuple[float | None, float | None]:
     """tcptrace sets a side's 3WHS RTT only when the ACK of its one SYN arrives
     (trace.c: syn_count == 1) and prints the unset field as 0.0 ms. A side that
@@ -140,10 +152,8 @@ def _rtt_3whs(body: str) -> tuple[float | None, float | None]:
     m = _SYNFIN_PAIR_RE.search(body)
     syns = (int(m.group(1)), int(m.group(2))) if m else (None, None)
     return tuple(  # type: ignore[return-value]
-        None if n == 0 or s not in (None, 1) else rtt
-        for rtt, n, s in zip(
-            _pair_floats(_RTT_3WHS_RE, body), _pair_ints(_RTT_SAMPLES_RE, body), syns, strict=True
-        )
+        None if s not in (None, 1) else rtt
+        for rtt, s in zip(_rtt(_RTT_3WHS_RE, body), syns, strict=True)
     )
 
 
@@ -256,9 +266,9 @@ def _parse_block(n: int, body: str) -> ConnStats:
     host_a = host_matches[0].group(2) if len(host_matches) >= 1 else ""
     host_b = host_matches[1].group(2) if len(host_matches) >= 2 else ""
     fwd_ctx, bwd_ctx = build_context_lines(body)
-    rtt_min_a, rtt_min_b = _pair_floats(_RTT_MIN_RE, body)
-    rtt_max_a, rtt_max_b = _pair_floats(_RTT_MAX_RE, body)
-    rtt_avg_a, rtt_avg_b = _pair_floats(_RTT_AVG_RE, body)
+    rtt_min_a, rtt_min_b = _rtt(_RTT_MIN_RE, body)
+    rtt_max_a, rtt_max_b = _rtt(_RTT_MAX_RE, body)
+    rtt_avg_a, rtt_avg_b = _rtt(_RTT_AVG_RE, body)
     mss_a, mss_b = _pair_ints(_MSS_RE, body)
     wscale_a, wscale_b = _pair_ints(_WS_RE, body)
     rtt_3whs_a, rtt_3whs_b = _rtt_3whs(body)

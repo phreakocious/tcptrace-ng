@@ -364,3 +364,26 @@ def test_unset_rtt_from_3whs_is_none():
     conns = parse_stats(body)
     assert conns[0].rtt_3whs_a is None
     assert conns[0].rtt_3whs_b is None
+
+
+def test_rtt_fields_with_no_samples_are_none():
+    # tcptrace 6.6.8's output format, values synthetic: a connection seen
+    # mid-stream; host c's one segment was never acked, so its side has no RTT
+    # sample and tcptrace prints 0.0 ms for each field.
+    # Taken as a measurement, rtt_min 0.0 sized throughput's stall yardstick
+    # to 0 and _detect_stalls divided by it.
+    body = """TCP connection 2:
+\thost c:        2001:db8::1:443
+\thost d:        2001:db8::2:50000
+\tcomplete conn: RESET\t(SYNs: 0)  (FINs: 0)
+   c->d:\t\t\t      d->c:
+     SYN/FIN pkts sent:       0/0           SYN/FIN pkts sent:       0/0
+     RTT samples:               0           RTT samples:               2
+     RTT min:                 0.0 ms        RTT min:               100.0 ms
+     RTT max:                 0.0 ms        RTT max:               120.0 ms
+     RTT avg:                 0.0 ms        RTT avg:               110.0 ms
+     RTT stdev:               0.0 ms        RTT stdev:               0.0 ms
+"""
+    c = parse_stats(body)[0]
+    assert (c.rtt_min_a, c.rtt_max_a, c.rtt_avg_a) == (None, None, None)
+    assert (c.rtt_min_b, c.rtt_max_b, c.rtt_avg_b) == (100.0, 120.0, 110.0)
