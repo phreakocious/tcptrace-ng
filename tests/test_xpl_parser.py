@@ -323,3 +323,51 @@ go
     # Final green line picks up the green state.
     green_lines = [c for c in plot.commands if isinstance(c, Line) and c.color == "green"]
     assert len(green_lines) == 1
+
+
+_WRAP_TSG = """timeval double
+title
+a_==>_b (time sequence graph)
+xlabel
+time
+ylabel
+sequence number
+white
+darrow 1000.000000 4294964296
+uarrow 1000.000000 4294966296
+line 1000.000000 4294964296 1000.000000 4294966296
+white
+darrow 1000.000000 4294966296
+uarrow 1000.000000 1000
+line 1000.000000 4294966296 1000.000000 1000
+white
+darrow 1000.000003 1000
+diamond 1000.000003 2448 white
+dot 1000.000003 2448 white
+line 1000.000003 1000 1000.000003 2448
+go
+"""
+
+
+def test_tsg_sequence_axis_unwraps_32bit_wrap():
+    # tsg lines in tcptrace 6.6.8's form, values synthetic: a sender crosses
+    # 2**32 mid-transfer. tcptrace draws the straddling segment from
+    # 4294966296 down to 1000; read as-is, every later segment sits below it
+    # and reads as already acked.
+    plot = parse_xpl(_WRAP_TSG)
+    segs = [(c.y1, c.y2) for c in plot.commands if isinstance(c, Line)]
+    assert segs == [
+        (4294964296, 4294966296),
+        (4294966296, 2**32 + 1000),
+        (2**32 + 1000, 2**32 + 2448),
+    ]
+
+
+def test_unwrap_leaves_non_sequence_plots_alone():
+    # A throughput above 2**31 B/s next to a low one is a real jump, not a wrap.
+    plot = parse_xpl(
+        _WRAP_TSG.replace("sequence number", "thruput (bytes/sec)").replace(
+            "4294966296", "3000000000"
+        )
+    )
+    assert [c.y2 for c in plot.commands if isinstance(c, Line)] == [3000000000, 1000, 2448]

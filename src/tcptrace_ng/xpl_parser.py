@@ -22,7 +22,7 @@ Pure module: input is text/bytes/path, output is data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -252,7 +252,29 @@ def parse_xpl(source: str | bytes | Path) -> XplPlot:
             plot.commands.append(cmd)
         i += 1
 
+    if plot.ylabel == "sequence number":
+        plot.commands = _unwrap_seq(plot.commands)
     return plot
+
+
+def _unwrap_seq(commands: list[XplCommand]) -> list[XplCommand]:
+    """tcptrace plots raw 32-bit sequence numbers, so a transfer that crosses
+    2**32 drops back to near 0 mid-plot. Commands come in time order and
+    neighbours lie within 2**31 of each other, so each y moves by the multiple
+    of 2**32 that puts it nearest the previous one."""
+    out: list[XplCommand] = []
+    ref: float | None = None
+    for cmd in commands:
+        ys = {}
+        for name in ("y", "y1", "y2"):
+            y = getattr(cmd, name, None)
+            if y is None:
+                continue
+            if ref is not None:
+                y += round((ref - y) / 2**32) * 2**32
+            ys[name] = ref = y
+        out.append(replace(cmd, **ys) if ys else cmd)
+    return out
 
 
 def _parse_text(parts: list[str], color: str, lines: list[str], i: int, n: int) -> Text | None:
